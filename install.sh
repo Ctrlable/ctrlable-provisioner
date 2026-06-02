@@ -136,7 +136,7 @@ create_lxc() {
 setup_pve_auth() {
     log "creating PVE API role and token"
 
-    local privs="Sys.Audit,VM.Allocate,VM.Audit,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,Datastore.AllocateSpace"
+    local privs="Sys.Audit,VM.Allocate,VM.Audit,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,Datastore.AllocateSpace,SDN.Use"
 
     # Create or update the role (PVE 9: use 'pveum role list' not 'pveum rolelist')
     if pveum role list 2>/dev/null | grep -q "CtrlableProvisioner"; then
