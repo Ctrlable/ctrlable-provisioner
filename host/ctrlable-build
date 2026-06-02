@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""
+ctrlable-build — runs on the PVE host, invoked via SSH command= restriction.
+
+authorized_keys entry:
+  command="/usr/local/bin/ctrlable-build",restrict,no-pty ssh-rsa AAAA...
+
+$SSH_ORIGINAL_COMMAND = "ctrlable-build <release>"
+
+Install:
+  cp host/ctrlable-build /usr/local/bin/ctrlable-build
+  chmod +x /usr/local/bin/ctrlable-build
+  mkdir -p /etc/ctrlable
+  cp host/ctrlable-build.conf.example /etc/ctrlable/build.conf
+  # edit build.conf with orchestrator URL + token
+
+Config file /etc/ctrlable/build.conf (JSON):
+  {
+    "orchestrator_url": "http://192.168.1.50:8000",
+    "build_token": "<same as BUILD_TOKEN in orchestrator .env>"
+  }
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def die(msg: str) -> None:
+    log(f"[ERROR] {msg}")
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Config + args
+# ---------------------------------------------------------------------------
+
+def parse_release() -> str:
+    original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
+    parts = original.split()
+    if len(parts) < 2 or parts[0] != "ctrlable-build":
+        die(f"Unexpected SSH_ORIGINAL_COMMAND: {original!r}")
+    return parts[1]
+
+
+def load_conf() -> dict:
+    path = Path("/etc/ctrlable/build.conf")
+    if not path.exists():
+        die(f"Missing config file: {path}")
+    return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers (stdlib only — no requests on host)
+# ---------------------------------------------------------------------------
+
+def fetch_json(url: str, token: str) -> dict:
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read())
+
+
+def fetch_text(url: str, token: str) -> str:
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode()
+
+
+# ---------------------------------------------------------------------------
+# PVE helpers
+# ---------------------------------------------------------------------------
+
+def list_vmids() -> set[int]:
+    lxc = subprocess.run(["pct", "list"], capture_output=True, text=True, check=True).stdout
+    qemu = subprocess.run(["qm", "list"], capture_output=True, text=True, check=True).stdout
+    ids: set[int] = set()
+    for output in (lxc, qemu):
+        for line in output.strip().splitlines()[1:]:
+            parts = line.split()
+            if parts:
+                try:
+                    ids.add(int(parts[0]))
+                except ValueError:
+                    pass
+    return ids
+
+
+def is_running(vmid: int) -> bool:
+    result = subprocess.run(
+        ["pct", "status", str(vmid)], capture_output=True, text=True
+    )
+    return "running" in result.stdout
+
+
+def pct_exec(vmid: int, *cmd: str) -> None:
+    subprocess.run(["pct", "exec", str(vmid), "--"] + list(cmd), check=True)
+
+
+def pct_push(vmid: int, src: str, dst: str) -> None:
+    subprocess.run(["pct", "push", str(vmid), src, dst], check=True)
+
+
+# ---------------------------------------------------------------------------
+# Build a single LXC template
+# ---------------------------------------------------------------------------
+
+def build_env(tmpl: dict) -> dict:
+    env = {**os.environ, "METHOD": "default", "DEBIAN_FRONTEND": "noninteractive"}
+    res = tmpl.get("resources") or {}
+    if res.get("cpu"):
+        env["var_cpu"] = str(res["cpu"])
+    if res.get("ram"):
+        env["var_ram"] = str(res["ram"])
+    if res.get("disk"):
+        env["var_disk"] = str(res["disk"])
+    os_spec = tmpl.get("os") or {}
+    if os_spec.get("distro"):
+        env["var_os"] = os_spec["distro"]
+    if os_spec.get("version"):
+        env["var_version"] = str(os_spec["version"])
+    if tmpl.get("unprivileged") is not None:
+        env["var_unprivileged"] = "1" if tmpl["unprivileged"] else "0"
+    if tmpl.get("portainer"):
+        env["var_install_portainer"] = "yes"
+    return env
+
+
+def script_url(ref: str, builder: str) -> str:
+    return f"https://raw.githubusercontent.com/community-scripts/ProxmoxVE/{ref}/{builder}"
+
+
+def write_firstboot_conf(vmid: int, name: str, orchestrator_url: str, secret: str) -> None:
+    conf = json.dumps({
+        "orchestrator_url": orchestrator_url,
+        "firstboot_secret": secret,
+        "template_type": name,
+    }, indent=2)
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        f.write(conf)
+        tmp = f.name
+    pct_exec(vmid, "mkdir", "-p", "/etc/ctrlable")
+    pct_push(vmid, tmp, "/etc/ctrlable/firstboot.conf")
+    pct_exec(vmid, "chmod", "600", "/etc/ctrlable/firstboot.conf")
+    os.unlink(tmp)
+
+
+def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, firstboot_sh: str) -> int:
+    ref = manifest["community_scripts_ref"]
+    url = script_url(ref, tmpl["builder"])
+    env = build_env(tmpl)
+
+    log(f"[{name}] downloading builder: {url}")
+    before = list_vmids()
+
+    log(f"[{name}] running community script (METHOD=default)")
+    result = subprocess.run(
+        ["bash", "-c", f'bash -c "$(curl -fsSL {url})"'],
+        env=env,
+    )
+    if result.returncode != 0:
+        die(f"[{name}] community script exited {result.returncode}")
+
+    after = list_vmids()
+    new_ids = after - before
+    if len(new_ids) != 1:
+        die(f"[{name}] expected 1 new VMID after build, got {new_ids}")
+    vmid = new_ids.pop()
+    log(f"[{name}] guest created: vmid={vmid}")
+
+    # Ensure container is running for exec/push
+    if not is_running(vmid):
+        log(f"[{name}] starting container for post-build steps")
+        subprocess.run(["pct", "start", str(vmid)], check=True)
+        import time; time.sleep(5)   # wait for boot
+
+    # Inject firstboot service + script
+    log(f"[{name}] injecting ctrlable-firstboot")
+    with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as f:
+        f.write(firstboot_service)
+        svc_tmp = f.name
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+        f.write(firstboot_sh)
+        sh_tmp = f.name
+
+    pct_push(vmid, svc_tmp, "/etc/systemd/system/ctrlable-firstboot.service")
+    pct_push(vmid, sh_tmp, "/usr/local/bin/ctrlable-firstboot.sh")
+    pct_exec(vmid, "chmod", "+x", "/usr/local/bin/ctrlable-firstboot.sh")
+    pct_exec(vmid, "systemctl", "enable", "ctrlable-firstboot.service")
+    os.unlink(svc_tmp)
+    os.unlink(sh_tmp)
+
+    # Bake per-template firstboot config
+    log(f"[{name}] writing /etc/ctrlable/firstboot.conf")
+    write_firstboot_conf(
+        vmid, name,
+        manifest.get("orchestrator_url", ""),
+        manifest.get("firstboot_secret", ""),
+    )
+
+    # Clean instance state that must not clone
+    log(f"[{name}] cleaning instance state")
+    pct_exec(vmid, "bash", "-c",
+        "truncate -s0 /etc/machine-id; "
+        "rm -f /var/lib/dbus/machine-id; "
+        "rm -f /etc/ssh/ssh_host_*; "
+        "apt-get clean -y 2>/dev/null || true; "
+        "journalctl --rotate --vacuum-time=1s 2>/dev/null || true"
+    )
+
+    # Stop + convert to template
+    log(f"[{name}] stopping container")
+    subprocess.run(["pct", "shutdown", str(vmid), "--timeout", "60"], check=True)
+
+    log(f"[{name}] converting to template")
+    subprocess.run(["pct", "template", str(vmid)], check=True)
+
+    log(f"[RESULT] name={name} vmid={vmid}")
+    return vmid
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    release = parse_release()
+    conf = load_conf()
+    base_url = conf["orchestrator_url"].rstrip("/")
+    token = conf["build_token"]
+
+    log(f"[ctrlable-build] release={release}")
+
+    # Fetch manifest from orchestrator
+    manifest_url = f"{base_url}/api/releases/{release}/manifest?token={token}"
+    log(f"fetching manifest: {manifest_url}")
+    try:
+        manifest = fetch_json(manifest_url, token)
+    except Exception as exc:
+        die(f"could not fetch manifest: {exc}")
+
+    # Fetch firstboot assets from orchestrator (single source of truth)
+    try:
+        firstboot_sh = fetch_text(f"{base_url}/api/provision/firstboot-script?token={token}", token)
+        firstboot_svc = fetch_text(f"{base_url}/api/provision/firstboot-service-unit?token={token}", token)
+    except Exception as exc:
+        die(f"could not fetch firstboot assets: {exc}")
+
+    built: list[str] = []
+    skipped: list[str] = []
+
+    for name, tmpl in manifest.get("templates", {}).items():
+        if tmpl["kind"] == "vm":
+            log(f"[SKIP] name={name} kind=vm (VM builds handled in M6)")
+            skipped.append(name)
+            continue
+
+        log(f"\n=== building template: {name} ===")
+        try:
+            build_lxc(name, tmpl, manifest, firstboot_svc, firstboot_sh)
+            built.append(name)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            die(f"[{name}] unhandled error: {exc}")
+
+    log(f"\n[ctrlable-build] done  built={built}  skipped={skipped}")
+
+
+if __name__ == "__main__":
+    main()

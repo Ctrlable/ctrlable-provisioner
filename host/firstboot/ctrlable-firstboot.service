@@ -1,0 +1,14 @@
+[Unit]
+Description=Ctrlable first-boot personalization
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/ctrlable-firstboot.sh
+ConditionPathExists=/etc/ctrlable/firstboot.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/ctrlable-firstboot.sh
+
+[Install]
+WantedBy=multi-user.target

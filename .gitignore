@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Secrets + runtime state
+backend/.env
+backend/ctrlable.db
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+*.swp

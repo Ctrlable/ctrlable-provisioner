@@ -1,0 +1,17 @@
+[Unit]
+Description=Ctrlable Provisioner
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ctrlable-provisioner/backend
+ExecStart=/opt/ctrlable-provisioner/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

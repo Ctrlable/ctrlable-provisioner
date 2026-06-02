@@ -1,0 +1,63 @@
+release: "2026.06"
+community_scripts_ref: "v2026.05.3"
+proxmox_min_version: "8.2"
+templates:
+  ctrlable-pro:
+    kind: vm
+    builder: vm/haos-vm.sh
+    haos_version: "15.1"
+    rebrand: true
+    base_backup: "ctrlable-base-2026.06.tar"
+    vmid_base: 9000
+  zwavejs:
+    kind: lxc
+    builder: ct/zwave-js-ui.sh
+    app_version: "9.x"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 8
+    unprivileged: true
+  zigbee2mqtt:
+    kind: lxc
+    builder: ct/zigbee2mqtt.sh
+    app_version: "1.x"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 8
+    unprivileged: true
+  docker-portainer:
+    kind: lxc
+    builder: ct/docker.sh
+    portainer: true
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 4
+      ram: 4096
+      disk: 20
+    unprivileged: false
+  frigate:
+    kind: lxc
+    builder: ct/frigate.sh
+    app_version: "0.14.x"
+    resources:
+      cpu: 4
+      ram: 4096
+      disk: 32
+    unprivileged: false
+  freepbx:
+    kind: lxc
+    builder: ct/freepbx.sh
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 16
