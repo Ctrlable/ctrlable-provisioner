@@ -136,9 +136,15 @@ create_lxc() {
 setup_pve_auth() {
     log "creating PVE API role and token"
 
+    # Create role — show output so errors are visible; exit 0 if it already exists
     pveum role add CtrlableProvisioner \
         --privs "VM.Allocate,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Monitor,VM.PowerMgmt,Datastore.AllocateSpace" \
-        2>/dev/null || true   # idempotent; comma-separated is required by pveum
+        || true
+
+    # Verify the role actually exists before we try to use it
+    if ! pveum rolelist 2>/dev/null | grep -q "CtrlableProvisioner"; then
+        die "CtrlableProvisioner role was not created — check pveum output above"
+    fi
 
     pveum user add provisioner@pve 2>/dev/null || true
     pveum aclmod / --user provisioner@pve --role CtrlableProvisioner
