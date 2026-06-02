@@ -215,6 +215,15 @@ class StateDB:
                 (status, activated_at, hostname),
             )
 
+    def get_instance_by_vmid(self, vmid: int) -> sqlite3.Row | None:
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT i.*, p.site_name, p.release"
+                " FROM instances i JOIN projects p ON p.id = i.project_id"
+                " WHERE i.vmid = ?",
+                (vmid,),
+            ).fetchone()
+
     def get_instance_by_hostname(self, hostname: str) -> sqlite3.Row | None:
         with self._conn() as conn:
             return conn.execute(

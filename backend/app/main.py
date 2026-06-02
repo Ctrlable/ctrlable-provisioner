@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from .build import trigger_build
 from .config import get_settings
+from .deploy import deploy_instance, deploy_stack_async
 from .manifest import load_all_manifests
 from .provision import complete_provisioning, get_assignment
 from .proxmox import ProxmoxClient
@@ -173,6 +175,100 @@ def provision_complete(req: CompleteRequest) -> dict:
         raise HTTPException(404, str(exc))
     except PermissionError as exc:
         raise HTTPException(403, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Projects + Deploy (M5)
+# ---------------------------------------------------------------------------
+
+class DeployStackRequest(BaseModel):
+    site_name: str
+    release: str
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_pass: str = ""
+    zigbee_coordinator: str = ""   # TCP URL for zigbee2mqtt coordinator
+    zwave_coordinator: str = ""    # TCP URL for z-wave coordinator
+
+
+@app.post("/api/projects", status_code=202)
+async def create_project_deploy(req: DeployStackRequest) -> dict:
+    if not settings.configured():
+        raise HTTPException(400, "Proxmox not configured")
+    manifests = load_all_manifests()
+    if req.release not in manifests:
+        raise HTTPException(404, f"release {req.release!r} not found")
+
+    project_id = db.create_project(req.site_name, req.release)
+    asyncio.create_task(
+        deploy_stack_async(project_id, req.release, req.model_dump(), db, _pve())
+    )
+    return {"project_id": project_id, "status": "deploying"}
+
+
+class AddInstanceRequest(BaseModel):
+    template_name: str
+    wire_to: dict = {}
+
+
+@app.post("/api/projects/{project_id}/instances", status_code=202)
+async def add_instance(project_id: int, req: AddInstanceRequest) -> dict:
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(404)
+    try:
+        inst = await asyncio.to_thread(
+            deploy_instance, project_id, req.template_name,
+            project["release"], req.wire_to, db, _pve()
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return inst
+
+
+@app.get("/api/projects")
+def list_projects_api() -> list[dict]:
+    result = []
+    for p in db.list_projects():
+        instances = db.list_instances(p["id"])
+        result.append({**dict(p), "instances": [dict(i) for i in instances]})
+    return result
+
+
+@app.get("/api/projects/{project_id}")
+def get_project_api(project_id: int) -> dict:
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(404)
+    instances = db.list_instances(project["id"])
+    return {**dict(project), "instances": [dict(i) for i in instances]}
+
+
+# ---------------------------------------------------------------------------
+# Guest lifecycle controls
+# ---------------------------------------------------------------------------
+
+@app.post("/api/guests/{vmid}/{action}")
+def guest_action(vmid: int, action: str) -> dict:
+    if action not in ("start", "stop", "reboot"):
+        raise HTTPException(400, f"invalid action: {action!r}")
+
+    inst = db.get_instance_by_vmid(vmid)
+    kind = "lxc"
+    if inst:
+        tmpl = db.get_template(inst["release"], inst["type"])
+        if tmpl:
+            kind = tmpl["kind"]
+
+    px = _pve()
+    if action == "start":
+        px.start_guest(kind, vmid)
+    elif action == "stop":
+        px.stop_guest(kind, vmid)
+    elif action == "reboot":
+        px.reboot_guest(kind, vmid)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

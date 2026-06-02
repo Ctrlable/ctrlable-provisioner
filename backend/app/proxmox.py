@@ -1,3 +1,5 @@
+import random
+import time
 from dataclasses import dataclass
 
 from proxmoxer import ProxmoxAPI
@@ -81,3 +83,54 @@ class ProxmoxClient:
                 maxmem=g.get("maxmem", 0),
             ))
         return sorted(guests, key=lambda g: g.name)
+
+    # ---------------------------------------------------------------------------
+    # Deploy plane — clone / configure / lifecycle
+    # ---------------------------------------------------------------------------
+
+    def _wait_task(self, upid: str, timeout: int = 120) -> None:
+        node = upid.split(":")[1]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            result = self._px.nodes(node).tasks(upid).status.get()
+            if result.get("status") == "stopped":
+                if result.get("exitstatus") != "OK":
+                    raise RuntimeError(f"PVE task failed: {result.get('exitstatus')}")
+                return
+            time.sleep(2)
+        raise TimeoutError(f"PVE task {upid} did not complete within {timeout}s")
+
+    def next_vmid(self) -> int:
+        return int(self._px.cluster.nextid.get())
+
+    def clone_lxc(self, tmpl_vmid: int, newid: int, hostname: str) -> None:
+        upid = self._px.nodes(self.node).lxc(tmpl_vmid).clone.post(
+            newid=newid,
+            hostname=hostname,
+            full=1,
+        )
+        self._wait_task(upid)
+
+    @staticmethod
+    def _random_mac() -> str:
+        # Locally administered, unicast
+        octets = [0x02, 0x00] + [random.randint(0x00, 0xFF) for _ in range(4)]
+        return ":".join(f"{b:02x}" for b in octets)
+
+    def set_lxc_fresh_mac(self, vmid: int) -> str:
+        mac = self._random_mac()
+        config = self._px.nodes(self.node).lxc(vmid).config.get()
+        net0 = config.get("net0", "name=eth0,bridge=vmbr0,ip=dhcp")
+        parts = [p for p in net0.split(",") if not p.lower().startswith("hwaddr=")]
+        parts.append(f"hwaddr={mac}")
+        self._px.nodes(self.node).lxc(vmid).config.put(net0=",".join(parts))
+        return mac
+
+    def start_guest(self, kind: str, vmid: int) -> None:
+        getattr(self._px.nodes(self.node), kind)(vmid).status.start.post()
+
+    def stop_guest(self, kind: str, vmid: int) -> None:
+        getattr(self._px.nodes(self.node), kind)(vmid).status.stop.post()
+
+    def reboot_guest(self, kind: str, vmid: int) -> None:
+        getattr(self._px.nodes(self.node), kind)(vmid).status.reboot.post()
