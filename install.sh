@@ -272,6 +272,11 @@ ENV
     printf '%s\n' "$env_content" > /tmp/ctrlable.env
     pct_push /tmp/ctrlable.env /opt/ctrlable-provisioner/backend/.env
     pct_exec chmod 600 /opt/ctrlable-provisioner/backend/.env
+
+    # Copy build SSH private key into the orchestrator LXC so it can reach the host
+    pct_exec mkdir -p /etc/ctrlable
+    pct_push /etc/ctrlable/build_key /etc/ctrlable/build_key
+    pct_exec chmod 600 /etc/ctrlable/build_key
     rm /tmp/ctrlable.env
 
     log "writing host build.conf"

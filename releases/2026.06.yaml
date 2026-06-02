@@ -1,5 +1,5 @@
 release: "2026.06"
-community_scripts_ref: "v2026.05.3"
+community_scripts_ref: "2026-06-01"
 proxmox_min_version: "8.2"
 templates:
   ctrlable-pro:
