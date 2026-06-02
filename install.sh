@@ -136,18 +136,21 @@ create_lxc() {
 setup_pve_auth() {
     log "creating PVE API role and token"
 
-    # Create role — show output so errors are visible; exit 0 if it already exists
-    pveum role add CtrlableProvisioner \
-        --privs "Sys.Audit,VM.Allocate,VM.Audit,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,Datastore.AllocateSpace" \
-        || true
+    local privs="Sys.Audit,VM.Allocate,VM.Audit,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,Datastore.AllocateSpace"
 
-    # Verify the role actually exists before we try to use it
-    if ! pveum rolelist 2>/dev/null | grep -q "CtrlableProvisioner"; then
-        die "CtrlableProvisioner role was not created — check pveum output above"
+    # Create or update the role (PVE 9: use 'pveum role list' not 'pveum rolelist')
+    if pveum role list 2>/dev/null | grep -q "CtrlableProvisioner"; then
+        pveum role modify CtrlableProvisioner --privs "$privs"
+    else
+        pveum role add CtrlableProvisioner --privs "$privs"
     fi
 
+    pveum role list 2>/dev/null | grep -q "CtrlableProvisioner" \
+        || die "CtrlableProvisioner role was not created"
+
     pveum user add provisioner@pve 2>/dev/null || true
-    pveum aclmod / --user provisioner@pve --role CtrlableProvisioner
+    # PVE 9: pveum acl modify (--users / --roles); pveum aclmod is a deprecated alias
+    pveum acl modify / --users provisioner@pve --roles CtrlableProvisioner
 
     # Revoke first so re-runs don't fail on "token exists"
     pveum user token remove provisioner@pve provisioner 2>/dev/null || true
