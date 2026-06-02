@@ -138,7 +138,7 @@ setup_pve_auth() {
 
     # Create role — show output so errors are visible; exit 0 if it already exists
     pveum role add CtrlableProvisioner \
-        --privs "VM.Allocate,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Monitor,VM.PowerMgmt,Datastore.AllocateSpace" \
+        --privs "Sys.Audit,VM.Allocate,VM.Audit,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,Datastore.AllocateSpace" \
         || true
 
     # Verify the role actually exists before we try to use it
