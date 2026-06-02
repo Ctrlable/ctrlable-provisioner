@@ -238,7 +238,7 @@ setup_lxc() {
     log "building frontend"
     pct_exec bash -c "
         cd /opt/ctrlable-provisioner/frontend
-        npm ci --silent
+        npm install --silent
         npm run build
     "
 
