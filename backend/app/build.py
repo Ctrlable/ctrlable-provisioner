@@ -41,6 +41,8 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=30",   # keepalive every 30s
+        "-o", "ServerAliveCountMax=60",   # tolerate 30 min of silence
         f"root@{settings.pve_host}",
         f"ctrlable-build {release}",
     ]
