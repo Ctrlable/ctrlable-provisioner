@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -130,23 +131,23 @@ def _firstboot_path(filename: str) -> Path:
 
 
 @app.get("/api/provision/firstboot-script")
-def firstboot_script(token: str = Query(...)) -> str:
+def firstboot_script(token: str = Query(...)) -> Response:
     """Shell script baked into Debian LXC templates; fetched by ctrlable-build."""
     _check_build_token(token)
     p = _firstboot_path("ctrlable-firstboot.sh")
     if not p.exists():
         raise HTTPException(404, "firstboot script not found")
-    return p.read_text()
+    return Response(content=p.read_text(), media_type="text/plain")
 
 
 @app.get("/api/provision/firstboot-service-unit")
-def firstboot_service_unit(token: str = Query(...)) -> str:
+def firstboot_service_unit(token: str = Query(...)) -> Response:
     """Systemd unit baked into Debian LXC templates; fetched by ctrlable-build."""
     _check_build_token(token)
     p = _firstboot_path("ctrlable-firstboot.service")
     if not p.exists():
         raise HTTPException(404, "firstboot service unit not found")
-    return p.read_text()
+    return Response(content=p.read_text(), media_type="text/plain")
 
 
 @app.get("/api/provision/assignment")
