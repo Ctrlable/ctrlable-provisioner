@@ -117,7 +117,14 @@ def pct_push(vmid: int, src: str, dst: str) -> None:
 # ---------------------------------------------------------------------------
 
 def build_env(tmpl: dict) -> dict:
-    env = {**os.environ, "METHOD": "default", "DEBIAN_FRONTEND": "noninteractive"}
+    env = {
+        **os.environ,
+        "METHOD": "default",
+        "DEBIAN_FRONTEND": "noninteractive",
+        # TERM=xterm prevents 'clear' from failing in the community scripts
+        # when running without an attached TTY.
+        "TERM": "xterm",
+    }
     res = tmpl.get("resources") or {}
     if res.get("cpu"):
         env["var_cpu"] = str(res["cpu"])
@@ -165,10 +172,9 @@ def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, fir
     before = list_vmids()
 
     log(f"[{name}] running community script (METHOD=default)")
-    result = subprocess.run(
-        ["bash", "-c", f'bash -c "$(curl -fsSL {url})"'],
-        env=env,
-    )
+    # Pipe the script to bash stdin to avoid shell quoting issues with the URL.
+    script = fetch_text(url, "")
+    result = subprocess.run(["bash", "-s"], input=script.encode(), env=env)
     if result.returncode != 0:
         die(f"[{name}] community script exited {result.returncode}")
 
