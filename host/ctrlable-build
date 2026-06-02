@@ -124,9 +124,10 @@ def build_env(tmpl: dict) -> dict:
         **os.environ,
         "METHOD": "default",
         "DEBIAN_FRONTEND": "noninteractive",
-        # TERM=xterm prevents 'clear' from failing in the community scripts
-        # when running without an attached TTY.
         "TERM": "xterm",
+        # community-scripts install_script() checks $mode to bypass its
+        # whiptail menu: "1" = Default Install, no interactive prompt.
+        "mode": "1",
     }
     res = tmpl.get("resources") or {}
     if res.get("cpu"):
