@@ -72,10 +72,6 @@ preflight() {
     PVE_HOST=$(hostname -I | awk '{print $1}')
     ok "PVE node: ${PVE_NODE} (${PVE_HOST})"
 
-    if pct status "$VMID" >/dev/null 2>&1; then
-        die "VMID $VMID already exists. Use --vmid to choose a free ID."
-    fi
-
     if [[ -n "$LOCAL_SRC" ]]; then
         [[ -d "$LOCAL_SRC/backend" ]] || die "--local path does not look like the provisioner repo: $LOCAL_SRC"
         LOCAL_SRC=$(realpath "$LOCAL_SRC")
@@ -105,20 +101,24 @@ get_template() {
 # Create + start orchestrator LXC
 # ---------------------------------------------------------------------------
 create_lxc() {
-    log "creating orchestrator LXC (VMID=$VMID, storage=$STORAGE, bridge=$BRIDGE)"
-    pct create "$VMID" "$TEMPLATE_STOR" \
-        --hostname  "$LXC_HOSTNAME" \
-        --memory    "$MEMORY" \
-        --cores     "$CORES" \
-        --rootfs    "${STORAGE}:${DISK_SIZE}" \
-        --net0      "name=eth0,bridge=${BRIDGE},ip=dhcp" \
-        --unprivileged 1 \
-        --features  nesting=1 \
-        --start     0
+    if pct status "$VMID" >/dev/null 2>&1; then
+        log "VMID $VMID already exists — resuming"
+        pct start "$VMID" 2>/dev/null || true
+    else
+        log "creating orchestrator LXC (VMID=$VMID, storage=$STORAGE, bridge=$BRIDGE)"
+        pct create "$VMID" "$TEMPLATE_STOR" \
+            --hostname  "$LXC_HOSTNAME" \
+            --memory    "$MEMORY" \
+            --cores     "$CORES" \
+            --rootfs    "${STORAGE}:${DISK_SIZE}" \
+            --net0      "name=eth0,bridge=${BRIDGE},ip=dhcp" \
+            --unprivileged 1 \
+            --features  nesting=1 \
+            --start     0
+        pct start "$VMID"
+    fi
 
-    pct start "$VMID"
-    log "LXC started — waiting for DHCP"
-
+    log "waiting for DHCP"
     local ip="" i
     for i in $(seq 1 40); do
         ip=$(pct exec "$VMID" -- hostname -I 2>/dev/null | awk '{print $1}') || true
@@ -137,10 +137,8 @@ setup_pve_auth() {
     log "creating PVE API role and token"
 
     pveum role add CtrlableProvisioner \
-        --privs "VM.Allocate VM.Clone VM.Config.CPU VM.Config.Disk VM.Config.Memory \
-                 VM.Config.Network VM.Config.Options VM.Monitor VM.PowerMgmt \
-                 Datastore.AllocateSpace" \
-        2>/dev/null || true   # idempotent
+        --privs "VM.Allocate,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Monitor,VM.PowerMgmt,Datastore.AllocateSpace" \
+        2>/dev/null || true   # idempotent; comma-separated is required by pveum
 
     pveum user add provisioner@pve 2>/dev/null || true
     pveum aclmod / --user provisioner@pve --role CtrlableProvisioner
