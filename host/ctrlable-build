@@ -128,6 +128,9 @@ def build_env(tmpl: dict) -> dict:
         # community-scripts install_script() checks $mode to bypass its
         # whiptail menu: "1" = Default Install, no interactive prompt.
         "mode": "1",
+        # Prevent "unbound variable" errors in community-scripts summary sections
+        # that reference $IP (e.g. docker.sh Portainer URL) when running non-interactively.
+        "IP": "",
     }
     res = tmpl.get("resources") or {}
     if res.get("cpu"):
@@ -267,12 +270,26 @@ def main() -> None:
     except Exception as exc:
         die(f"could not fetch firstboot assets: {exc}")
 
+    # Fetch already-built templates so we can skip them on a resumed build
+    try:
+        existing = fetch_json(f"{base_url}/api/releases/{release}/templates?token={token}", token)
+        already_built = {t["name"]: t["template_vmid"] for t in existing}
+    except Exception:
+        already_built = {}
+    if already_built:
+        log(f"[ctrlable-build] skipping already-built: {sorted(already_built)}")
+
     built: list[str] = []
     skipped: list[str] = []
 
     for name, tmpl in manifest.get("templates", {}).items():
         if tmpl["kind"] == "vm":
             log(f"[SKIP] name={name} kind=vm (VM builds handled in M6)")
+            skipped.append(name)
+            continue
+
+        if name in already_built:
+            log(f"[SKIP] name={name} already built vmid={already_built[name]}")
             skipped.append(name)
             continue
 

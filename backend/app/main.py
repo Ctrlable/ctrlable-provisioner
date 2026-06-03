@@ -109,6 +109,12 @@ async def start_build(req: BuildRequest) -> dict:
     return {"build_id": build_id}
 
 
+@app.get("/api/releases/{release}/templates")
+def list_release_templates(release: str, token: str = Query(...)) -> list[dict]:
+    _check_build_token(token)
+    return [dict(r) for r in db.list_templates(release)]
+
+
 @app.get("/api/builds")
 def list_builds() -> list[dict]:
     return [dict(r) for r in db.list_builds()]

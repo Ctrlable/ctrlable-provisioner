@@ -53,19 +53,13 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
         stderr=asyncio.subprocess.STDOUT,
     )
 
-    results: dict[str, int] = {}
     async for raw in proc.stdout:
         line = raw.decode(errors="replace")
         db.append_build_log(build_id, line)
 
         m = _RESULT_RE.search(line)
         if m:
-            results[m.group(1)] = int(m.group(2))
-
-    await proc.wait()
-
-    if proc.returncode == 0:
-        for name, vmid in results.items():
+            name, vmid = m.group(1), int(m.group(2))
             tmpl = db.get_template(release, name)
             kind = tmpl["kind"] if tmpl else "lxc"
             db.record_template(
@@ -76,6 +70,6 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
                 app_version=None,
                 builder_ref=settings.community_scripts_ref_for(release),
             )
-        db.finish_build(build_id, "success")
-    else:
-        db.finish_build(build_id, "failed")
+
+    await proc.wait()
+    db.finish_build(build_id, "success" if proc.returncode == 0 else "failed")
