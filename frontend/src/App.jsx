@@ -753,24 +753,39 @@ function PlatformTab() {
         </div>
       ) : (
         <div className="card">
-          <h2>Enroll in Ctrlable Portal</h2>
-          <p className="form-note" style={{marginBottom:'1rem'}}>
-            Enrolling connects this orchestrator to portal.ctrlable.com via WireGuard,
-            enabling remote management and monitoring.
-            Generate an enrollment token in the portal under <strong>Devices → Add Device</strong>.
-          </p>
+          {status.pending_token ? (
+            <div className="platform-pending">
+              <div style={{display:'flex',alignItems:'center',gap:'.6rem',marginBottom:'1rem'}}>
+                <span className="status-dot" style={{background:'#f59e0b',display:'inline-block'}} />
+                <strong>Waiting for internet — auto-enrollment pending</strong>
+              </div>
+              <p className="form-note">
+                An enrollment token was provided during installation. The orchestrator will
+                connect to portal.ctrlable.com automatically once internet access is detected.
+              </p>
+            </div>
+          ) : (
+            <>
+              <h2>Enroll in Ctrlable Portal</h2>
+              <p className="form-note" style={{marginBottom:'1rem'}}>
+                Enrolling connects this orchestrator to portal.ctrlable.com via WireGuard,
+                enabling remote management and monitoring.
+                Generate an enrollment token in the portal under <strong>Devices → Add Device</strong>.
+              </p>
+            </>
+          )}
           {error && <div className="banner error">{error}</div>}
-          <label className="field"><span>Enrollment Token</span>
+          <label className="field" style={{marginTop: status.pending_token ? '1rem' : 0}}>
+            <span>{status.pending_token ? 'Re-enroll with a new token' : 'Enrollment Token'}</span>
             <input
               value={token}
               onChange={e => setToken(e.target.value)}
               placeholder="Paste token from portal.ctrlable.com"
-              autoFocus
             />
           </label>
           <button className="btn-primary" style={{marginTop:'.75rem'}}
             onClick={enroll} disabled={enrolling || !token.trim()}>
-            {enrolling ? 'Enrolling…' : 'Enroll'}
+            {enrolling ? 'Enrolling…' : status.pending_token ? 'Re-enroll' : 'Enroll'}
           </button>
         </div>
       )}

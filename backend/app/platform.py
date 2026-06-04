@@ -25,8 +25,10 @@ log = logging.getLogger(__name__)
 PORTAL_BASE = "https://portal.ctrlable.com"
 WG_DIR = Path("/etc/wireguard")
 AGENT_CONF_DIR = Path("/etc/ctrlable")
+ENROLL_TOKEN_FILE = AGENT_CONF_DIR / "enroll.token"
 
 _heartbeat_task: asyncio.Task | None = None
+_auto_enroll_task: asyncio.Task | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +69,70 @@ def _portal_post(path: str, payload: dict, token: str | None = None) -> dict:
         raise ValueError(f"Portal returned {e.code}: {detail}")
     except Exception as e:
         raise ValueError(f"Portal request failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Token file helpers
+# ---------------------------------------------------------------------------
+
+def save_enroll_token(token: str) -> None:
+    AGENT_CONF_DIR.mkdir(parents=True, exist_ok=True)
+    ENROLL_TOKEN_FILE.write_text(token.strip())
+    ENROLL_TOKEN_FILE.chmod(0o600)
+
+
+def _load_pending_token() -> str | None:
+    if ENROLL_TOKEN_FILE.exists():
+        t = ENROLL_TOKEN_FILE.read_text().strip()
+        return t or None
+    return None
+
+
+def _clear_pending_token() -> None:
+    ENROLL_TOKEN_FILE.unlink(missing_ok=True)
+
+
+def _has_internet() -> bool:
+    try:
+        urllib.request.urlopen(f"{PORTAL_BASE}/health", timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Auto-enrollment
+# ---------------------------------------------------------------------------
+
+def start_auto_enroll(db: "StateDB") -> None:
+    """Launch background task that enrolls as soon as internet is reachable."""
+    global _auto_enroll_task
+    if _auto_enroll_task and not _auto_enroll_task.done():
+        return
+    _auto_enroll_task = asyncio.create_task(_auto_enroll_loop(db))
+
+
+async def _auto_enroll_loop(db: "StateDB") -> None:
+    """Retry enrollment every 30 s until the token is consumed or already enrolled."""
+    while True:
+        token = _load_pending_token()
+        if not token:
+            return
+
+        if db.get_platform_state():
+            _clear_pending_token()
+            return
+
+        if await asyncio.to_thread(_has_internet):
+            try:
+                await asyncio.to_thread(enroll, token, db)
+                log.info("Auto-enrollment successful")
+                _clear_pending_token()
+                return
+            except Exception as e:
+                log.warning("Auto-enrollment failed: %s — will retry in 30 s", e)
+
+        await asyncio.sleep(30)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +200,10 @@ def enroll(token: str, db: "StateDB") -> dict:
 def get_status(db: "StateDB") -> dict:
     state = db.get_platform_state()
     if not state:
-        return {"enrolled": False}
+        return {
+            "enrolled": False,
+            "pending_token": _load_pending_token() is not None,
+        }
     return {
         "enrolled": True,
         "device_id": state["device_id"],
@@ -142,6 +211,7 @@ def get_status(db: "StateDB") -> dict:
         "wg_iface": state["wg_iface"],
         "enrolled_at": state["enrolled_at"],
         "portal_url": f"{PORTAL_BASE}/devices/{state['device_id']}",
+        "pending_token": False,
     }
 
 

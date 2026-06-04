@@ -14,7 +14,7 @@ from .build import trigger_build
 from .config import get_settings
 from .deploy import deploy_instance, deploy_stack_async
 from .manifest import load_all_manifests
-from .platform import enroll as _platform_enroll, get_status as _platform_get_status, start_heartbeat
+from .platform import enroll as _platform_enroll, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
 from .provision import complete_provisioning, get_assignment
 from .proxmox import ProxmoxClient
 from .state import StateDB
@@ -34,10 +34,12 @@ async def lifespan(app: FastAPI):
             "Set both in .env to enable authentication.",
             stacklevel=1,
         )
-    # Resume portal heartbeat if previously enrolled
+    # Resume portal heartbeat if previously enrolled; otherwise start auto-enroll watcher
     pstate = db.get_platform_state()
     if pstate:
         start_heartbeat(pstate["device_id"], pstate["device_token"])
+    else:
+        start_auto_enroll(db)
     yield
 
 

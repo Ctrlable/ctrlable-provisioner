@@ -23,23 +23,25 @@ STORAGE=local-lvm
 REPO_URL=https://github.com/ctrlable/ctrlable-provisioner
 REPO_REF=main
 LOCAL_SRC=""            # path to local repo checkout (--local <path>)
+ENROLL_TOKEN=""         # portal.ctrlable.com enrollment token (--enroll-token TOKEN)
 
 # ---------------------------------------------------------------------------
 # Arg parsing
 # ---------------------------------------------------------------------------
 usage() {
-    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF]"
+    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF] [--enroll-token TOKEN]"
     exit 1
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --vmid)    VMID="$2";      shift 2 ;;
-        --bridge)  BRIDGE="$2";    shift 2 ;;
-        --storage) STORAGE="$2";   shift 2 ;;
-        --local)   LOCAL_SRC="$2"; shift 2 ;;
-        --repo)    REPO_URL="$2";  shift 2 ;;
-        --ref)     REPO_REF="$2";  shift 2 ;;
+        --vmid)         VMID="$2";          shift 2 ;;
+        --bridge)       BRIDGE="$2";        shift 2 ;;
+        --storage)      STORAGE="$2";       shift 2 ;;
+        --local)        LOCAL_SRC="$2";     shift 2 ;;
+        --repo)         REPO_URL="$2";      shift 2 ;;
+        --ref)          REPO_REF="$2";      shift 2 ;;
+        --enroll-token) ENROLL_TOKEN="$2";  shift 2 ;;
         --help|-h) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -277,6 +279,16 @@ ENV
     pct_exec mkdir -p /etc/ctrlable
     pct_push /etc/ctrlable/build_key /etc/ctrlable/build_key
     pct_exec chmod 600 /etc/ctrlable/build_key
+
+    # Store portal enrollment token for auto-enrollment on first boot
+    if [[ -n "$ENROLL_TOKEN" ]]; then
+        printf '%s\n' "$ENROLL_TOKEN" > /tmp/ctrlable_enroll.token
+        pct_push /tmp/ctrlable_enroll.token /etc/ctrlable/enroll.token
+        pct_exec chmod 600 /etc/ctrlable/enroll.token
+        rm /tmp/ctrlable_enroll.token
+        ok "enrollment token stored — orchestrator will auto-enroll on first internet access"
+    fi
+
     rm /tmp/ctrlable.env
 
     log "writing host build.conf"
@@ -331,7 +343,11 @@ print_summary() {
     echo -e "  Build key         : /etc/ctrlable/build_key"
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
-    echo "  1. Open the web UI"
+    if [[ -z "$ENROLL_TOKEN" ]]; then
+    echo "  1. Open the web UI → Platform tab → paste an enrollment token"
+    else
+    echo "  1. Orchestrator will auto-enroll in portal.ctrlable.com once internet is detected"
+    fi
     echo "  2. Go to Releases → Build release 2026.06"
     echo "  3. Wait for all LXC templates to build (~10 min)"
     echo "  4. Deploy your first stack"
