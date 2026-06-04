@@ -738,48 +738,50 @@ function PlatformTab() {
   return (
     <div className="platform-tab">
       {status.enrolled ? (
-        <div className="card">
-          <div className="platform-enrolled">
-            <span className="status-dot" style={{background:'#22c55e', display:'inline-block', marginRight:'.5rem'}} />
-            <strong>Enrolled in Ctrlable Portal</strong>
-          </div>
-          <div className="platform-details">
-            <div className="platform-row"><span className="muted">Device ID</span><code>{status.device_id}</code></div>
-            <div className="platform-row"><span className="muted">Tunnel IP</span><code>{status.tunnel_ip}</code></div>
-            <div className="platform-row"><span className="muted">WG Interface</span><code>{status.wg_iface}</code></div>
-            <div className="platform-row"><span className="muted">Enrolled</span><span>{new Date(status.enrolled_at).toLocaleString()}</span></div>
-          </div>
-          <a className="btn-xs" href={status.portal_url} target="_blank" rel="noreferrer" style={{marginTop:'1rem',display:'inline-block'}}>
-            View in Portal →
-          </a>
-        </div>
-
-      {/* LAN access status */}
-      {lan && (
-        <div className="card" style={{marginTop:'1rem'}}>
-          <div style={{display:'flex',alignItems:'center',gap:'.6rem',marginBottom:'1rem'}}>
-            <span className="status-dot" style={{background: lan.configured ? '#22c55e' : '#f59e0b', display:'inline-block'}} />
-            <strong>LAN Access</strong>
-          </div>
-          {lan.configured ? (
-            <div className="platform-details">
-              <div className="platform-row"><span className="muted">Interface</span><code>{lan.lan_iface}</code></div>
-              <div className="platform-row"><span className="muted">LAN Subnet</span><code>{lan.lan_subnet}</code></div>
-              <div className="platform-row">
-                <span className="muted">Proxy Subnet</span>
-                {lan.proxy_subnet
-                  ? <code>{lan.proxy_subnet}</code>
-                  : <span className="muted">Pending portal allocation…</span>}
-              </div>
-              <div className="platform-row"><span className="muted">NAT</span>
-                <span className="tag" style={{background:'#22c55e',color:'#fff'}}>active</span>
-              </div>
+        <>
+          <div className="card">
+            <div className="platform-enrolled">
+              <span className="status-dot" style={{background:'#22c55e', display:'inline-block', marginRight:'.5rem'}} />
+              <strong>Enrolled in Ctrlable Portal</strong>
             </div>
-          ) : (
-            <p className="form-note">LAN not yet detected. Will configure automatically after tunnel is up.</p>
-          )}
-        </div>
-      )}
+            <div className="platform-details">
+              <div className="platform-row"><span className="muted">Device ID</span><code>{status.device_id}</code></div>
+              <div className="platform-row"><span className="muted">Tunnel IP</span><code>{status.tunnel_ip}</code></div>
+              <div className="platform-row"><span className="muted">WG Interface</span><code>{status.wg_iface}</code></div>
+              <div className="platform-row"><span className="muted">Enrolled</span><span>{new Date(status.enrolled_at).toLocaleString()}</span></div>
+            </div>
+            <a className="btn-xs" href={status.portal_url} target="_blank" rel="noreferrer" style={{marginTop:'1rem',display:'inline-block'}}>
+              View in Portal →
+            </a>
+          </div>
+
+          {/* LAN access */}
+          <div className="card" style={{marginTop:'1rem'}}>
+            <div style={{display:'flex',alignItems:'center',gap:'.6rem',marginBottom:'1rem'}}>
+              <span className="status-dot" style={{
+                background: lan?.configured ? '#22c55e' : '#f59e0b', display:'inline-block'
+              }} />
+              <strong>LAN Access</strong>
+            </div>
+            {lan?.configured ? (
+              <div className="platform-details">
+                <div className="platform-row"><span className="muted">Interface</span><code>{lan.lan_iface}</code></div>
+                <div className="platform-row"><span className="muted">LAN Subnet</span><code>{lan.lan_subnet}</code></div>
+                <div className="platform-row">
+                  <span className="muted">Proxy Subnet</span>
+                  {lan.proxy_subnet
+                    ? <code>{lan.proxy_subnet}</code>
+                    : <span className="muted">Pending portal allocation…</span>}
+                </div>
+                <div className="platform-row"><span className="muted">NAT</span>
+                  <span className="tag" style={{background:'#22c55e',color:'#fff'}}>active</span>
+                </div>
+              </div>
+            ) : (
+              <p className="form-note">LAN not yet detected — will configure automatically.</p>
+            )}
+          </div>
+        </>
       ) : (
         <div className="card">
           {status.pending_token ? (
