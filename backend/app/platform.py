@@ -218,6 +218,17 @@ def ensure_tunnel_up(wg_iface: str) -> None:
     result = subprocess.run(["ip", "link", "show", wg_iface], capture_output=True)
     if result.returncode == 0:
         return  # interface already exists
+
+    # Strip DNS= lines from existing conf (resolvconf may not be installed)
+    conf_file = WG_DIR / f"{wg_iface}.conf"
+    if conf_file.exists():
+        content = conf_file.read_text()
+        stripped = "\n".join(
+            l for l in content.splitlines() if not l.strip().startswith("DNS")
+        ) + "\n"
+        if stripped != content:
+            conf_file.write_text(stripped)
+
     if not shutil.which("wg-quick"):
         subprocess.run(["apt-get", "install", "-y", "-qq", "wireguard-tools"],
                        capture_output=True)
