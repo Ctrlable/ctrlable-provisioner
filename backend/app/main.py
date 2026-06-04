@@ -1,4 +1,5 @@
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -83,6 +84,36 @@ def login(req: LoginRequest) -> dict:
 @app.get("/api/auth/status")
 def auth_status() -> dict:
     return {"auth_enabled": auth_enabled(settings)}
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/auth/change-password")
+def change_password(
+    req: ChangePasswordRequest,
+    _: str | None = Depends(require_auth),
+) -> dict:
+    if not auth_enabled(settings):
+        raise HTTPException(400, "Auth not enabled")
+    if not verify_password(req.current_password, settings.admin_password_hash):
+        raise HTTPException(401, "Current password is incorrect")
+    if len(req.new_password) < 8:
+        raise HTTPException(400, "New password must be at least 8 characters")
+    new_hash = hash_password(req.new_password)
+    # Update ADMIN_PASSWORD_HASH in the .env file and reload settings
+    env_file = Path(settings.model_config.get("env_file", ".env"))
+    if env_file.exists():
+        text = env_file.read_text()
+        if re.search(r"^ADMIN_PASSWORD_HASH=", text, re.MULTILINE):
+            text = re.sub(r"^ADMIN_PASSWORD_HASH=.*$", f"ADMIN_PASSWORD_HASH={new_hash}", text, flags=re.MULTILINE)
+        else:
+            text += f"\nADMIN_PASSWORD_HASH={new_hash}\n"
+        env_file.write_text(text)
+    get_settings.cache_clear()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +314,114 @@ def get_project_api(project_id: int, _: str | None = Depends(require_auth)) -> d
         raise HTTPException(404)
     instances = db.list_instances(project["id"])
     return {**dict(project), "instances": [dict(i) for i in instances]}
+
+
+# ---------------------------------------------------------------------------
+# Host device inventory (USB / PCI)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/host/devices/usb")
+def list_usb(_: str | None = Depends(require_auth)) -> list[dict]:
+    if not settings.configured():
+        return []
+    return _pve().list_usb_devices()
+
+
+@app.get("/api/host/devices/pci")
+def list_pci(_: str | None = Depends(require_auth)) -> list[dict]:
+    if not settings.configured():
+        return []
+    return _pve().list_pci_devices()
+
+
+# ---------------------------------------------------------------------------
+# Guest config — on-boot, USB, PCI passthrough, disk resize
+# ---------------------------------------------------------------------------
+
+@app.get("/api/guests/{vmid}/config")
+def get_guest_config(vmid: int, _: str | None = Depends(require_auth)) -> dict:
+    inst = db.get_instance_by_vmid(vmid)
+    kind = "lxc"
+    if inst:
+        tmpl = db.get_template(inst["release"], inst["type"])
+        if tmpl:
+            kind = tmpl["kind"]
+    # Fallback: try both and return whichever works
+    px = _pve()
+    try:
+        return {"kind": kind, "config": px.get_guest_config(kind, vmid)}
+    except Exception:
+        other = "qemu" if kind == "lxc" else "lxc"
+        try:
+            return {"kind": other, "config": px.get_guest_config(other, vmid)}
+        except Exception as e:
+            raise HTTPException(404, f"Could not get config: {e}")
+
+
+class GuestConfigUpdate(BaseModel):
+    onboot: bool | None = None
+    usb_add: str | None = None      # e.g. "host=0558:1001"
+    usb_del: str | None = None      # e.g. "usb0"
+    pci_add: str | None = None      # e.g. "0000:01:00.0,pcie=1"
+    pci_del: str | None = None      # e.g. "hostpci0"
+
+
+@app.put("/api/guests/{vmid}/config")
+def update_guest_config(
+    vmid: int,
+    req: GuestConfigUpdate,
+    _: str | None = Depends(require_auth),
+) -> dict:
+    cfg_resp = get_guest_config(vmid)
+    kind = cfg_resp["kind"]
+    cfg = cfg_resp["config"]
+    px = _pve()
+    changes: dict = {}
+    deletes: list[str] = []
+
+    if req.onboot is not None:
+        changes["onboot"] = 1 if req.onboot else 0
+
+    if req.usb_add:
+        # Find the next free usb slot
+        used = {k for k in cfg if re.match(r"^usb\d+$", k)}
+        slot = next(f"usb{i}" for i in range(10) if f"usb{i}" not in used)
+        changes[slot] = req.usb_add
+
+    if req.usb_del:
+        deletes.append(req.usb_del)
+
+    if req.pci_add and kind == "qemu":
+        used = {k for k in cfg if re.match(r"^hostpci\d+$", k)}
+        slot = next(f"hostpci{i}" for i in range(10) if f"hostpci{i}" not in used)
+        changes[slot] = req.pci_add
+
+    if req.pci_del and kind == "qemu":
+        deletes.append(req.pci_del)
+
+    if changes or deletes:
+        px.update_guest_config(kind, vmid, changes or None, deletes or None)
+    return {"ok": True}
+
+
+class ResizeRequest(BaseModel):
+    disk: str   # e.g. "scsi0" for VMs, "rootfs" for LXC
+    size: str   # absolute size like "32G" or delta like "+10G"
+
+
+@app.post("/api/guests/{vmid}/resize")
+def resize_guest_disk(
+    vmid: int,
+    req: ResizeRequest,
+    _: str | None = Depends(require_auth),
+) -> dict:
+    cfg_resp = get_guest_config(vmid)
+    kind = cfg_resp["kind"]
+    try:
+        _pve().resize_disk(kind, vmid, req.disk, req.size)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

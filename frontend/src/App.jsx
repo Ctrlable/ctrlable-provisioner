@@ -1,11 +1,10 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import './App.css'
 
 // ---------------------------------------------------------------------------
 // Auth helpers
 // ---------------------------------------------------------------------------
 const TOKEN_KEY = 'ctrlable_provisioner_token'
-
 function getToken() { return localStorage.getItem(TOKEN_KEY) }
 function setToken(t) { localStorage.setItem(TOKEN_KEY, t) }
 function clearToken() { localStorage.removeItem(TOKEN_KEY) }
@@ -16,10 +15,7 @@ async function apiFetch(path, opts = {}) {
   if (token) headers['Authorization'] = `Bearer ${token}`
   if (opts.body && typeof opts.body === 'string') headers['Content-Type'] = 'application/json'
   const res = await fetch(path, { ...opts, headers })
-  if (res.status === 401) {
-    clearToken()
-    window.location.reload()
-  }
+  if (res.status === 401) { clearToken(); window.location.reload() }
   return res
 }
 
@@ -33,8 +29,7 @@ function LoginScreen({ onLogin }) {
   const [loading, setLoading]   = useState(false)
 
   const submit = async (e) => {
-    e.preventDefault()
-    setLoading(true); setError(null)
+    e.preventDefault(); setLoading(true); setError(null)
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
@@ -43,13 +38,9 @@ function LoginScreen({ onLogin }) {
       })
       const data = await res.json()
       if (!res.ok) { setError(data.detail ?? 'Login failed'); return }
-      setToken(data.token)
-      onLogin()
-    } catch (e) {
-      setError('Cannot reach server')
-    } finally {
-      setLoading(false)
-    }
+      setToken(data.token); onLogin()
+    } catch { setError('Cannot reach server') }
+    finally { setLoading(false) }
   }
 
   return (
@@ -57,12 +48,10 @@ function LoginScreen({ onLogin }) {
       <form className="login-card card" onSubmit={submit}>
         <h1 className="login-title">Ctrlable Provisioner</h1>
         {error && <div className="banner error">{error}</div>}
-        <label className="field">
-          <span>Username</span>
+        <label className="field"><span>Username</span>
           <input value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" />
         </label>
-        <label className="field">
-          <span>Password</span>
+        <label className="field"><span>Password</span>
           <input type="password" value={password} onChange={e => setPassword(e.target.value)}
             autoComplete="current-password" autoFocus />
         </label>
@@ -70,6 +59,242 @@ function LoginScreen({ onLogin }) {
           {loading ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Change password modal
+// ---------------------------------------------------------------------------
+function ChangePasswordModal({ onClose }) {
+  const [current, setCurrent]   = useState('')
+  const [next, setNext]         = useState('')
+  const [confirm, setConfirm]   = useState('')
+  const [error, setError]       = useState(null)
+  const [ok, setOk]             = useState(false)
+  const [loading, setLoading]   = useState(false)
+
+  const submit = async (e) => {
+    e.preventDefault()
+    if (next !== confirm) { setError('Passwords do not match'); return }
+    if (next.length < 8)  { setError('Minimum 8 characters'); return }
+    setLoading(true); setError(null)
+    try {
+      const res = await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ current_password: current, new_password: next }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.detail ?? 'Failed'); return }
+      setOk(true)
+    } catch { setError('Request failed') }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card card" onClick={e => e.stopPropagation()}>
+        <h2>Change Password</h2>
+        {ok
+          ? <div className="banner success">Password updated. <button className="btn-xs" onClick={onClose}>Close</button></div>
+          : <form onSubmit={submit} style={{display:'flex',flexDirection:'column',gap:'1rem'}}>
+              {error && <div className="banner error">{error}</div>}
+              <label className="field"><span>Current password</span>
+                <input type="password" value={current} onChange={e => setCurrent(e.target.value)} autoFocus />
+              </label>
+              <label className="field"><span>New password</span>
+                <input type="password" value={next} onChange={e => setNext(e.target.value)} />
+              </label>
+              <label className="field"><span>Confirm new password</span>
+                <input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} />
+              </label>
+              <div style={{display:'flex',gap:'.5rem'}}>
+                <button className="btn-primary" disabled={loading || !current || !next || !confirm}>
+                  {loading ? 'Saving…' : 'Update'}
+                </button>
+                <button type="button" className="btn-xs" onClick={onClose}>Cancel</button>
+              </div>
+            </form>
+        }
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Guest config drawer
+// ---------------------------------------------------------------------------
+function GuestConfigDrawer({ guest, onClose, onRefresh }) {
+  const [cfg, setCfg]           = useState(null)
+  const [usbDevs, setUsbDevs]   = useState([])
+  const [pciDevs, setPciDevs]   = useState([])
+  const [error, setError]       = useState(null)
+  const [saving, setSaving]     = useState(false)
+  const [resizeVal, setResizeVal] = useState('')
+  const [resizeDisk, setResizeDisk] = useState('')
+  const kind = useRef(null)
+
+  useEffect(() => {
+    apiFetch(`/api/guests/${guest.vmid}/config`)
+      .then(r => r.json()).then(d => { kind.current = d.kind; setCfg(d.config) }).catch(e => setError(e.message))
+    apiFetch('/api/host/devices/usb').then(r => r.json()).then(setUsbDevs).catch(() => {})
+    if (guest.kind === 'qemu')
+      apiFetch('/api/host/devices/pci').then(r => r.json()).then(setPciDevs).catch(() => {})
+  }, [guest.vmid, guest.kind])
+
+  const patch = async (body) => {
+    setSaving(true); setError(null)
+    try {
+      const res = await apiFetch(`/api/guests/${guest.vmid}/config`, {
+        method: 'PUT', body: JSON.stringify(body),
+      })
+      if (!res.ok) { const d = await res.json(); setError(d.detail ?? 'Failed'); return }
+      const r = await apiFetch(`/api/guests/${guest.vmid}/config`)
+      const d = await r.json(); setCfg(d.config); onRefresh()
+    } catch (e) { setError(e.message) }
+    finally { setSaving(false) }
+  }
+
+  const resize = async () => {
+    if (!resizeDisk || !resizeVal) return
+    setSaving(true); setError(null)
+    try {
+      const res = await apiFetch(`/api/guests/${guest.vmid}/resize`, {
+        method: 'POST', body: JSON.stringify({ disk: resizeDisk, size: resizeVal }),
+      })
+      if (!res.ok) { const d = await res.json(); setError(d.detail ?? 'Failed'); return }
+      const r = await apiFetch(`/api/guests/${guest.vmid}/config`)
+      const d = await r.json(); setCfg(d.config); setResizeVal(''); setResizeDisk('')
+    } catch (e) { setError(e.message) }
+    finally { setSaving(false) }
+  }
+
+  // Parse usb/pci slots from config
+  const usbSlots = cfg ? Object.entries(cfg).filter(([k]) => /^usb\d+$/.test(k)) : []
+  const pciSlots = cfg ? Object.entries(cfg).filter(([k]) => /^hostpci\d+$/.test(k)) : []
+
+  // Detect disk slots
+  const diskSlots = cfg ? Object.entries(cfg).filter(([k]) =>
+    /^(scsi|virtio|ide|sata)\d+$/.test(k) || k === 'rootfs'
+  ) : []
+
+  return (
+    <div className="drawer-overlay" onClick={onClose}>
+      <div className="drawer card" onClick={e => e.stopPropagation()}>
+        <div className="drawer-header">
+          <h2>{guest.hostname} <span className="tag">{guest.kind?.toUpperCase()}</span></h2>
+          <button className="btn-xs" onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="banner error">{error}</div>}
+        {!cfg ? <div className="loading">Loading config…</div> : <>
+
+          {/* On Boot */}
+          <section className="cfg-section">
+            <h3>General</h3>
+            <label className="toggle-row">
+              <span>Start on boot</span>
+              <input type="checkbox" checked={!!cfg.onboot} onChange={e => patch({ onboot: e.target.checked })} disabled={saving} />
+            </label>
+          </section>
+
+          {/* Disk Resize */}
+          <section className="cfg-section">
+            <h3>Disks</h3>
+            <table className="cfg-table">
+              <tbody>
+                {diskSlots.map(([k, v]) => (
+                  <tr key={k}><td className="muted">{k}</td><td>{v.split(',').find(p => p.startsWith('size='))?.slice(5) ?? '—'}</td></tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="inline-form">
+              <select value={resizeDisk} onChange={e => setResizeDisk(e.target.value)} className="select-sm">
+                <option value="">Disk…</option>
+                {diskSlots.map(([k]) => <option key={k} value={k}>{k}</option>)}
+              </select>
+              <input className="input-sm" placeholder="32G or +10G" value={resizeVal}
+                onChange={e => setResizeVal(e.target.value)} />
+              <button className="btn-xs" onClick={resize} disabled={saving || !resizeDisk || !resizeVal}>
+                Resize
+              </button>
+            </div>
+          </section>
+
+          {/* USB Passthrough */}
+          <section className="cfg-section">
+            <h3>USB Passthrough</h3>
+            {usbSlots.length === 0
+              ? <p className="empty small">None configured</p>
+              : usbSlots.map(([slot, val]) => (
+                <div key={slot} className="device-row">
+                  <span className="tag">{slot}</span>
+                  <span className="muted">{val}</span>
+                  <button className="btn-xs danger" disabled={saving}
+                    onClick={() => patch({ usb_del: slot })}>Remove</button>
+                </div>
+              ))
+            }
+            {usbDevs.length > 0 && (
+              <details className="add-device">
+                <summary>Add USB device</summary>
+                <div className="device-list">
+                  {usbDevs.map((d, i) => {
+                    const id = `${d.vendid}:${d.prodid}`
+                    const label = d.manufacturer ? `${d.manufacturer} — ${d.product ?? id}` : id
+                    return (
+                      <div key={i} className="device-row">
+                        <span className="muted">{label}</span>
+                        <span className="tag">{id}</span>
+                        <button className="btn-xs" disabled={saving}
+                          onClick={() => patch({ usb_add: `host=${id}` })}>Add</button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </details>
+            )}
+          </section>
+
+          {/* PCI / GPU Passthrough (VMs only) */}
+          {guest.kind === 'qemu' && (
+            <section className="cfg-section">
+              <h3>PCI / GPU Passthrough</h3>
+              {pciSlots.length === 0
+                ? <p className="empty small">None configured</p>
+                : pciSlots.map(([slot, val]) => (
+                  <div key={slot} className="device-row">
+                    <span className="tag">{slot}</span>
+                    <span className="muted">{val}</span>
+                    <button className="btn-xs danger" disabled={saving}
+                      onClick={() => patch({ pci_del: slot })}>Remove</button>
+                  </div>
+                ))
+              }
+              {pciDevs.length > 0 && (
+                <details className="add-device">
+                  <summary>Add PCI device</summary>
+                  <div className="device-list">
+                    {pciDevs.map((d, i) => {
+                      const isVga = (d.class ?? '').toLowerCase().includes('vga') || (d.class ?? '').toLowerCase().includes('display')
+                      return (
+                        <div key={i} className="device-row">
+                          <span className="muted">{d.device_name ?? d.pciid}</span>
+                          {isVga && <span className="tag accent">VGA</span>}
+                          <span className="tag">{d.pciid}</span>
+                          <button className="btn-xs" disabled={saving}
+                            onClick={() => patch({ pci_add: `${d.pciid},pcie=1${isVga ? ',x-vga=1' : ''}` })}>
+                            Add
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </details>
+              )}
+            </section>
+          )}
+        </>}
+      </div>
     </div>
   )
 }
@@ -84,49 +309,41 @@ function fmtBytes(bytes) {
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
   return `${v.toFixed(1)} ${units[i]}`
 }
-
 function fmtUptime(s) {
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h`
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`; if (h > 0) return `${h}h ${m}m`; return `${m}m`
 }
 
 // ---------------------------------------------------------------------------
-// Shared components
+// Dashboard tab
 // ---------------------------------------------------------------------------
 function StatusDot({ status }) {
-  const colors = { running: '#22c55e', stopped: '#6b7280', active: '#22c55e',
-                   pending: '#f59e0b', provisioning: '#6366f1', error: '#ef4444' }
+  const colors = { running:'#22c55e', stopped:'#6b7280', active:'#22c55e', pending:'#f59e0b', provisioning:'#6366f1', error:'#ef4444' }
   return <span className="status-dot" style={{ background: colors[status] ?? '#64748b' }} />
 }
-
 function HealthBar({ label, pct, sublabel }) {
   const p = Math.min(Math.round(pct ?? 0), 100)
   const color = p > 90 ? '#ef4444' : p > 70 ? '#f59e0b' : '#22c55e'
   return (
     <div className="metric">
       <div className="metric-header"><span>{label}</span><span>{p}%</span></div>
-      <div className="bar-bg"><div className="bar-fill" style={{ width: `${p}%`, background: color }} /></div>
+      <div className="bar-bg"><div className="bar-fill" style={{ width:`${p}%`, background:color }} /></div>
       {sublabel && <div className="metric-sub">{sublabel}</div>}
     </div>
   )
 }
 
-// ---------------------------------------------------------------------------
-// Dashboard tab
-// ---------------------------------------------------------------------------
-function GuestCard({ guest, onAction }) {
+function GuestCard({ guest, onAction, onConfigure }) {
   return (
     <div className="guest-card">
       <div className="guest-header">
         <StatusDot status={guest.status} />
         <span className="guest-hostname" title={guest.hostname}>{guest.hostname}</span>
         <span className="guest-kind">{guest.kind?.toUpperCase()}</span>
+        <button className="btn-icon" title="Configure" onClick={() => onConfigure(guest)}>⚙</button>
       </div>
       <div className="guest-meta">
-        {guest.type   && <span className="tag">{guest.type}</span>}
+        {guest.type    && <span className="tag">{guest.type}</span>}
         {guest.release && <span className="tag accent">{guest.release}</span>}
         <span className="tag">{guest.status}</span>
       </div>
@@ -137,9 +354,9 @@ function GuestCard({ guest, onAction }) {
         </div>
       )}
       <div className="guest-actions">
-        {guest.status === 'stopped' && <button className="btn-xs" onClick={() => onAction(guest.vmid, 'start')}>Start</button>}
-        {guest.status === 'running' && <button className="btn-xs danger" onClick={() => onAction(guest.vmid, 'stop')}>Stop</button>}
-        {guest.status === 'running' && <button className="btn-xs" onClick={() => onAction(guest.vmid, 'reboot')}>Reboot</button>}
+        {guest.status === 'stopped'  && <button className="btn-xs" onClick={() => onAction(guest.vmid,'start')}>Start</button>}
+        {guest.status === 'running'  && <button className="btn-xs danger" onClick={() => onAction(guest.vmid,'stop')}>Stop</button>}
+        {guest.status === 'running'  && <button className="btn-xs" onClick={() => onAction(guest.vmid,'reboot')}>Reboot</button>}
       </div>
     </div>
   )
@@ -148,40 +365,34 @@ function GuestCard({ guest, onAction }) {
 function groupBy(guests, key) {
   const map = {}
   for (const g of guests) { const k = g[key] ?? '(untracked)'; (map[k] ??= []).push(g) }
-  return Object.entries(map).sort(([a], [b]) => a.localeCompare(b))
+  return Object.entries(map).sort(([a],[b]) => a.localeCompare(b))
 }
 
-function DashboardTab({ data, onAction }) {
+function DashboardTab({ data, onAction, onConfigure }) {
   if (!data) return <div className="loading">Loading…</div>
   if (!data.configured) return (
-    <div className="unconfigured">
-      <h2>Proxmox not configured</h2>
+    <div className="unconfigured"><h2>Proxmox not configured</h2>
       <p>Set <code>PVE_HOST</code>, <code>PVE_TOKEN_ID</code>, and <code>PVE_TOKEN_SECRET</code> in <code>backend/.env</code>.</p>
     </div>
   )
   if (data.error) return <div className="banner error">Proxmox error: {data.error}</div>
-
   const { host, guests } = data
-  const cpuPct  = (host.cpu ?? 0) * 100
-  const memPct  = host.mem_total  ? (host.mem_used  / host.mem_total)  * 100 : 0
-  const diskPct = host.disk_total ? (host.disk_used / host.disk_total) * 100 : 0
-
   return (
     <>
       <section className="host-health">
-        <HealthBar label="CPU" pct={cpuPct} />
-        <HealthBar label="RAM" pct={memPct}
+        <HealthBar label="CPU" pct={(host.cpu ?? 0)*100} />
+        <HealthBar label="RAM" pct={host.mem_total ? (host.mem_used/host.mem_total)*100 : 0}
           sublabel={`${fmtBytes(host.mem_used)} / ${fmtBytes(host.mem_total)}`} />
-        <HealthBar label="Disk" pct={diskPct}
+        <HealthBar label="Disk" pct={host.disk_total ? (host.disk_used/host.disk_total)*100 : 0}
           sublabel={`${fmtBytes(host.disk_used)} / ${fmtBytes(host.disk_total)}`} />
       </section>
       <section className="guests">
-        {groupBy(guests, 'project').length === 0 && <p className="empty">No guests on this node.</p>}
-        {groupBy(guests, 'project').map(([project, items]) => (
+        {groupBy(guests,'project').length === 0 && <p className="empty">No guests on this node.</p>}
+        {groupBy(guests,'project').map(([project, items]) => (
           <div key={project} className="project-group">
             <h2 className="project-name">{project}</h2>
             <div className="guest-grid">
-              {items.map(g => <GuestCard key={g.vmid} guest={g} onAction={onAction} />)}
+              {items.map(g => <GuestCard key={g.vmid} guest={g} onAction={onAction} onConfigure={onConfigure} />)}
             </div>
           </div>
         ))}
@@ -193,22 +404,15 @@ function DashboardTab({ data, onAction }) {
 // ---------------------------------------------------------------------------
 // Deploy tab
 // ---------------------------------------------------------------------------
-const EMPTY_FORM = {
-  site_name: '', release: '',
-  mqtt_host: '', mqtt_port: 1883, mqtt_user: '', mqtt_pass: '',
-  zigbee_coordinator: '', zwave_coordinator: '',
-}
+const EMPTY_FORM = { site_name:'', release:'', mqtt_host:'', mqtt_port:1883, mqtt_user:'', mqtt_pass:'', zigbee_coordinator:'', zwave_coordinator:'' }
 
-function Field({ label, value, onChange, type = 'text', placeholder = '' }) {
+function Field({ label, value, onChange, type='text', placeholder='' }) {
   return (
-    <label className="field">
-      <span>{label}</span>
-      <input type={type} value={value} placeholder={placeholder}
-        onChange={e => onChange(e.target.value)} />
+    <label className="field"><span>{label}</span>
+      <input type={type} value={value} placeholder={placeholder} onChange={e => onChange(e.target.value)} />
     </label>
   )
 }
-
 function InstanceRow({ inst }) {
   return (
     <div className="instance-row">
@@ -221,42 +425,25 @@ function InstanceRow({ inst }) {
 }
 
 function DeployTab({ releases }) {
-  const [form, setForm] = useState({ ...EMPTY_FORM, release: releases[0]?.release ?? '' })
+  const [form, setForm]         = useState({ ...EMPTY_FORM, release: releases[0]?.release ?? '' })
   const [deploying, setDeploying] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError]       = useState(null)
   const [projects, setProjects] = useState([])
-
-  const set = (key) => (val) => setForm(f => ({ ...f, [key]: val }))
-
+  const set = key => val => setForm(f => ({ ...f, [key]: val }))
   const loadProjects = useCallback(() => {
     apiFetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => {})
   }, [])
-
-  useEffect(() => {
-    loadProjects()
-    const id = setInterval(loadProjects, 5000)
-    return () => clearInterval(id)
-  }, [loadProjects])
-
+  useEffect(() => { loadProjects(); const id = setInterval(loadProjects, 5000); return () => clearInterval(id) }, [loadProjects])
   const deploy = async () => {
     if (!form.site_name.trim()) return
     setDeploying(true); setError(null)
     try {
-      const res = await apiFetch('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify({ ...form, mqtt_port: Number(form.mqtt_port) }),
-      })
+      const res = await apiFetch('/api/projects', { method:'POST', body: JSON.stringify({ ...form, mqtt_port: Number(form.mqtt_port) }) })
       const data = await res.json()
       if (!res.ok) { setError(data.detail ?? 'Deploy failed'); return }
-      setForm({ ...EMPTY_FORM, release: releases[0]?.release ?? '' })
-      loadProjects()
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setDeploying(false)
-    }
+      setForm({ ...EMPTY_FORM, release: releases[0]?.release ?? '' }); loadProjects()
+    } catch (e) { setError(e.message) } finally { setDeploying(false) }
   }
-
   return (
     <div className="deploy-tab">
       <section className="deploy-form card">
@@ -264,8 +451,7 @@ function DeployTab({ releases }) {
         {error && <div className="banner error">{error}</div>}
         <div className="form-grid">
           <Field label="Site name" value={form.site_name} onChange={set('site_name')} placeholder="e.g. hampton-inn" />
-          <label className="field">
-            <span>Release</span>
+          <label className="field"><span>Release</span>
             <select value={form.release} onChange={e => set('release')(e.target.value)}>
               {releases.map(r => <option key={r.release} value={r.release}>{r.release}</option>)}
             </select>
@@ -277,26 +463,22 @@ function DeployTab({ releases }) {
           <Field label="Zigbee coordinator" value={form.zigbee_coordinator} onChange={set('zigbee_coordinator')} placeholder="tcp://192.168.1.20:6638" />
           <Field label="Z-Wave coordinator" value={form.zwave_coordinator} onChange={set('zwave_coordinator')} placeholder="tcp://192.168.1.21:8888" />
         </div>
-        <button className="btn-primary" onClick={deploy}
-          disabled={deploying || !form.site_name.trim() || !form.release}>
+        <button className="btn-primary" onClick={deploy} disabled={deploying || !form.site_name.trim() || !form.release}>
           {deploying ? 'Deploying…' : 'Deploy Stack'}
         </button>
         <p className="form-note">Deploys all LXC templates for the selected release. HAOS (ctrlable-pro) is handled separately (M6).</p>
       </section>
-
       {projects.length > 0 && (
         <section className="projects-list">
           <h2 className="section-title">Deployed Stacks</h2>
           {projects.map(p => (
             <div key={p.id} className="card project-card">
               <div className="project-card-header">
-                <strong>{p.site_name}</strong>
-                <span className="tag accent">{p.release}</span>
+                <strong>{p.site_name}</strong><span className="tag accent">{p.release}</span>
               </div>
               {p.instances.length === 0
                 ? <p className="empty small">Cloning in progress…</p>
-                : p.instances.map(i => <InstanceRow key={i.id} inst={i} />)
-              }
+                : p.instances.map(i => <InstanceRow key={i.id} inst={i} />)}
             </div>
           ))}
         </section>
@@ -329,18 +511,18 @@ function ReleasesTab({ releases }) {
 // Root app
 // ---------------------------------------------------------------------------
 export default function App() {
-  const [authReady, setAuthReady]   = useState(false)
-  const [authEnabled, setAuthEnabled] = useState(false)
-  const [loggedIn, setLoggedIn]     = useState(!!getToken())
-  const [tab, setTab]               = useState('dashboard')
-  const [dashboard, setDashboard]   = useState(null)
-  const [releases, setReleases]     = useState([])
-  const [fetchErr, setFetchErr]     = useState(null)
+  const [authReady, setAuthReady]       = useState(false)
+  const [authEnabled, setAuthEnabled]   = useState(false)
+  const [loggedIn, setLoggedIn]         = useState(!!getToken())
+  const [tab, setTab]                   = useState('dashboard')
+  const [dashboard, setDashboard]       = useState(null)
+  const [releases, setReleases]         = useState([])
+  const [fetchErr, setFetchErr]         = useState(null)
+  const [showChangePwd, setShowChangePwd] = useState(false)
+  const [configGuest, setConfigGuest]   = useState(null)
 
-  // Check whether the server has auth enabled before rendering the login screen
   useEffect(() => {
-    fetch('/api/auth/status')
-      .then(r => r.json())
+    fetch('/api/auth/status').then(r => r.json())
       .then(d => { setAuthEnabled(d.auth_enabled); setAuthReady(true) })
       .catch(() => setAuthReady(true))
   }, [])
@@ -352,8 +534,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!authReady) return
-    if (authEnabled && !loggedIn) return
+    if (!authReady || (authEnabled && !loggedIn)) return
     loadDashboard()
     apiFetch('/api/releases').then(r => r.json()).then(setReleases).catch(() => {})
     const id = setInterval(loadDashboard, 30_000)
@@ -368,15 +549,11 @@ export default function App() {
   const logout = () => { clearToken(); setLoggedIn(false); setDashboard(null) }
 
   if (!authReady) return null
-
-  if (authEnabled && !loggedIn) {
-    return <LoginScreen onLogin={() => setLoggedIn(true)} />
-  }
+  if (authEnabled && !loggedIn) return <LoginScreen onLogin={() => setLoggedIn(true)} />
+  if (fetchErr) return <div className="banner error">Cannot reach API: {fetchErr}</div>
 
   const node   = dashboard?.host?.node ?? '…'
   const uptime = dashboard?.host?.uptime
-
-  if (fetchErr) return <div className="banner error">Cannot reach API: {fetchErr}</div>
 
   return (
     <div className="app">
@@ -385,28 +562,29 @@ export default function App() {
         <div className="header-right">
           <span className="chip">{node}</span>
           {uptime > 0 && <span className="muted">up {fmtUptime(uptime)}</span>}
-          {authEnabled && (
-            <button className="btn-xs" onClick={logout} style={{ marginLeft: '0.5rem' }}>
-              Sign out
-            </button>
-          )}
+          {authEnabled && <>
+            <button className="btn-xs" onClick={() => setShowChangePwd(true)}>Password</button>
+            <button className="btn-xs" onClick={logout}>Sign out</button>
+          </>}
         </div>
       </header>
 
       <nav className="tabs">
-        {['dashboard', 'deploy', 'releases'].map(t => (
-          <button key={t} className={`tab ${tab === t ? 'active' : ''}`}
-            onClick={() => setTab(t)}>
-            {t.charAt(0).toUpperCase() + t.slice(1)}
+        {['dashboard','deploy','releases'].map(t => (
+          <button key={t} className={`tab ${tab===t?'active':''}`} onClick={() => setTab(t)}>
+            {t.charAt(0).toUpperCase()+t.slice(1)}
           </button>
         ))}
       </nav>
 
       <main>
-        {tab === 'dashboard' && <DashboardTab data={dashboard} onAction={handleAction} />}
-        {tab === 'deploy'    && <DeployTab releases={releases} />}
-        {tab === 'releases'  && <ReleasesTab releases={releases} />}
+        {tab==='dashboard' && <DashboardTab data={dashboard} onAction={handleAction} onConfigure={setConfigGuest} />}
+        {tab==='deploy'    && <DeployTab releases={releases} />}
+        {tab==='releases'  && <ReleasesTab releases={releases} />}
       </main>
+
+      {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
+      {configGuest   && <GuestConfigDrawer guest={configGuest} onClose={() => setConfigGuest(null)} onRefresh={loadDashboard} />}
     </div>
   )
 }

@@ -5,6 +5,33 @@
 .login-card  { width:100%; max-width:360px; display:flex; flex-direction:column; gap:1.25rem; }
 .login-title { font-size:1.25rem; font-weight:700; text-align:center; margin-bottom:.25rem; }
 
+/* Modal */
+.modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:100; }
+.modal-card    { width:100%; max-width:400px; display:flex; flex-direction:column; gap:1rem; }
+.banner.success { background:#14532d22; border:1px solid #22c55e55; color:#4ade80; padding:.75rem 1rem; border-radius:6px; display:flex; align-items:center; gap:.75rem; }
+
+/* Config drawer */
+.drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:100; display:flex; justify-content:flex-end; }
+.drawer         { width:420px; max-width:95vw; height:100vh; overflow-y:auto; border-radius:0; display:flex; flex-direction:column; gap:0; }
+.drawer-header  { display:flex; align-items:center; justify-content:space-between; padding:.75rem 1rem; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--surface); z-index:1; }
+.drawer-header h2 { font-size:1rem; display:flex; align-items:center; gap:.5rem; }
+.cfg-section    { padding:1rem; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:.75rem; }
+.cfg-section h3 { font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+.toggle-row     { display:flex; align-items:center; justify-content:space-between; cursor:pointer; }
+.toggle-row input[type=checkbox] { width:1.1rem; height:1.1rem; cursor:pointer; accent-color:var(--accent); }
+.cfg-table      { width:100%; border-collapse:collapse; font-size:.85rem; }
+.cfg-table td   { padding:.3rem .5rem; }
+.cfg-table td:first-child { color:var(--muted); width:80px; }
+.inline-form    { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+.input-sm       { background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:.3rem .6rem; font-size:.85rem; width:120px; }
+.select-sm      { background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:.3rem .6rem; font-size:.85rem; }
+.device-row     { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; padding:.25rem 0; font-size:.85rem; }
+.device-row .muted { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.add-device summary { cursor:pointer; font-size:.85rem; color:var(--accent); padding:.25rem 0; }
+.device-list    { max-height:200px; overflow-y:auto; margin-top:.5rem; display:flex; flex-direction:column; gap:.25rem; }
+.btn-icon       { background:none; border:none; cursor:pointer; color:var(--muted); font-size:1rem; padding:.2rem .3rem; border-radius:4px; }
+.btn-icon:hover { color:var(--text); background:var(--border); }
+
 :root {
   --bg:      #0f1117;
   --surface: #1a1d27;

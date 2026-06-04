@@ -134,3 +134,35 @@ class ProxmoxClient:
 
     def reboot_guest(self, kind: str, vmid: int) -> None:
         getattr(self._px.nodes(self.node), kind)(vmid).status.reboot.post()
+
+    # ---------------------------------------------------------------------------
+    # Config / hardware
+    # ---------------------------------------------------------------------------
+
+    def get_guest_config(self, kind: str, vmid: int) -> dict:
+        return getattr(self._px.nodes(self.node), kind)(vmid).config.get()
+
+    def update_guest_config(self, kind: str, vmid: int,
+                            changes: dict | None = None,
+                            deletes: list[str] | None = None) -> None:
+        kwargs = dict(changes or {})
+        if deletes:
+            kwargs["delete"] = ",".join(deletes)
+        getattr(self._px.nodes(self.node), kind)(vmid).config.put(**kwargs)
+
+    def resize_disk(self, kind: str, vmid: int, disk: str, size: str) -> None:
+        getattr(self._px.nodes(self.node), kind)(vmid).resize.put(
+            disk=disk, size=size
+        )
+
+    def list_usb_devices(self) -> list[dict]:
+        try:
+            return self._px.nodes(self.node).scan.usb.get()
+        except Exception:
+            return []
+
+    def list_pci_devices(self) -> list[dict]:
+        try:
+            return self._px.nodes(self.node).hardware.pci.get()
+        except Exception:
+            return []
