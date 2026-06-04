@@ -213,6 +213,21 @@ def enroll(token: str, db: "StateDB") -> dict:
 # Status
 # ---------------------------------------------------------------------------
 
+def ensure_tunnel_up(wg_iface: str) -> None:
+    """Bring the WireGuard tunnel up if it's not already running."""
+    result = subprocess.run(["ip", "link", "show", wg_iface], capture_output=True)
+    if result.returncode == 0:
+        return  # interface already exists
+    if not shutil.which("wg-quick"):
+        subprocess.run(["apt-get", "install", "-y", "-qq", "wireguard-tools"],
+                       capture_output=True)
+    r = subprocess.run(["wg-quick", "up", wg_iface], capture_output=True, text=True)
+    if r.returncode != 0:
+        log.warning("wg-quick up %s failed: %s", wg_iface, r.stderr.strip())
+    else:
+        log.info("WireGuard tunnel %s is up", wg_iface)
+
+
 def get_status(db: "StateDB") -> dict:
     state = db.get_platform_state()
     if not state:
