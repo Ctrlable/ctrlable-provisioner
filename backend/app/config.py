@@ -20,6 +20,12 @@ class Settings(BaseSettings):
 
     db_path: str = ""
 
+    # Auth — if either is empty the API runs in open mode (no auth)
+    admin_user: str = "admin"
+    admin_password_hash: str = ""   # bcrypt hash; generate with: python3 -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('yourpassword'))"
+    jwt_secret: str = ""            # random hex; generate with: python3 -c "import secrets; print(secrets.token_hex(32))"
+    jwt_expire_hours: int = 24
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def db_file(self) -> Path:

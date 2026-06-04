@@ -8,6 +8,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .auth import auth_enabled, create_token, require_auth, verify_password
 from .build import trigger_build
 from .config import get_settings
 from .deploy import deploy_instance, deploy_stack_async
@@ -24,6 +25,13 @@ db = StateDB(settings.db_file())
 async def lifespan(app: FastAPI):
     for m in load_all_manifests().values():
         db.seed_release(m)
+    if not auth_enabled(settings):
+        import warnings
+        warnings.warn(
+            "ADMIN_PASSWORD_HASH or JWT_SECRET not set — API running in open mode (no authentication). "
+            "Set both in .env to enable authentication.",
+            stacklevel=1,
+        )
     yield
 
 
@@ -53,6 +61,31 @@ def _check_build_token(token: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest) -> dict:
+    if (
+        not auth_enabled(settings)
+        or req.username != settings.admin_user
+        or not verify_password(req.password, settings.admin_password_hash)
+    ):
+        raise HTTPException(401, "Invalid credentials")
+    return {"token": create_token(req.username, settings)}
+
+
+@app.get("/api/auth/status")
+def auth_status() -> dict:
+    return {"auth_enabled": auth_enabled(settings)}
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
@@ -66,7 +99,7 @@ def health() -> dict:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/releases")
-def list_releases() -> list[dict]:
+def list_releases(_: str | None = Depends(require_auth)) -> list[dict]:
     return [dict(r) for r in db.list_releases()]
 
 
@@ -96,7 +129,7 @@ class BuildRequest(BaseModel):
 
 
 @app.post("/api/builds", status_code=202)
-async def start_build(req: BuildRequest) -> dict:
+async def start_build(req: BuildRequest, _: str | None = Depends(require_auth)) -> dict:
     if not settings.build_configured():
         raise HTTPException(400, "build plane not configured (BUILD_KEY_PATH / BUILD_TOKEN)")
     manifests = load_all_manifests()
@@ -116,12 +149,12 @@ def list_release_templates(release: str, token: str = Query(...)) -> list[dict]:
 
 
 @app.get("/api/builds")
-def list_builds() -> list[dict]:
+def list_builds(_: str | None = Depends(require_auth)) -> list[dict]:
     return [dict(r) for r in db.list_builds()]
 
 
 @app.get("/api/builds/{build_id}")
-def get_build(build_id: int) -> dict:
+def get_build(build_id: int, _: str | None = Depends(require_auth)) -> dict:
     row = db.get_build(build_id)
     if not row:
         raise HTTPException(404)
@@ -200,7 +233,7 @@ class DeployStackRequest(BaseModel):
 
 
 @app.post("/api/projects", status_code=202)
-async def create_project_deploy(req: DeployStackRequest) -> dict:
+async def create_project_deploy(req: DeployStackRequest, _: str | None = Depends(require_auth)) -> dict:
     if not settings.configured():
         raise HTTPException(400, "Proxmox not configured")
     manifests = load_all_manifests()
@@ -220,7 +253,7 @@ class AddInstanceRequest(BaseModel):
 
 
 @app.post("/api/projects/{project_id}/instances", status_code=202)
-async def add_instance(project_id: int, req: AddInstanceRequest) -> dict:
+async def add_instance(project_id: int, req: AddInstanceRequest, _: str | None = Depends(require_auth)) -> dict:
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(404)
@@ -235,7 +268,7 @@ async def add_instance(project_id: int, req: AddInstanceRequest) -> dict:
 
 
 @app.get("/api/projects")
-def list_projects_api() -> list[dict]:
+def list_projects_api(_: str | None = Depends(require_auth)) -> list[dict]:
     result = []
     for p in db.list_projects():
         instances = db.list_instances(p["id"])
@@ -244,7 +277,7 @@ def list_projects_api() -> list[dict]:
 
 
 @app.get("/api/projects/{project_id}")
-def get_project_api(project_id: int) -> dict:
+def get_project_api(project_id: int, _: str | None = Depends(require_auth)) -> dict:
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(404)
@@ -257,7 +290,7 @@ def get_project_api(project_id: int) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.post("/api/guests/{vmid}/{action}")
-def guest_action(vmid: int, action: str) -> dict:
+def guest_action(vmid: int, action: str, _: str | None = Depends(require_auth)) -> dict:
     if action not in ("start", "stop", "reboot"):
         raise HTTPException(400, f"invalid action: {action!r}")
 
@@ -283,7 +316,7 @@ def guest_action(vmid: int, action: str) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.get("/api/dashboard")
-def dashboard() -> dict:
+def dashboard(_: str | None = Depends(require_auth)) -> dict:
     if not settings.configured():
         return {"configured": False, "host": None, "guests": []}
 

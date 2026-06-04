@@ -5,3 +5,5 @@ pydantic-settings>=2.3
 pyyaml>=6.0
 proxmoxer>=2.0
 requests>=2.31
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7

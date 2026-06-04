@@ -2,6 +2,79 @@ import { useEffect, useState, useCallback } from 'react'
 import './App.css'
 
 // ---------------------------------------------------------------------------
+// Auth helpers
+// ---------------------------------------------------------------------------
+const TOKEN_KEY = 'ctrlable_provisioner_token'
+
+function getToken() { return localStorage.getItem(TOKEN_KEY) }
+function setToken(t) { localStorage.setItem(TOKEN_KEY, t) }
+function clearToken() { localStorage.removeItem(TOKEN_KEY) }
+
+async function apiFetch(path, opts = {}) {
+  const headers = { ...opts.headers }
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  if (opts.body && typeof opts.body === 'string') headers['Content-Type'] = 'application/json'
+  const res = await fetch(path, { ...opts, headers })
+  if (res.status === 401) {
+    clearToken()
+    window.location.reload()
+  }
+  return res
+}
+
+// ---------------------------------------------------------------------------
+// Login screen
+// ---------------------------------------------------------------------------
+function LoginScreen({ onLogin }) {
+  const [username, setUsername] = useState('admin')
+  const [password, setPassword] = useState('')
+  const [error, setError]       = useState(null)
+  const [loading, setLoading]   = useState(false)
+
+  const submit = async (e) => {
+    e.preventDefault()
+    setLoading(true); setError(null)
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.detail ?? 'Login failed'); return }
+      setToken(data.token)
+      onLogin()
+    } catch (e) {
+      setError('Cannot reach server')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="login-wrap">
+      <form className="login-card card" onSubmit={submit}>
+        <h1 className="login-title">Ctrlable Provisioner</h1>
+        {error && <div className="banner error">{error}</div>}
+        <label className="field">
+          <span>Username</span>
+          <input value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" />
+        </label>
+        <label className="field">
+          <span>Password</span>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+            autoComplete="current-password" autoFocus />
+        </label>
+        <button className="btn-primary" disabled={loading || !password}>
+          {loading ? 'Signing in…' : 'Sign in'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
 function fmtBytes(bytes) {
@@ -156,7 +229,7 @@ function DeployTab({ releases }) {
   const set = (key) => (val) => setForm(f => ({ ...f, [key]: val }))
 
   const loadProjects = useCallback(() => {
-    fetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => {})
+    apiFetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -169,9 +242,8 @@ function DeployTab({ releases }) {
     if (!form.site_name.trim()) return
     setDeploying(true); setError(null)
     try {
-      const res = await fetch('/api/projects', {
+      const res = await apiFetch('/api/projects', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...form, mqtt_port: Number(form.mqtt_port) }),
       })
       const data = await res.json()
@@ -234,7 +306,7 @@ function DeployTab({ releases }) {
 }
 
 // ---------------------------------------------------------------------------
-// Releases tab (stub — build trigger is M7)
+// Releases tab
 // ---------------------------------------------------------------------------
 function ReleasesTab({ releases }) {
   return (
@@ -257,30 +329,51 @@ function ReleasesTab({ releases }) {
 // Root app
 // ---------------------------------------------------------------------------
 export default function App() {
-  const [tab, setTab] = useState('dashboard')
-  const [dashboard, setDashboard] = useState(null)
-  const [releases, setReleases] = useState([])
-  const [fetchErr, setFetchErr] = useState(null)
+  const [authReady, setAuthReady]   = useState(false)
+  const [authEnabled, setAuthEnabled] = useState(false)
+  const [loggedIn, setLoggedIn]     = useState(!!getToken())
+  const [tab, setTab]               = useState('dashboard')
+  const [dashboard, setDashboard]   = useState(null)
+  const [releases, setReleases]     = useState([])
+  const [fetchErr, setFetchErr]     = useState(null)
+
+  // Check whether the server has auth enabled before rendering the login screen
+  useEffect(() => {
+    fetch('/api/auth/status')
+      .then(r => r.json())
+      .then(d => { setAuthEnabled(d.auth_enabled); setAuthReady(true) })
+      .catch(() => setAuthReady(true))
+  }, [])
 
   const loadDashboard = useCallback(() => {
-    fetch('/api/dashboard')
+    apiFetch('/api/dashboard')
       .then(r => r.json()).then(d => { setDashboard(d); setFetchErr(null) })
       .catch(e => setFetchErr(e.message))
   }, [])
 
   useEffect(() => {
+    if (!authReady) return
+    if (authEnabled && !loggedIn) return
     loadDashboard()
-    fetch('/api/releases').then(r => r.json()).then(setReleases).catch(() => {})
+    apiFetch('/api/releases').then(r => r.json()).then(setReleases).catch(() => {})
     const id = setInterval(loadDashboard, 30_000)
     return () => clearInterval(id)
-  }, [loadDashboard])
+  }, [authReady, authEnabled, loggedIn, loadDashboard])
 
   const handleAction = useCallback(async (vmid, action) => {
-    await fetch(`/api/guests/${vmid}/${action}`, { method: 'POST' })
+    await apiFetch(`/api/guests/${vmid}/${action}`, { method: 'POST' })
     setTimeout(loadDashboard, 1500)
   }, [loadDashboard])
 
-  const node = dashboard?.host?.node ?? '…'
+  const logout = () => { clearToken(); setLoggedIn(false); setDashboard(null) }
+
+  if (!authReady) return null
+
+  if (authEnabled && !loggedIn) {
+    return <LoginScreen onLogin={() => setLoggedIn(true)} />
+  }
+
+  const node   = dashboard?.host?.node ?? '…'
   const uptime = dashboard?.host?.uptime
 
   if (fetchErr) return <div className="banner error">Cannot reach API: {fetchErr}</div>
@@ -292,6 +385,11 @@ export default function App() {
         <div className="header-right">
           <span className="chip">{node}</span>
           {uptime > 0 && <span className="muted">up {fmtUptime(uptime)}</span>}
+          {authEnabled && (
+            <button className="btn-xs" onClick={logout} style={{ marginLeft: '0.5rem' }}>
+              Sign out
+            </button>
+          )}
         </div>
       </header>
 
