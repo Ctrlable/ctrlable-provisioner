@@ -164,7 +164,7 @@ table ip {NFT_TABLE} {{
     }}
 }}
 """
-        r = subprocess.run(["nft", "-f", "-"], input=rules.encode(), capture_output=True, text=True)
+        r = subprocess.run(["nft", "-f", "-"], input=rules, capture_output=True, text=True)
         if r.returncode == 0:
             log.info("nftables NAT ready (LAN: %s, WG: %s)", lan_iface, wg_iface)
             return
