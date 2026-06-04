@@ -64,16 +64,21 @@ def deploy_instance(
             "run Build Release first"
         )
 
+    kind = tmpl["kind"]  # "lxc" or "qemu"
     project = db.get_project(project_id)
     existing = {r["hostname"] for r in db.list_all_instances()}
     hostname = _next_hostname(project["site_name"], template_name, existing)
 
     newid = px.next_vmid()
-    px.clone_lxc(int(tmpl["template_vmid"]), newid, hostname)
-    px.set_lxc_fresh_mac(newid)
+    if kind == "qemu":
+        px.clone_vm(int(tmpl["template_vmid"]), newid, hostname)
+        px.set_vm_fresh_mac(newid)
+    else:
+        px.clone_lxc(int(tmpl["template_vmid"]), newid, hostname)
+        px.set_lxc_fresh_mac(newid)
 
     db.create_instance(project_id, template_name, newid, hostname, wire_to)
-    px.start_guest("lxc", newid)
+    px.start_guest(kind, newid)
 
     return dict(db.get_instance_by_hostname(hostname))
 
@@ -94,14 +99,10 @@ async def deploy_stack_async(
     manifest = manifests[release]
 
     for name, tmpl in manifest.templates.items():
-        if tmpl.kind == "vm":
-            continue  # HAOS handled in M6
-
         wire_to = _wire_to_for(name, shared_wire_to)
         try:
             await asyncio.to_thread(
                 deploy_instance, project_id, name, release, wire_to, db, px
             )
         except Exception as exc:
-            # Record error on the project but continue with remaining templates
             print(f"[deploy] {name} failed: {exc}")

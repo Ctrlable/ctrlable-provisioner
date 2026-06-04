@@ -9,6 +9,15 @@ from typing import Any
 from .manifest import ReleaseManifest
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS platform_state (
+  id           INTEGER PRIMARY KEY CHECK(id = 1),
+  device_id    TEXT NOT NULL,
+  device_token TEXT NOT NULL,
+  tunnel_ip    TEXT NOT NULL,
+  wg_iface     TEXT NOT NULL,
+  enrolled_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS builds (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   release     TEXT NOT NULL,
@@ -283,6 +292,30 @@ class StateDB:
                 " FROM instances i JOIN projects p ON p.id = i.project_id"
                 " ORDER BY p.site_name, i.hostname"
             ).fetchall()
+
+    # --- seed from manifest ---
+
+    # --- platform state ---
+
+    def get_platform_state(self) -> sqlite3.Row | None:
+        with self._conn() as conn:
+            return conn.execute("SELECT * FROM platform_state WHERE id = 1").fetchone()
+
+    def set_platform_state(
+        self, device_id: str, device_token: str, tunnel_ip: str, wg_iface: str
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO platform_state (id, device_id, device_token, tunnel_ip, wg_iface, enrolled_at)"
+                " VALUES (1, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                "   device_id = excluded.device_id,"
+                "   device_token = excluded.device_token,"
+                "   tunnel_ip = excluded.tunnel_ip,"
+                "   wg_iface = excluded.wg_iface,"
+                "   enrolled_at = excluded.enrolled_at",
+                (device_id, device_token, tunnel_ip, wg_iface, _now()),
+            )
 
     # --- seed from manifest ---
 

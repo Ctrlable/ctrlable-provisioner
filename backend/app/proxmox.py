@@ -111,6 +111,14 @@ class ProxmoxClient:
         )
         self._wait_task(upid)
 
+    def clone_vm(self, tmpl_vmid: int, newid: int, name: str) -> None:
+        upid = self._px.nodes(self.node).qemu(tmpl_vmid).clone.post(
+            newid=newid,
+            name=name,
+            full=1,
+        )
+        self._wait_task(upid)
+
     @staticmethod
     def _random_mac() -> str:
         # Locally administered, unicast
@@ -124,6 +132,18 @@ class ProxmoxClient:
         parts = [p for p in net0.split(",") if not p.lower().startswith("hwaddr=")]
         parts.append(f"hwaddr={mac}")
         self._px.nodes(self.node).lxc(vmid).config.put(net0=",".join(parts))
+        return mac
+
+    def set_vm_fresh_mac(self, vmid: int) -> str:
+        mac = self._random_mac()
+        config = self._px.nodes(self.node).qemu(vmid).config.get()
+        for key in [f"net{i}" for i in range(4)]:
+            val = config.get(key)
+            if val:
+                parts = [p for p in val.split(",") if not p.lower().startswith("macaddr=")]
+                parts.append(f"macaddr={mac}")
+                self._px.nodes(self.node).qemu(vmid).config.put(**{key: ",".join(parts)})
+                break
         return mac
 
     def start_guest(self, kind: str, vmid: int) -> None:

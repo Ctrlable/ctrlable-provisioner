@@ -9,11 +9,12 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .auth import auth_enabled, create_token, require_auth, verify_password
+from .auth import auth_enabled, create_token, hash_password, require_auth, verify_password
 from .build import trigger_build
 from .config import get_settings
 from .deploy import deploy_instance, deploy_stack_async
 from .manifest import load_all_manifests
+from .platform import enroll as _platform_enroll, get_status as _platform_get_status, start_heartbeat
 from .provision import complete_provisioning, get_assignment
 from .proxmox import ProxmoxClient
 from .state import StateDB
@@ -33,6 +34,10 @@ async def lifespan(app: FastAPI):
             "Set both in .env to enable authentication.",
             stacklevel=1,
         )
+    # Resume portal heartbeat if previously enrolled
+    pstate = db.get_platform_state()
+    if pstate:
+        start_heartbeat(pstate["device_id"], pstate["device_token"])
     yield
 
 
@@ -448,6 +453,36 @@ def guest_action(vmid: int, action: str, _: str | None = Depends(require_auth)) 
     elif action == "reboot":
         px.reboot_guest(kind, vmid)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Built templates (user-auth — for UI display)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/releases/{release}/built-templates")
+def list_built_templates(release: str, _: str | None = Depends(require_auth)) -> list[dict]:
+    return [dict(r) for r in db.list_templates(release)]
+
+
+# ---------------------------------------------------------------------------
+# Platform enrollment (M8)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/platform/status")
+def platform_status(_: str | None = Depends(require_auth)) -> dict:
+    return _platform_get_status(db)
+
+
+class PlatformEnrollRequest(BaseModel):
+    token: str
+
+
+@app.post("/api/platform/enroll")
+def platform_enroll_endpoint(req: PlatformEnrollRequest, _: str | None = Depends(require_auth)) -> dict:
+    try:
+        return _platform_enroll(req.token, db)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 # ---------------------------------------------------------------------------

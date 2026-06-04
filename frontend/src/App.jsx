@@ -169,11 +169,8 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
     finally { setSaving(false) }
   }
 
-  // Parse usb/pci slots from config
-  const usbSlots = cfg ? Object.entries(cfg).filter(([k]) => /^usb\d+$/.test(k)) : []
-  const pciSlots = cfg ? Object.entries(cfg).filter(([k]) => /^hostpci\d+$/.test(k)) : []
-
-  // Detect disk slots
+  const usbSlots  = cfg ? Object.entries(cfg).filter(([k]) => /^usb\d+$/.test(k)) : []
+  const pciSlots  = cfg ? Object.entries(cfg).filter(([k]) => /^hostpci\d+$/.test(k)) : []
   const diskSlots = cfg ? Object.entries(cfg).filter(([k]) =>
     /^(scsi|virtio|ide|sata)\d+$/.test(k) || k === 'rootfs'
   ) : []
@@ -188,7 +185,6 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
         {error && <div className="banner error">{error}</div>}
         {!cfg ? <div className="loading">Loading config…</div> : <>
 
-          {/* On Boot */}
           <section className="cfg-section">
             <h3>General</h3>
             <label className="toggle-row">
@@ -197,7 +193,6 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
             </label>
           </section>
 
-          {/* Disk Resize */}
           <section className="cfg-section">
             <h3>Disks</h3>
             <table className="cfg-table">
@@ -220,7 +215,6 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
             </div>
           </section>
 
-          {/* USB Passthrough */}
           <section className="cfg-section">
             <h3>USB Passthrough</h3>
             {usbSlots.length === 0
@@ -255,7 +249,6 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
             )}
           </section>
 
-          {/* PCI / GPU Passthrough (VMs only) */}
           {guest.kind === 'qemu' && (
             <section className="cfg-section">
               <h3>PCI / GPU Passthrough</h3>
@@ -294,6 +287,65 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
             </section>
           )}
         </>}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Add Instance modal
+// ---------------------------------------------------------------------------
+function AddInstanceModal({ project, onClose, onDone }) {
+  const [templates, setTemplates] = useState([])
+  const [selected, setSelected]  = useState('')
+  const [error, setError]        = useState(null)
+  const [loading, setLoading]    = useState(false)
+
+  useEffect(() => {
+    apiFetch(`/api/releases/${project.release}/built-templates`)
+      .then(r => r.json()).then(rows => {
+        setTemplates(rows)
+        if (rows.length) setSelected(rows[0].name)
+      }).catch(() => {})
+  }, [project.release])
+
+  const submit = async () => {
+    setLoading(true); setError(null)
+    try {
+      const res = await apiFetch(`/api/projects/${project.id}/instances`, {
+        method: 'POST',
+        body: JSON.stringify({ template_name: selected, wire_to: {} }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.detail ?? 'Failed'); return }
+      onDone()
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card card" onClick={e => e.stopPropagation()}>
+        <h2>Add Instance — {project.site_name}</h2>
+        {error && <div className="banner error">{error}</div>}
+        {templates.length === 0
+          ? <p className="empty">No built templates for release {project.release}.</p>
+          : <>
+            <label className="field"><span>Template</span>
+              <select value={selected} onChange={e => setSelected(e.target.value)}>
+                {templates.map(t => (
+                  <option key={t.name} value={t.name}>{t.name} ({t.kind})</option>
+                ))}
+              </select>
+            </label>
+            <div style={{display:'flex',gap:'.5rem',marginTop:'1rem'}}>
+              <button className="btn-primary" onClick={submit} disabled={loading || !selected}>
+                {loading ? 'Deploying…' : 'Deploy Instance'}
+              </button>
+              <button className="btn-xs" onClick={onClose}>Cancel</button>
+            </div>
+          </>
+        }
       </div>
     </div>
   )
@@ -413,6 +465,7 @@ function Field({ label, value, onChange, type='text', placeholder='' }) {
     </label>
   )
 }
+
 function InstanceRow({ inst }) {
   return (
     <div className="instance-row">
@@ -425,15 +478,23 @@ function InstanceRow({ inst }) {
 }
 
 function DeployTab({ releases }) {
-  const [form, setForm]         = useState({ ...EMPTY_FORM, release: releases[0]?.release ?? '' })
+  const [form, setForm]           = useState({ ...EMPTY_FORM, release: releases[0]?.release ?? '' })
   const [deploying, setDeploying] = useState(false)
-  const [error, setError]       = useState(null)
-  const [projects, setProjects] = useState([])
+  const [error, setError]         = useState(null)
+  const [projects, setProjects]   = useState([])
+  const [addInstProject, setAddInstProject] = useState(null)
   const set = key => val => setForm(f => ({ ...f, [key]: val }))
+
   const loadProjects = useCallback(() => {
     apiFetch('/api/projects').then(r => r.json()).then(setProjects).catch(() => {})
   }, [])
-  useEffect(() => { loadProjects(); const id = setInterval(loadProjects, 5000); return () => clearInterval(id) }, [loadProjects])
+
+  useEffect(() => {
+    loadProjects()
+    const id = setInterval(loadProjects, 5000)
+    return () => clearInterval(id)
+  }, [loadProjects])
+
   const deploy = async () => {
     if (!form.site_name.trim()) return
     setDeploying(true); setError(null)
@@ -444,6 +505,7 @@ function DeployTab({ releases }) {
       setForm({ ...EMPTY_FORM, release: releases[0]?.release ?? '' }); loadProjects()
     } catch (e) { setError(e.message) } finally { setDeploying(false) }
   }
+
   return (
     <div className="deploy-tab">
       <section className="deploy-form card">
@@ -466,15 +528,17 @@ function DeployTab({ releases }) {
         <button className="btn-primary" onClick={deploy} disabled={deploying || !form.site_name.trim() || !form.release}>
           {deploying ? 'Deploying…' : 'Deploy Stack'}
         </button>
-        <p className="form-note">Deploys all LXC templates for the selected release. HAOS (ctrlable-pro) is handled separately (M6).</p>
       </section>
+
       {projects.length > 0 && (
         <section className="projects-list">
           <h2 className="section-title">Deployed Stacks</h2>
           {projects.map(p => (
             <div key={p.id} className="card project-card">
               <div className="project-card-header">
-                <strong>{p.site_name}</strong><span className="tag accent">{p.release}</span>
+                <strong>{p.site_name}</strong>
+                <span className="tag accent">{p.release}</span>
+                <button className="btn-xs" onClick={() => setAddInstProject(p)}>+ Add Instance</button>
               </div>
               {p.instances.length === 0
                 ? <p className="empty small">Cloning in progress…</p>
@@ -483,6 +547,14 @@ function DeployTab({ releases }) {
           ))}
         </section>
       )}
+
+      {addInstProject && (
+        <AddInstanceModal
+          project={addInstProject}
+          onClose={() => setAddInstProject(null)}
+          onDone={() => { setAddInstProject(null); loadProjects() }}
+        />
+      )}
     </div>
   )
 }
@@ -490,19 +562,218 @@ function DeployTab({ releases }) {
 // ---------------------------------------------------------------------------
 // Releases tab
 // ---------------------------------------------------------------------------
+function BuildLogViewer({ buildId, onDone }) {
+  const [build, setBuild] = useState(null)
+  const logRef = useRef(null)
+
+  useEffect(() => {
+    const poll = async () => {
+      const res = await apiFetch(`/api/builds/${buildId}`)
+      const data = await res.json()
+      setBuild(data)
+      if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+      if (data.status === 'running') setTimeout(poll, 3000)
+      else onDone?.()
+    }
+    poll()
+  }, [buildId])
+
+  if (!build) return <div className="loading">Loading build…</div>
+
+  const statusColor = build.status === 'success' ? '#22c55e' : build.status === 'failed' ? '#ef4444' : '#f59e0b'
+
+  return (
+    <div className="build-log-wrap">
+      <div className="build-log-header">
+        <span>Build #{build.id} — {build.release}</span>
+        <span className="tag" style={{background: statusColor, color:'#fff'}}>{build.status}</span>
+      </div>
+      <pre ref={logRef} className="build-log">{build.log || '(no output yet)'}</pre>
+    </div>
+  )
+}
+
+function ReleaseCard({ release, onBuildStarted }) {
+  const [templates, setTemplates] = useState([])
+  const [building, setBuilding]   = useState(false)
+  const [error, setError]         = useState(null)
+  const [activeBuildId, setActiveBuildId] = useState(null)
+
+  useEffect(() => {
+    apiFetch(`/api/releases/${release.release}/built-templates`)
+      .then(r => r.json()).then(setTemplates).catch(() => {})
+  }, [release.release, activeBuildId])
+
+  const triggerBuild = async () => {
+    setBuilding(true); setError(null)
+    try {
+      const res = await apiFetch('/api/builds', {
+        method: 'POST',
+        body: JSON.stringify({ release: release.release }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.detail ?? 'Build failed to start'); return }
+      setActiveBuildId(data.build_id)
+      onBuildStarted?.()
+    } catch (e) { setError(e.message) }
+    finally { setBuilding(false) }
+  }
+
+  return (
+    <div className="card release-card">
+      <div className="release-row">
+        <strong>{release.release}</strong>
+        {release.active ? <span className="tag accent">active</span> : <span className="tag">inactive</span>}
+        <span className="muted">{release.community_ref}</span>
+        <button className="btn-xs" onClick={triggerBuild} disabled={building || !!activeBuildId}>
+          {building ? 'Starting…' : 'Build'}
+        </button>
+      </div>
+
+      {error && <div className="banner error" style={{marginTop:'.5rem'}}>{error}</div>}
+
+      {activeBuildId && (
+        <BuildLogViewer buildId={activeBuildId} onDone={() => {
+          // Reload templates after build completes
+          apiFetch(`/api/releases/${release.release}/built-templates`)
+            .then(r => r.json()).then(setTemplates).catch(() => {})
+        }} />
+      )}
+
+      {templates.length > 0 && (
+        <table className="cfg-table" style={{marginTop:'.75rem'}}>
+          <thead><tr><th>Template</th><th>Kind</th><th>VMID</th><th>Built</th></tr></thead>
+          <tbody>
+            {templates.map(t => (
+              <tr key={t.name}>
+                <td>{t.name}</td>
+                <td><span className="tag">{t.kind}</span></td>
+                <td className="muted">{t.template_vmid}</td>
+                <td className="muted">{t.built_at ? new Date(t.built_at).toLocaleDateString() : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
 function ReleasesTab({ releases }) {
+  const [builds, setBuilds] = useState([])
+
+  const loadBuilds = useCallback(() => {
+    apiFetch('/api/builds').then(r => r.json()).then(setBuilds).catch(() => {})
+  }, [])
+
+  useEffect(() => { loadBuilds() }, [loadBuilds])
+
   return (
     <div className="releases-tab">
       {releases.map(r => (
-        <div key={r.release} className="card">
-          <div className="release-row">
-            <strong>{r.release}</strong>
-            {r.active ? <span className="tag accent">active</span> : <span className="tag">inactive</span>}
-            <span className="muted">{r.community_ref}</span>
-          </div>
-          <p className="form-note">Build pipeline trigger coming in M7.</p>
-        </div>
+        <ReleaseCard key={r.release} release={r} onBuildStarted={loadBuilds} />
       ))}
+
+      {builds.length > 0 && (
+        <div className="card" style={{marginTop:'1.5rem'}}>
+          <h3 style={{marginBottom:'.75rem'}}>Build History</h3>
+          <table className="cfg-table">
+            <thead><tr><th>#</th><th>Release</th><th>Status</th><th>Started</th></tr></thead>
+            <tbody>
+              {builds.map(b => (
+                <tr key={b.id}>
+                  <td className="muted">{b.id}</td>
+                  <td>{b.release}</td>
+                  <td>
+                    <span className="tag" style={{
+                      background: b.status === 'success' ? '#22c55e' : b.status === 'failed' ? '#ef4444' : '#f59e0b',
+                      color: '#fff'
+                    }}>{b.status}</span>
+                  </td>
+                  <td className="muted">{new Date(b.started_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Platform tab (M8)
+// ---------------------------------------------------------------------------
+function PlatformTab() {
+  const [status, setStatus]   = useState(null)
+  const [token, setToken]     = useState('')
+  const [enrolling, setEnrolling] = useState(false)
+  const [error, setError]     = useState(null)
+
+  const loadStatus = useCallback(() => {
+    apiFetch('/api/platform/status').then(r => r.json()).then(setStatus).catch(() => {})
+  }, [])
+
+  useEffect(() => { loadStatus() }, [loadStatus])
+
+  const enroll = async () => {
+    if (!token.trim()) return
+    setEnrolling(true); setError(null)
+    try {
+      const res = await apiFetch('/api/platform/enroll', {
+        method: 'POST',
+        body: JSON.stringify({ token: token.trim() }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.detail ?? 'Enrollment failed'); return }
+      setToken(''); loadStatus()
+    } catch (e) { setError(e.message) }
+    finally { setEnrolling(false) }
+  }
+
+  if (!status) return <div className="loading">Loading…</div>
+
+  return (
+    <div className="platform-tab">
+      {status.enrolled ? (
+        <div className="card">
+          <div className="platform-enrolled">
+            <span className="status-dot" style={{background:'#22c55e', display:'inline-block', marginRight:'.5rem'}} />
+            <strong>Enrolled in Ctrlable Portal</strong>
+          </div>
+          <div className="platform-details">
+            <div className="platform-row"><span className="muted">Device ID</span><code>{status.device_id}</code></div>
+            <div className="platform-row"><span className="muted">Tunnel IP</span><code>{status.tunnel_ip}</code></div>
+            <div className="platform-row"><span className="muted">WG Interface</span><code>{status.wg_iface}</code></div>
+            <div className="platform-row"><span className="muted">Enrolled</span><span>{new Date(status.enrolled_at).toLocaleString()}</span></div>
+          </div>
+          <a className="btn-xs" href={status.portal_url} target="_blank" rel="noreferrer" style={{marginTop:'1rem',display:'inline-block'}}>
+            View in Portal →
+          </a>
+        </div>
+      ) : (
+        <div className="card">
+          <h2>Enroll in Ctrlable Portal</h2>
+          <p className="form-note" style={{marginBottom:'1rem'}}>
+            Enrolling connects this orchestrator to portal.ctrlable.com via WireGuard,
+            enabling remote management and monitoring.
+            Generate an enrollment token in the portal under <strong>Devices → Add Device</strong>.
+          </p>
+          {error && <div className="banner error">{error}</div>}
+          <label className="field"><span>Enrollment Token</span>
+            <input
+              value={token}
+              onChange={e => setToken(e.target.value)}
+              placeholder="Paste token from portal.ctrlable.com"
+              autoFocus
+            />
+          </label>
+          <button className="btn-primary" style={{marginTop:'.75rem'}}
+            onClick={enroll} disabled={enrolling || !token.trim()}>
+            {enrolling ? 'Enrolling…' : 'Enroll'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -570,7 +841,7 @@ export default function App() {
       </header>
 
       <nav className="tabs">
-        {['dashboard','deploy','releases'].map(t => (
+        {['dashboard','deploy','releases','platform'].map(t => (
           <button key={t} className={`tab ${tab===t?'active':''}`} onClick={() => setTab(t)}>
             {t.charAt(0).toUpperCase()+t.slice(1)}
           </button>
@@ -581,6 +852,7 @@ export default function App() {
         {tab==='dashboard' && <DashboardTab data={dashboard} onAction={handleAction} onConfigure={setConfigGuest} />}
         {tab==='deploy'    && <DeployTab releases={releases} />}
         {tab==='releases'  && <ReleasesTab releases={releases} />}
+        {tab==='platform'  && <PlatformTab />}
       </main>
 
       {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
