@@ -706,12 +706,14 @@ function ReleasesTab({ releases }) {
 // ---------------------------------------------------------------------------
 function PlatformTab() {
   const [status, setStatus]   = useState(null)
+  const [lan, setLan]         = useState(null)
   const [token, setToken]     = useState('')
   const [enrolling, setEnrolling] = useState(false)
   const [error, setError]     = useState(null)
 
   const loadStatus = useCallback(() => {
     apiFetch('/api/platform/status').then(r => r.json()).then(setStatus).catch(() => {})
+    apiFetch('/api/lan/status').then(r => r.json()).then(setLan).catch(() => {})
   }, [])
 
   useEffect(() => { loadStatus() }, [loadStatus])
@@ -751,6 +753,33 @@ function PlatformTab() {
             View in Portal →
           </a>
         </div>
+
+      {/* LAN access status */}
+      {lan && (
+        <div className="card" style={{marginTop:'1rem'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'.6rem',marginBottom:'1rem'}}>
+            <span className="status-dot" style={{background: lan.configured ? '#22c55e' : '#f59e0b', display:'inline-block'}} />
+            <strong>LAN Access</strong>
+          </div>
+          {lan.configured ? (
+            <div className="platform-details">
+              <div className="platform-row"><span className="muted">Interface</span><code>{lan.lan_iface}</code></div>
+              <div className="platform-row"><span className="muted">LAN Subnet</span><code>{lan.lan_subnet}</code></div>
+              <div className="platform-row">
+                <span className="muted">Proxy Subnet</span>
+                {lan.proxy_subnet
+                  ? <code>{lan.proxy_subnet}</code>
+                  : <span className="muted">Pending portal allocation…</span>}
+              </div>
+              <div className="platform-row"><span className="muted">NAT</span>
+                <span className="tag" style={{background:'#22c55e',color:'#fff'}}>active</span>
+              </div>
+            </div>
+          ) : (
+            <p className="form-note">LAN not yet detected. Will configure automatically after tunnel is up.</p>
+          )}
+        </div>
+      )}
       ) : (
         <div className="card">
           {status.pending_token ? (

@@ -127,7 +127,9 @@ async def _auto_enroll_loop(db: "StateDB") -> None:
         if await asyncio.to_thread(_has_internet):
             try:
                 _did, device_token, tunnel_ip, _iface = await asyncio.to_thread(enroll, token, db)
-                start_heartbeat(_did, device_token)
+                start_heartbeat(_did, device_token, db)
+                from .lan import setup_lan_access
+                asyncio.create_task(asyncio.to_thread(setup_lan_access, _did, device_token, db))
                 log.info("Auto-enrollment successful — tunnel IP %s", tunnel_ip)
                 _clear_pending_token()
                 return
@@ -258,27 +260,69 @@ def get_status(db: "StateDB") -> dict:
 # Heartbeat
 # ---------------------------------------------------------------------------
 
-def start_heartbeat(device_id: str, device_token: str) -> None:
+def start_heartbeat(device_id: str, device_token: str, db: "StateDB | None" = None) -> None:
     global _heartbeat_task
     if _heartbeat_task and not _heartbeat_task.done():
         _heartbeat_task.cancel()
-    _heartbeat_task = asyncio.create_task(_heartbeat_loop(device_id, device_token))
+    _heartbeat_task = asyncio.create_task(_heartbeat_loop(device_id, device_token, db))
 
 
-async def _heartbeat_loop(device_id: str, device_token: str) -> None:
+async def _heartbeat_loop(device_id: str, device_token: str, db: "StateDB") -> None:
+    from .lan import (
+        get_lan_candidates, load_scan_ports, save_scan_ports,
+        scan_lan, report_scan, should_scan, mark_scanned,
+        setup_netmap, netmap_active,
+    )
+    beat = 0
     while True:
         await asyncio.sleep(60)
+        beat += 1
         try:
-            await asyncio.to_thread(_send_heartbeat, device_id, device_token)
+            resp = await asyncio.to_thread(
+                _send_heartbeat, device_id, device_token, get_lan_candidates()
+            )
+            # Update scan port list if portal sent a new one
+            if resp.get("scan_ports"):
+                save_scan_ports(resp["scan_ports"])
+
+            # Set up / refresh NETMAP when portal provides proxy_subnet
+            proxy_subnet = resp.get("proxy_subnet")
+            lan_subnet   = resp.get("lan_subnet")
+            if proxy_subnet and lan_subnet and not netmap_active(proxy_subnet):
+                pstate = db.get_platform_state()
+                wg_iface = pstate["wg_iface"] if pstate else "wg1"
+                await asyncio.to_thread(setup_netmap, proxy_subnet, lan_subnet, wg_iface)
+                db.update_lan_state(
+                    pstate["lan_iface"] if pstate else "",
+                    lan_subnet, proxy_subnet
+                )
+
         except Exception as e:
             log.debug("Heartbeat failed: %s", e)
 
+        # Scan LAN every 5 beats (~5 min)
+        if beat % 5 == 0:
+            try:
+                pstate = db.get_platform_state()
+                if pstate and pstate.get("lan_subnet"):
+                    ports   = load_scan_ports()
+                    devices = await asyncio.to_thread(scan_lan, pstate["lan_subnet"], ports)
+                    await asyncio.to_thread(report_scan, device_id, device_token, devices)
+                    mark_scanned()
+            except Exception as e:
+                log.debug("LAN scan failed: %s", e)
 
-def _send_heartbeat(device_id: str, device_token: str) -> None:
+
+def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str]) -> dict:
     rx, tx = _wg_stats()
-    _portal_post(
+    return _portal_post(
         f"/api/v1/devices/{device_id}/heartbeat",
-        {"rx_bytes": rx, "tx_bytes": tx, "agent_version": "ctrlable-provisioner/1.0"},
+        {
+            "rx_bytes": rx,
+            "tx_bytes": tx,
+            "agent_version": "ctrlable-provisioner/1.0",
+            "lan_candidates": lan_candidates,
+        },
         token=device_token,
     )
 

@@ -14,6 +14,7 @@ from .build import trigger_build
 from .config import get_settings
 from .deploy import deploy_instance, deploy_stack_async
 from .manifest import load_all_manifests
+from .lan import setup_lan_access
 from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
 from .provision import complete_provisioning, get_assignment
 from .proxmox import ProxmoxClient
@@ -38,7 +39,8 @@ async def lifespan(app: FastAPI):
     pstate = db.get_platform_state()
     if pstate:
         ensure_tunnel_up(pstate["wg_iface"])
-        start_heartbeat(pstate["device_id"], pstate["device_token"])
+        start_heartbeat(pstate["device_id"], pstate["device_token"], db)
+        asyncio.create_task(asyncio.to_thread(setup_lan_access, pstate["device_id"], pstate["device_token"], db))
     else:
         start_auto_enroll(db)
     yield
@@ -484,10 +486,29 @@ class PlatformEnrollRequest(BaseModel):
 async def platform_enroll_endpoint(req: PlatformEnrollRequest, _: str | None = Depends(require_auth)) -> dict:
     try:
         device_id, device_token, tunnel_ip, wg_iface = await asyncio.to_thread(_platform_enroll, req.token, db)
-        start_heartbeat(device_id, device_token)
+        start_heartbeat(device_id, device_token, db)
+        asyncio.create_task(asyncio.to_thread(setup_lan_access, device_id, device_token, db))
         return {"device_id": device_id, "tunnel_ip": tunnel_ip, "wg_iface": wg_iface}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+# ---------------------------------------------------------------------------
+# LAN status
+# ---------------------------------------------------------------------------
+
+@app.get("/api/lan/status")
+def lan_status(_: str | None = Depends(require_auth)) -> dict:
+    pstate = db.get_platform_state()
+    if not pstate or not pstate["lan_subnet"]:
+        return {"configured": False}
+    return {
+        "configured":    True,
+        "lan_iface":     pstate["lan_iface"],
+        "lan_subnet":    pstate["lan_subnet"],
+        "proxy_subnet":  pstate["proxy_subnet"],
+        "nat_active":    True,
+    }
 
 
 # ---------------------------------------------------------------------------

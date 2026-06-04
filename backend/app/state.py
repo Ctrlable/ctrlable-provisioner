@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS platform_state (
   device_token TEXT NOT NULL,
   tunnel_ip    TEXT NOT NULL,
   wg_iface     TEXT NOT NULL,
-  enrolled_at  TEXT NOT NULL
+  enrolled_at  TEXT NOT NULL,
+  lan_iface    TEXT,
+  lan_subnet   TEXT,
+  proxy_subnet TEXT
 );
 
 CREATE TABLE IF NOT EXISTS builds (
@@ -79,11 +82,17 @@ class StateDB:
     def _init(self) -> None:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
-            # Migration for DBs created before firstboot_secret column was added
-            try:
-                conn.execute("ALTER TABLE releases ADD COLUMN firstboot_secret TEXT")
-            except sqlite3.OperationalError:
-                pass
+            # Incremental migrations
+            for migration in [
+                "ALTER TABLE releases ADD COLUMN firstboot_secret TEXT",
+                "ALTER TABLE platform_state ADD COLUMN lan_iface TEXT",
+                "ALTER TABLE platform_state ADD COLUMN lan_subnet TEXT",
+                "ALTER TABLE platform_state ADD COLUMN proxy_subnet TEXT",
+            ]:
+                try:
+                    conn.execute(migration)
+                except sqlite3.OperationalError:
+                    pass
 
     @contextmanager
     def _conn(self):
@@ -309,12 +318,21 @@ class StateDB:
                 "INSERT INTO platform_state (id, device_id, device_token, tunnel_ip, wg_iface, enrolled_at)"
                 " VALUES (1, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(id) DO UPDATE SET"
-                "   device_id = excluded.device_id,"
+                "   device_id    = excluded.device_id,"
                 "   device_token = excluded.device_token,"
-                "   tunnel_ip = excluded.tunnel_ip,"
-                "   wg_iface = excluded.wg_iface,"
-                "   enrolled_at = excluded.enrolled_at",
+                "   tunnel_ip    = excluded.tunnel_ip,"
+                "   wg_iface     = excluded.wg_iface,"
+                "   enrolled_at  = excluded.enrolled_at",
                 (device_id, device_token, tunnel_ip, wg_iface, _now()),
+            )
+
+    def update_lan_state(
+        self, lan_iface: str, lan_subnet: str, proxy_subnet: str | None
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE platform_state SET lan_iface=?, lan_subnet=?, proxy_subnet=? WHERE id=1",
+                (lan_iface, lan_subnet, proxy_subnet),
             )
 
     # --- seed from manifest ---
