@@ -320,7 +320,7 @@ def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str]
         {
             "rx_bytes": rx,
             "tx_bytes": tx,
-            "agent_version": "ctrlable-provisioner/1.0",
+            "agent_version": "prov/1.0",
             "lan_candidates": lan_candidates,
         },
         token=device_token,
