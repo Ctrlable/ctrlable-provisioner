@@ -480,9 +480,11 @@ class PlatformEnrollRequest(BaseModel):
 
 
 @app.post("/api/platform/enroll")
-def platform_enroll_endpoint(req: PlatformEnrollRequest, _: str | None = Depends(require_auth)) -> dict:
+async def platform_enroll_endpoint(req: PlatformEnrollRequest, _: str | None = Depends(require_auth)) -> dict:
     try:
-        return _platform_enroll(req.token, db)
+        device_id, device_token, tunnel_ip, wg_iface = await asyncio.to_thread(_platform_enroll, req.token, db)
+        start_heartbeat(device_id, device_token)
+        return {"device_id": device_id, "tunnel_ip": tunnel_ip, "wg_iface": wg_iface}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 

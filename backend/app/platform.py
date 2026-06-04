@@ -126,8 +126,9 @@ async def _auto_enroll_loop(db: "StateDB") -> None:
 
         if await asyncio.to_thread(_has_internet):
             try:
-                await asyncio.to_thread(enroll, token, db)
-                log.info("Auto-enrollment successful")
+                _did, device_token, tunnel_ip, _iface = await asyncio.to_thread(enroll, token, db)
+                start_heartbeat(_did, device_token)
+                log.info("Auto-enrollment successful — tunnel IP %s", tunnel_ip)
                 _clear_pending_token()
                 return
             except Exception as e:
@@ -159,6 +160,12 @@ def enroll(token: str, db: "StateDB") -> dict:
         raise ValueError(f"Unexpected portal response: {resp}")
 
     wg_conf = base64.b64decode(wg_b64).decode()
+
+    # Strip DNS= lines — LXC uses its own resolver; resolvconf may not be installed
+    wg_conf = "\n".join(
+        line for line in wg_conf.splitlines()
+        if not line.strip().startswith("DNS")
+    ) + "\n"
 
     # Write WireGuard config
     WG_DIR.mkdir(parents=True, exist_ok=True)
@@ -199,9 +206,7 @@ def enroll(token: str, db: "StateDB") -> dict:
 
     db.set_platform_state(device_id, device_token, tunnel_ip, wg_iface)
 
-    start_heartbeat(device_id, device_token)
-
-    return {"device_id": device_id, "tunnel_ip": tunnel_ip, "wg_iface": wg_iface}
+    return device_id, device_token, tunnel_ip, wg_iface
 
 
 # ---------------------------------------------------------------------------
@@ -211,10 +216,7 @@ def enroll(token: str, db: "StateDB") -> dict:
 def get_status(db: "StateDB") -> dict:
     state = db.get_platform_state()
     if not state:
-        return {
-            "enrolled": False,
-            "pending_token": _load_pending_token() is not None,
-        }
+        return {"enrolled": False, "pending_token": _load_pending_token() is not None}
     return {
         "enrolled": True,
         "device_id": state["device_id"],
