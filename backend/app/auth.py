@@ -9,15 +9,14 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+import bcrypt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 if TYPE_CHECKING:
     from .config import Settings
 
-_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _bearer = HTTPBearer(auto_error=False)
 
 # Fallback secret used when JWT_SECRET is not configured.
@@ -26,11 +25,14 @@ _EPHEMERAL_SECRET = secrets.token_hex(32)
 
 
 def hash_password(plain: str) -> str:
-    return _pwd.hash(plain)
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd.verify(plain, hashed)
+    try:
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    except Exception:
+        return False
 
 
 def create_token(username: str, settings: "Settings") -> str:
