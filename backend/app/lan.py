@@ -402,7 +402,7 @@ def report_scan(device_id: str, device_token: str, devices: list[dict]) -> None:
     """POST /api/discovery/report with ARP + port scan results."""
     payload = json.dumps({"scan_type": "arp_nc", "devices": devices}).encode()
     req = urllib.request.Request(
-        f"{PORTAL_BASE}/api/discovery/report",
+        f"{PORTAL_BASE}/api/v1/discovery/report",
         data=payload,
         headers={"Content-Type": "application/json", "X-Device-Token": device_token},
         method="POST",
