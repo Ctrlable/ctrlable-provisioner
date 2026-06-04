@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import logging
+import shutil
 import socket
 import subprocess
 import urllib.error
@@ -176,6 +177,16 @@ def enroll(token: str, db: "StateDB") -> dict:
         f"API_BASE={PORTAL_BASE}/api/v1\n"
     )
     (AGENT_CONF_DIR / "ctrlable.conf").chmod(0o600)
+
+    # Install wireguard-tools if missing
+    if not shutil.which("wg-quick"):
+        log.info("wireguard-tools not found — installing")
+        r = subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "wireguard-tools"],
+            capture_output=True, text=True
+        )
+        if r.returncode != 0:
+            log.warning("wireguard-tools install failed: %s", r.stderr.strip())
 
     # Bring up WireGuard (tear down first if re-enrolling)
     subprocess.run(["wg-quick", "down", wg_iface], capture_output=True)
