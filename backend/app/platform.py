@@ -298,19 +298,19 @@ async def _heartbeat_loop(device_id: str, device_token: str, db: "StateDB") -> N
                 )
 
         except Exception as e:
-            log.debug("Heartbeat failed: %s", e)
+            log.warning("Heartbeat failed: %s", e)
 
         # Scan LAN every 5 beats (~5 min)
         if beat % 5 == 0:
             try:
                 pstate = db.get_platform_state()
-                if pstate and pstate.get("lan_subnet"):
+                if pstate and pstate["lan_subnet"]:
                     ports   = load_scan_ports()
                     devices = await asyncio.to_thread(scan_lan, pstate["lan_subnet"], ports)
                     await asyncio.to_thread(report_scan, device_id, device_token, devices)
                     mark_scanned()
             except Exception as e:
-                log.debug("LAN scan failed: %s", e)
+                log.warning("LAN scan failed: %s", e)
 
 
 def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str]) -> dict:
