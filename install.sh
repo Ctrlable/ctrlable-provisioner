@@ -140,14 +140,14 @@ setup_pve_auth() {
 
     local privs="Sys.Audit,VM.Allocate,VM.Audit,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,Datastore.AllocateSpace,SDN.Use"
 
-    # Create or update the role (PVE 9: use 'pveum role list' not 'pveum rolelist')
-    if pveum role list 2>/dev/null | grep -q "CtrlableProvisioner"; then
+    # pveum role list sends its table to stderr in non-TTY contexts; capture both streams
+    if pveum role list 2>&1 | grep -q "CtrlableProvisioner"; then
         pveum role modify CtrlableProvisioner --privs "$privs"
     else
         pveum role add CtrlableProvisioner --privs "$privs"
     fi
 
-    pveum role list 2>/dev/null | grep -q "CtrlableProvisioner" \
+    pveum role list 2>&1 | grep -q "CtrlableProvisioner" \
         || die "CtrlableProvisioner role was not created"
 
     pveum user add provisioner@pve 2>/dev/null || true
