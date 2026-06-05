@@ -2,7 +2,11 @@
 # Ctrlable Provisioner — bootstrap installer
 # Run on a fresh Proxmox VE 8.x host.
 #
-# Remote install (production):
+# Remote install (production — auto-enrolls into portal):
+#   curl -fsSL https://raw.githubusercontent.com/ctrlable/ctrlable-provisioner/main/install.sh \
+#     | bash -s -- --portal-password YOUR_ADMIN_PASSWORD
+#
+# Without auto-enroll (paste token manually in the Platform tab afterward):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/ctrlable/ctrlable-provisioner/main/install.sh)"
 #
 # Local install (development — run from the repo root on the PVE host):
@@ -24,12 +28,15 @@ REPO_URL=https://github.com/ctrlable/ctrlable-provisioner
 REPO_REF=main
 LOCAL_SRC=""            # path to local repo checkout (--local <path>)
 ENROLL_TOKEN=""         # portal.ctrlable.com enrollment token (--enroll-token TOKEN)
+PORTAL_URL="https://portal.ctrlable.com"   # override with --portal-url
+PORTAL_EMAIL="ron@ctrlable.com"            # override with --portal-email
+PORTAL_PASSWORD=""      # admin password — triggers auto-token fetch (--portal-password PW)
 
 # ---------------------------------------------------------------------------
 # Arg parsing
 # ---------------------------------------------------------------------------
 usage() {
-    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF] [--enroll-token TOKEN]"
+    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF] [--enroll-token TOKEN] [--portal-url URL] [--portal-email EMAIL] [--portal-password PW]"
     exit 1
 }
 
@@ -41,7 +48,10 @@ while [[ $# -gt 0 ]]; do
         --local)        LOCAL_SRC="$2";     shift 2 ;;
         --repo)         REPO_URL="$2";      shift 2 ;;
         --ref)          REPO_REF="$2";      shift 2 ;;
-        --enroll-token) ENROLL_TOKEN="$2";  shift 2 ;;
+        --enroll-token)   ENROLL_TOKEN="$2";    shift 2 ;;
+        --portal-url)      PORTAL_URL="$2";      shift 2 ;;
+        --portal-email)    PORTAL_EMAIL="$2";    shift 2 ;;
+        --portal-password) PORTAL_PASSWORD="$2"; shift 2 ;;
         --help|-h) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -297,6 +307,31 @@ JSON
 }
 
 # ---------------------------------------------------------------------------
+# Auto-fetch enrollment token from portal (if --portal-password was given)
+# ---------------------------------------------------------------------------
+fetch_enroll_token() {
+    [[ -n "$PORTAL_PASSWORD" && -z "$ENROLL_TOKEN" ]] || return 0
+
+    log "fetching enrollment token from ${PORTAL_URL}"
+
+    local jwt
+    jwt=$(curl -fsSL -X POST "${PORTAL_URL}/api/v1/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"email\":\"${PORTAL_EMAIL}\",\"password\":\"${PORTAL_PASSWORD}\"}" \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('access_token'); print(t) if t else exit(1)" \
+        2>/dev/null) || die "portal login failed — check --portal-password"
+
+    ENROLL_TOKEN=$(curl -fsSL -X POST "${PORTAL_URL}/api/v1/devices/enrollment-tokens" \
+        -H "Authorization: Bearer ${jwt}" \
+        -H "Content-Type: application/json" \
+        -d '{"expires_hours":24,"is_appliance":true}' \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('token'); print(t) if t else exit(1)" \
+        2>/dev/null) || die "failed to create enrollment token from portal"
+
+    ok "enrollment token obtained from portal"
+}
+
+# ---------------------------------------------------------------------------
 # Install ctrlable-build on host
 # ---------------------------------------------------------------------------
 install_host_tools() {
@@ -337,10 +372,11 @@ print_summary() {
     echo -e "  Build key         : /etc/ctrlable/build_key"
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
-    if [[ -z "$ENROLL_TOKEN" ]]; then
-    echo "  1. Open the web UI → Platform tab → paste an enrollment token"
+    if [[ -n "$ENROLL_TOKEN" ]]; then
+    echo "  1. Orchestrator will auto-enroll in ${PORTAL_URL} within ~30 seconds"
     else
-    echo "  1. Orchestrator will auto-enroll in portal.ctrlable.com once internet is detected"
+    echo "  1. Open the web UI → Platform tab → paste an enrollment token"
+    echo "     (or re-run with --portal-password to auto-enroll)"
     fi
     echo "  2. Go to Releases → Build release 2026.06"
     echo "  3. Wait for all LXC templates to build (~10 min)"
@@ -363,6 +399,7 @@ create_lxc
 setup_pve_auth
 setup_build_key
 setup_lxc
+fetch_enroll_token
 write_config
 install_host_tools
 start_orchestrator
