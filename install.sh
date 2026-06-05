@@ -140,15 +140,9 @@ setup_pve_auth() {
 
     local privs="Sys.Audit,VM.Allocate,VM.Audit,VM.Clone,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.PowerMgmt,Datastore.AllocateSpace,SDN.Use"
 
-    # pveum role list sends its table to stderr in non-TTY contexts; capture both streams
-    if pveum role list 2>&1 | grep -q "CtrlableProvisioner"; then
-        pveum role modify CtrlableProvisioner --privs "$privs"
-    else
-        pveum role add CtrlableProvisioner --privs "$privs"
-    fi
-
-    pveum role list 2>&1 | grep -q "CtrlableProvisioner" \
-        || die "CtrlableProvisioner role was not created"
+    # modify if exists, add if not — avoids unreliable pveum role list grep in non-TTY
+    pveum role modify CtrlableProvisioner --privs "$privs" 2>/dev/null \
+        || pveum role add CtrlableProvisioner --privs "$privs"
 
     pveum user add provisioner@pve 2>/dev/null || true
     # PVE 9: pveum acl modify (--users / --roles); pveum aclmod is a deprecated alias
