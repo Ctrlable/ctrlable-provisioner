@@ -3,8 +3,9 @@
 # Run on a fresh Proxmox VE 8.x host.
 #
 # Remote install (production — auto-enrolls into portal):
+#   export CTRLABLE_PORTAL_PASSWORD=your_password   # avoids password in ps/history
 #   curl -fsSL https://raw.githubusercontent.com/ctrlable/ctrlable-provisioner/main/install.sh \
-#     | bash -s -- --portal-password YOUR_ADMIN_PASSWORD
+#     | bash -s -- --portal-email admin@example.com
 #
 # Without auto-enroll (paste token manually in the Platform tab afterward):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/ctrlable/ctrlable-provisioner/main/install.sh)"
@@ -29,8 +30,8 @@ REPO_REF=main
 LOCAL_SRC=""            # path to local repo checkout (--local <path>)
 ENROLL_TOKEN=""         # portal.ctrlable.com enrollment token (--enroll-token TOKEN)
 PORTAL_URL="https://portal.ctrlable.com"   # override with --portal-url
-PORTAL_EMAIL="ron@ctrlable.com"            # override with --portal-email
-PORTAL_PASSWORD=""      # admin password — triggers auto-token fetch (--portal-password PW)
+PORTAL_EMAIL=""         # required when using --portal-password; set with --portal-email
+PORTAL_PASSWORD=""      # read from CTRLABLE_PORTAL_PASSWORD env var or --portal-password PW
 
 # ---------------------------------------------------------------------------
 # Arg parsing
@@ -42,20 +43,24 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --vmid)         VMID="$2";          shift 2 ;;
-        --bridge)       BRIDGE="$2";        shift 2 ;;
-        --storage)      STORAGE="$2";       shift 2 ;;
-        --local)        LOCAL_SRC="$2";     shift 2 ;;
-        --repo)         REPO_URL="$2";      shift 2 ;;
-        --ref)          REPO_REF="$2";      shift 2 ;;
-        --enroll-token)   ENROLL_TOKEN="$2";    shift 2 ;;
-        --portal-url)      PORTAL_URL="$2";      shift 2 ;;
-        --portal-email)    PORTAL_EMAIL="$2";    shift 2 ;;
+        --vmid)            VMID="$2";          shift 2 ;;
+        --bridge)          BRIDGE="$2";        shift 2 ;;
+        --storage)         STORAGE="$2";       shift 2 ;;
+        --local)           LOCAL_SRC="$2";     shift 2 ;;
+        --repo)            REPO_URL="$2";      shift 2 ;;
+        --ref)             REPO_REF="$2";      shift 2 ;;
+        --enroll-token)    ENROLL_TOKEN="$2";  shift 2 ;;
+        --portal-url)      PORTAL_URL="$2";    shift 2 ;;
+        --portal-email)    PORTAL_EMAIL="$2";  shift 2 ;;
         --portal-password) PORTAL_PASSWORD="$2"; shift 2 ;;
         --help|-h) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
 done
+
+# Prefer env var over CLI flag so the password never appears in `ps aux`
+[[ -n "${CTRLABLE_PORTAL_PASSWORD:-}" && -z "$PORTAL_PASSWORD" ]] \
+    && PORTAL_PASSWORD="$CTRLABLE_PORTAL_PASSWORD"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,6 +74,11 @@ die()  { echo -e "${RED}[✗] $*${NC}" >&2; exit 1; }
 pct_exec() { pct exec "$VMID" -- "$@"; }
 pct_push() { pct push "$VMID" "$1" "$2"; }
 pct_pull() { pct pull "$VMID" "$1" "$2"; }
+
+# Secure temp dir — cleaned up on exit even if the script fails
+TMPDIR_PRIV=$(mktemp -d)
+chmod 700 "$TMPDIR_PRIV"
+trap 'rm -rf "$TMPDIR_PRIV"' EXIT
 
 # ---------------------------------------------------------------------------
 # Preflight
@@ -275,8 +285,8 @@ BUILD_TOKEN=${BUILD_TOKEN}
 ORCHESTRATOR_URL=http://${ORCHESTRATOR_IP}:8000
 ENV
 )
-    printf '%s\n' "$env_content" > /tmp/ctrlable.env
-    pct_push /tmp/ctrlable.env /opt/ctrlable-provisioner/backend/.env
+    printf '%s\n' "$env_content" > "$TMPDIR_PRIV/ctrlable.env"
+    pct_push "$TMPDIR_PRIV/ctrlable.env" /opt/ctrlable-provisioner/backend/.env
     pct_exec chmod 600 /opt/ctrlable-provisioner/backend/.env
 
     # Copy build SSH private key into the orchestrator LXC so it can reach the host
@@ -286,14 +296,11 @@ ENV
 
     # Store portal enrollment token for auto-enrollment on first boot
     if [[ -n "$ENROLL_TOKEN" ]]; then
-        printf '%s\n' "$ENROLL_TOKEN" > /tmp/ctrlable_enroll.token
-        pct_push /tmp/ctrlable_enroll.token /etc/ctrlable/enroll.token
+        printf '%s\n' "$ENROLL_TOKEN" > "$TMPDIR_PRIV/enroll.token"
+        pct_push "$TMPDIR_PRIV/enroll.token" /etc/ctrlable/enroll.token
         pct_exec chmod 600 /etc/ctrlable/enroll.token
-        rm /tmp/ctrlable_enroll.token
         ok "enrollment token stored — orchestrator will auto-enroll on first internet access"
     fi
-
-    rm /tmp/ctrlable.env
 
     log "writing host build.conf"
     cat > /etc/ctrlable/build.conf <<JSON
@@ -311,15 +318,24 @@ JSON
 # ---------------------------------------------------------------------------
 fetch_enroll_token() {
     [[ -n "$PORTAL_PASSWORD" && -z "$ENROLL_TOKEN" ]] || return 0
+    [[ -n "$PORTAL_EMAIL" ]] || die "--portal-email is required when using --portal-password"
 
     log "fetching enrollment token from ${PORTAL_URL}"
 
-    local jwt
+    local jwt creds
+    # Build credentials in a variable — never interpolated into a position where
+    # it would appear in the process list or shell trace
+    creds=$(python3 -c "
+import json, sys
+print(json.dumps({'email': sys.argv[1], 'password': sys.argv[2]}))
+" "$PORTAL_EMAIL" "$PORTAL_PASSWORD")
+
     jwt=$(curl -fsSL -X POST "${PORTAL_URL}/api/v1/auth/login" \
         -H "Content-Type: application/json" \
-        -d "{\"email\":\"${PORTAL_EMAIL}\",\"password\":\"${PORTAL_PASSWORD}\"}" \
+        -d "$creds" \
         | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('access_token'); print(t) if t else exit(1)" \
-        2>/dev/null) || die "portal login failed — check --portal-password"
+        2>/dev/null) || die "portal login failed — check --portal-email and --portal-password"
+    unset creds
 
     ENROLL_TOKEN=$(curl -fsSL -X POST "${PORTAL_URL}/api/v1/devices/enrollment-tokens" \
         -H "Authorization: Bearer ${jwt}" \
@@ -327,6 +343,7 @@ fetch_enroll_token() {
         -d '{"expires_hours":24,"is_appliance":true}' \
         | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('token'); print(t) if t else exit(1)" \
         2>/dev/null) || die "failed to create enrollment token from portal"
+    unset jwt
 
     ok "enrollment token obtained from portal"
 }
@@ -368,7 +385,6 @@ print_summary() {
     echo ""
     echo -e "  Orchestrator LXC  : ${BOLD}${VMID}${NC} (${LXC_HOSTNAME})"
     echo -e "  Web UI            : ${BOLD}http://${ORCHESTRATOR_IP}:8000${NC}"
-    echo -e "  PVE API token     : ${TOKEN_ID}"
     echo -e "  Build key         : /etc/ctrlable/build_key"
     echo ""
     echo -e "${BOLD}Next steps:${NC}"
