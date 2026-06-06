@@ -1,4 +1,9 @@
 {
   "orchestrator_url": "http://192.168.1.50:8000",
-  "build_token": "changeme-random-secret"
+  "build_token": "changeme-random-secret",
+
+  "container_storage": "",
+  "template_storage": "",
+
+  "haos_image_path": "/opt/ctrlable/images/ctrlable-os-generic_x86_64.img.xz"
 }

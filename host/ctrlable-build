@@ -204,6 +204,169 @@ def write_firstboot_conf(vmid: int, name: str, orchestrator_url: str, secret: st
     os.unlink(tmp)
 
 
+# ---------------------------------------------------------------------------
+# Build a single VM template (HAOS / qemu)
+# ---------------------------------------------------------------------------
+
+def find_backup_path(filename: str) -> str | None:
+    """Return the full path to a vzdump backup file, or None if not found."""
+    # Check dump directory for each active dir-type storage
+    try:
+        out = subprocess.run(["pvesm", "status"], capture_output=True, text=True).stdout
+        for line in out.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 3 or parts[2] != "active":
+                continue
+            # Ask pvesm for the real filesystem path of a backup content item
+            detail = subprocess.run(
+                ["pvesm", "path", f"{parts[0]}:backup/{filename}"],
+                capture_output=True, text=True,
+            )
+            if detail.returncode == 0 and detail.stdout.strip():
+                p = detail.stdout.strip()
+                if os.path.exists(p):
+                    return p
+    except Exception:
+        pass
+    # Fallback: common local dump path
+    p = os.path.join("/var/lib/vz/dump", filename)
+    if os.path.exists(p):
+        return p
+    return None
+
+
+def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
+    """Build a QEMU VM template from a vzdump backup or a branded .img/.img.xz."""
+    vmid_base = int(tmpl.get("vmid_base", 9000))
+    existing = list_vmids()
+    vmid = vmid_base
+    while vmid in existing:
+        vmid += 1
+
+    container_st, _ = detect_pve_storages()
+
+    # ── Option 1: restore from a pre-made vzdump backup ──────────────────────
+    base_backup = tmpl.get("base_backup", "")
+    if base_backup:
+        backup_path = find_backup_path(base_backup)
+        if backup_path:
+            log(f"[{name}] restoring from backup: {backup_path} → vmid={vmid}")
+            subprocess.run(
+                ["qmrestore", backup_path, str(vmid),
+                 "--unique", "1", "--storage", container_st],
+                check=True,
+            )
+            log(f"[{name}] converting to template")
+            subprocess.run(["qm", "template", str(vmid)], check=True)
+            log(f"[RESULT] name={name} vmid={vmid} kind=qemu")
+            return vmid
+        log(f"[{name}] backup '{base_backup}' not found — falling back to image import")
+
+    # ── Option 2: import a raw/compressed image ───────────────────────────────
+    haos_image_path = conf.get("haos_image_path", "")
+    if not haos_image_path:
+        # Check standard locations
+        for d in ["/opt/ctrlable/images", "/var/lib/vz/template/iso"]:
+            if os.path.isdir(d):
+                for f in sorted(os.listdir(d)):
+                    if f.endswith(".img.xz") or f.endswith(".img"):
+                        haos_image_path = os.path.join(d, f)
+                        break
+            if haos_image_path:
+                break
+
+    if not haos_image_path or not os.path.exists(haos_image_path):
+        die(
+            f"[{name}] no HAOS image or backup found.\n"
+            f"  To fix — choose one of:\n"
+            f"  A) Copy the branded .img.xz to the PVE host and set in build.conf:\n"
+            f"       \"haos_image_path\": \"/opt/ctrlable/images/ctrlable-os-generic_x86_64.img.xz\"\n"
+            f"  B) Create a Proxmox vzdump backup of the branded VM and place at:\n"
+            f"       /var/lib/vz/dump/{base_backup or 'ctrlable-base-<release>.tar'}\n"
+            f"  Build the branded image with: ./build-haos.sh <client_id>  (in rebrand-tools)"
+        )
+
+    log(f"[{name}] building VM vmid={vmid} from image: {haos_image_path}")
+    res = tmpl.get("resources") or {}
+    cores = str(res.get("cpu", 2))
+    mem   = str(res.get("ram", 4096))
+
+    temp_raw_path: str | None = None
+    try:
+        # Decompress .xz to a temp file
+        if haos_image_path.endswith(".xz"):
+            temp_raw_path = f"/tmp/ctrlable-haos-{vmid}.img"
+            log(f"[{name}] decompressing image to {temp_raw_path} (this may take a moment)...")
+            with open(temp_raw_path, "wb") as fout:
+                subprocess.run(
+                    ["xz", "--decompress", "--stdout", haos_image_path],
+                    stdout=fout, check=True,
+                )
+            raw_img = temp_raw_path
+        else:
+            raw_img = haos_image_path
+
+        # Create the VM skeleton
+        log(f"[{name}] creating VM")
+        subprocess.run([
+            "qm", "create", str(vmid),
+            "--name",    name,
+            "--memory",  mem,
+            "--cores",   cores,
+            "--cpu",     "host",
+            "--machine", "q35",
+            "--bios",    "ovmf",
+            "--efidisk0", f"{container_st}:0,efitype=4m,pre-enrolled-keys=0",
+            "--net0",    "virtio,bridge=vmbr0",
+            "--ostype",  "l26",
+            "--tablet",  "0",
+            "--balloon", "0",
+        ], check=True)
+
+        # Import disk image
+        log(f"[{name}] importing disk")
+        subprocess.run(
+            ["qm", "importdisk", str(vmid), raw_img, container_st, "--format", "qcow2"],
+            check=True,
+        )
+
+        # Find the unused disk slot created by importdisk
+        cfg = subprocess.run(
+            ["qm", "config", str(vmid)], capture_output=True, text=True, check=True
+        ).stdout
+        disk_ref = None
+        for line in cfg.splitlines():
+            if line.startswith("unused"):
+                disk_ref = line.split(":", 1)[1].strip()
+                break
+        if not disk_ref:
+            die(f"[{name}] could not find imported disk in VM config after importdisk")
+
+        # Attach disk and set boot order
+        log(f"[{name}] attaching disk {disk_ref}")
+        subprocess.run([
+            "qm", "set", str(vmid),
+            "--scsihw", "virtio-scsi-pci",
+            "--scsi0",  f"{disk_ref},discard=on,iothread=1",
+            "--boot",   "order=scsi0",
+        ], check=True)
+
+        log(f"[{name}] converting to template")
+        subprocess.run(["qm", "template", str(vmid)], check=True)
+
+    finally:
+        if temp_raw_path and os.path.exists(temp_raw_path):
+            log(f"[{name}] removing temp image {temp_raw_path}")
+            os.unlink(temp_raw_path)
+
+    log(f"[RESULT] name={name} vmid={vmid} kind=qemu")
+    return vmid
+
+
+# ---------------------------------------------------------------------------
+# Build a single LXC template
+# ---------------------------------------------------------------------------
+
 def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, firstboot_sh: str, conf: dict) -> int:
     ref = manifest["community_scripts_ref"]
     url = script_url(ref, tmpl["builder"])
@@ -273,7 +436,7 @@ def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, fir
     log(f"[{name}] converting to template")
     subprocess.run(["pct", "template", str(vmid)], check=True)
 
-    log(f"[RESULT] name={name} vmid={vmid}")
+    log(f"[RESULT] name={name} vmid={vmid} kind=lxc")
     return vmid
 
 
@@ -317,19 +480,17 @@ def main() -> None:
     skipped: list[str] = []
 
     for name, tmpl in manifest.get("templates", {}).items():
-        if tmpl["kind"] == "vm":
-            log(f"[SKIP] name={name} kind=vm (VM builds handled in M6)")
-            skipped.append(name)
-            continue
-
         if name in already_built:
             log(f"[SKIP] name={name} already built vmid={already_built[name]}")
             skipped.append(name)
             continue
 
-        log(f"\n=== building template: {name} ===")
+        log(f"\n=== building template: {name} ({tmpl['kind']}) ===")
         try:
-            build_lxc(name, tmpl, manifest, firstboot_svc, firstboot_sh, conf)
+            if tmpl["kind"] == "vm":
+                build_vm(name, tmpl, manifest, conf)
+            else:
+                build_lxc(name, tmpl, manifest, firstboot_svc, firstboot_sh, conf)
             built.append(name)
         except SystemExit:
             raise

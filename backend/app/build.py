@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .config import Settings
     from .state import StateDB
 
-_RESULT_RE = re.compile(r"\[RESULT\]\s+name=(\S+)\s+vmid=(\d+)")
+_RESULT_RE = re.compile(r"\[RESULT\]\s+name=(\S+)\s+vmid=(\d+)(?:\s+kind=(\S+))?")
 _running: set[str] = set()   # releases currently building; prevents concurrent builds
 
 
@@ -60,8 +60,9 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
         m = _RESULT_RE.search(line)
         if m:
             name, vmid = m.group(1), int(m.group(2))
+            kind_hint = m.group(3)  # emitted by ctrlable-build as kind=lxc or kind=qemu
             tmpl = db.get_template(release, name)
-            kind = tmpl["kind"] if tmpl else "lxc"
+            kind = tmpl["kind"] if tmpl else (kind_hint or "lxc")
             db.record_template(
                 release=release,
                 name=name,
