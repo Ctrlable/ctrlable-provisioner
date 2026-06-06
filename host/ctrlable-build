@@ -100,6 +100,27 @@ def list_vmids() -> set[int]:
     return ids
 
 
+def detect_pve_storages() -> tuple[str, str]:
+    """Return (container_storage, template_storage) by querying pvesm."""
+    out = subprocess.run(["pvesm", "status"], capture_output=True, text=True).stdout
+    container_st = "local-lvm"
+    template_st = "local"
+    for line in out.strip().splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        name, kind, status = parts[0], parts[1], parts[2]
+        if status != "active":
+            continue
+        # lvmthin / lvm / zfspool → good for rootdir (container disk)
+        if kind in ("lvmthin", "lvm", "zfspool") and container_st == "local-lvm":
+            container_st = name
+        # dir storage → good for vztmpl
+        if kind == "dir" and template_st == "local":
+            template_st = name
+    return container_st, template_st
+
+
 def is_running(vmid: int) -> bool:
     result = subprocess.run(
         ["pct", "status", str(vmid)], capture_output=True, text=True
@@ -119,7 +140,17 @@ def pct_push(vmid: int, src: str, dst: str) -> None:
 # Build a single LXC template
 # ---------------------------------------------------------------------------
 
-def build_env(tmpl: dict) -> dict:
+def build_env(tmpl: dict, conf: dict) -> dict:
+    # Detect or read storage — must be set so community-scripts skip the
+    # interactive storage-picker whiptail (which calls exit_script → exit 0
+    # when there is no TTY, aborting the build silently).
+    container_st = conf.get("container_storage") or None
+    template_st  = conf.get("template_storage")  or None
+    if not container_st or not template_st:
+        _cs, _ts = detect_pve_storages()
+        container_st = container_st or _cs
+        template_st  = template_st  or _ts
+
     env = {
         **os.environ,
         "METHOD": "default",
@@ -128,6 +159,9 @@ def build_env(tmpl: dict) -> dict:
         # community-scripts install_script() checks $mode to bypass its
         # whiptail menu: "1" = Default Install, no interactive prompt.
         "mode": "1",
+        # Pre-set storage so the storage-picker dialog is never shown.
+        "var_container_storage": container_st,
+        "var_template_storage":  template_st,
         # Prevent "unbound variable" errors in community-scripts summary sections
         # that reference $IP (e.g. docker.sh Portainer URL) when running non-interactively.
         "IP": "",
@@ -170,10 +204,10 @@ def write_firstboot_conf(vmid: int, name: str, orchestrator_url: str, secret: st
     os.unlink(tmp)
 
 
-def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, firstboot_sh: str) -> int:
+def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, firstboot_sh: str, conf: dict) -> int:
     ref = manifest["community_scripts_ref"]
     url = script_url(ref, tmpl["builder"])
-    env = build_env(tmpl)
+    env = build_env(tmpl, conf)
 
     log(f"[{name}] downloading builder: {url}")
     before = list_vmids()
@@ -295,7 +329,7 @@ def main() -> None:
 
         log(f"\n=== building template: {name} ===")
         try:
-            build_lxc(name, tmpl, manifest, firstboot_svc, firstboot_sh)
+            build_lxc(name, tmpl, manifest, firstboot_svc, firstboot_sh, conf)
             built.append(name)
         except SystemExit:
             raise
