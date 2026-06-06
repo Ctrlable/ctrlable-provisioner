@@ -255,6 +255,11 @@ class StateDB:
                 (project_id,),
             ).fetchall()
 
+    def delete_project(self, project_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            return cur.rowcount > 0
+
     # --- builds ---
 
     def create_build(self, release: str) -> int:

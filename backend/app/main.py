@@ -281,6 +281,10 @@ async def create_project_deploy(req: DeployStackRequest, _: str | None = Depends
     if req.release not in manifests:
         raise HTTPException(404, f"release {req.release!r} not found")
 
+    built = db.list_templates(req.release)
+    if not built:
+        raise HTTPException(400, f"Release {req.release!r} has no built templates — run a build first")
+
     project_id = db.create_project(req.site_name, req.release)
     asyncio.create_task(
         deploy_stack_async(project_id, req.release, req.model_dump(), db, _pve())
@@ -324,6 +328,15 @@ def get_project_api(project_id: int, _: str | None = Depends(require_auth)) -> d
         raise HTTPException(404)
     instances = db.list_instances(project["id"])
     return {**dict(project), "instances": [dict(i) for i in instances]}
+
+
+@app.delete("/api/projects/{project_id}", status_code=204)
+def delete_project_api(project_id: int, _: str | None = Depends(require_auth)) -> None:
+    instances = db.list_instances(project_id)
+    if instances:
+        raise HTTPException(400, "Cannot delete a project that has running instances")
+    if not db.delete_project(project_id):
+        raise HTTPException(404)
 
 
 # ---------------------------------------------------------------------------

@@ -483,6 +483,7 @@ function DeployTab({ releases }) {
   const [error, setError]         = useState(null)
   const [projects, setProjects]   = useState([])
   const [addInstProject, setAddInstProject] = useState(null)
+  const [builtTemplates, setBuiltTemplates] = useState([])
   const set = key => val => setForm(f => ({ ...f, [key]: val }))
 
   const loadProjects = useCallback(() => {
@@ -495,6 +496,12 @@ function DeployTab({ releases }) {
     return () => clearInterval(id)
   }, [loadProjects])
 
+  useEffect(() => {
+    if (!form.release) return
+    apiFetch(`/api/releases/${form.release}/built-templates`)
+      .then(r => r.json()).then(setBuiltTemplates).catch(() => setBuiltTemplates([]))
+  }, [form.release])
+
   const deploy = async () => {
     if (!form.site_name.trim()) return
     setDeploying(true); setError(null)
@@ -505,6 +512,14 @@ function DeployTab({ releases }) {
       setForm({ ...EMPTY_FORM, release: releases[0]?.release ?? '' }); loadProjects()
     } catch (e) { setError(e.message) } finally { setDeploying(false) }
   }
+
+  const deleteProject = async (id) => {
+    if (!confirm('Delete this stuck project?')) return
+    await apiFetch(`/api/projects/${id}`, { method: 'DELETE' })
+    loadProjects()
+  }
+
+  const releaseReady = builtTemplates.length > 0
 
   return (
     <div className="deploy-tab">
@@ -525,7 +540,12 @@ function DeployTab({ releases }) {
           <Field label="Zigbee coordinator" value={form.zigbee_coordinator} onChange={set('zigbee_coordinator')} placeholder="tcp://192.168.1.20:6638" />
           <Field label="Z-Wave coordinator" value={form.zwave_coordinator} onChange={set('zwave_coordinator')} placeholder="tcp://192.168.1.21:8888" />
         </div>
-        <button className="btn-primary" onClick={deploy} disabled={deploying || !form.site_name.trim() || !form.release}>
+        {!releaseReady && form.release && (
+          <div className="banner error" style={{marginBottom:'.75rem'}}>
+            Release <strong>{form.release}</strong> has no built templates — go to the Releases tab and run a build first.
+          </div>
+        )}
+        <button className="btn-primary" onClick={deploy} disabled={deploying || !form.site_name.trim() || !form.release || !releaseReady}>
           {deploying ? 'Deploying…' : 'Deploy Stack'}
         </button>
       </section>
@@ -538,10 +558,15 @@ function DeployTab({ releases }) {
               <div className="project-card-header">
                 <strong>{p.site_name}</strong>
                 <span className="tag accent">{p.release}</span>
-                <button className="btn-xs" onClick={() => setAddInstProject(p)}>+ Add Instance</button>
+                {p.instances.length > 0 && (
+                  <button className="btn-xs" onClick={() => setAddInstProject(p)}>+ Add Instance</button>
+                )}
+                {p.instances.length === 0 && (
+                  <button className="btn-xs danger" onClick={() => deleteProject(p.id)}>Delete</button>
+                )}
               </div>
               {p.instances.length === 0
-                ? <p className="empty small">Cloning in progress…</p>
+                ? <p className="empty small muted">No instances — deploy may have failed. Delete and retry after building the release.</p>
                 : p.instances.map(i => <InstanceRow key={i.id} inst={i} />)}
             </div>
           ))}
