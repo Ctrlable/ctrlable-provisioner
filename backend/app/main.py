@@ -82,22 +82,24 @@ class LoginRequest(BaseModel):
 
 @app.post("/api/auth/login")
 def login(req: LoginRequest) -> dict:
+    s = get_settings()   # always fresh so runtime password changes take effect immediately
     if (
-        req.username != settings.admin_user
-        or not verify_password(req.password, settings.effective_password_hash)
+        req.username != s.admin_user
+        or not verify_password(req.password, s.effective_password_hash)
     ):
         raise HTTPException(401, "Invalid credentials")
     return {
-        "token": create_token(req.username, settings),
-        "must_change_password": settings.must_change_password,
+        "token": create_token(req.username, s),
+        "must_change_password": s.must_change_password,
     }
 
 
 @app.get("/api/auth/status")
 def auth_status() -> dict:
+    s = get_settings()   # always fresh — reflects .env changes without restart
     return {
         "auth_enabled": True,
-        "must_change_password": settings.must_change_password,
+        "must_change_password": s.must_change_password,
     }
 
 
@@ -108,23 +110,23 @@ class SetupPasswordRequest(BaseModel):
 @app.post("/api/auth/setup")
 def setup_password(req: SetupPasswordRequest) -> dict:
     """First-time password setup — only works while must_change_password is True."""
-    if not settings.must_change_password:
+    if not get_settings().must_change_password:
         raise HTTPException(403, "Password already configured — use change-password instead")
     if len(req.new_password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
     new_hash = hash_password(req.new_password)
-    env_file = Path(settings.model_config.get("env_file", ".env"))
+    env_file = settings.env_file_path()
     if env_file.exists():
         text = env_file.read_text()
-        import re as _re
-        if _re.search(r"^ADMIN_PASSWORD_HASH=", text, _re.MULTILINE):
-            text = _re.sub(r"^ADMIN_PASSWORD_HASH=.*$", f"ADMIN_PASSWORD_HASH={new_hash}", text, flags=_re.MULTILINE)
+        if re.search(r"^ADMIN_PASSWORD_HASH=", text, re.MULTILINE):
+            text = re.sub(r"^ADMIN_PASSWORD_HASH=.*$", f"ADMIN_PASSWORD_HASH={new_hash}", text, flags=re.MULTILINE)
         else:
             text += f"\nADMIN_PASSWORD_HASH={new_hash}\n"
         env_file.write_text(text)
     get_settings.cache_clear()
+    fresh = get_settings()
     return {
-        "token": create_token(settings.admin_user, get_settings()),
+        "token": create_token(fresh.admin_user, fresh),
         "must_change_password": False,
     }
 
@@ -139,15 +141,13 @@ def change_password(
     req: ChangePasswordRequest,
     _: str | None = Depends(require_auth),
 ) -> dict:
-    if not auth_enabled(settings):
-        raise HTTPException(400, "Auth not enabled")
-    if not verify_password(req.current_password, settings.admin_password_hash):
+    s = get_settings()
+    if not verify_password(req.current_password, s.admin_password_hash):
         raise HTTPException(401, "Current password is incorrect")
     if len(req.new_password) < 8:
         raise HTTPException(400, "New password must be at least 8 characters")
     new_hash = hash_password(req.new_password)
-    # Update ADMIN_PASSWORD_HASH in the .env file and reload settings
-    env_file = Path(settings.model_config.get("env_file", ".env"))
+    env_file = settings.env_file_path()
     if env_file.exists():
         text = env_file.read_text()
         if re.search(r"^ADMIN_PASSWORD_HASH=", text, re.MULTILINE):

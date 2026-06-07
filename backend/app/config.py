@@ -42,6 +42,10 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    def env_file_path(self) -> Path:
+        """Absolute path to the .env file — avoids CWD-dependent relative lookups."""
+        return Path(__file__).parent.parent / ".env"
+
     def db_file(self) -> Path:
         if self.db_path:
             return Path(self.db_path)

@@ -69,4 +69,4 @@ def require_auth(
             detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return _decode(creds.credentials, settings.jwt_secret)
+    return _decode(creds.credentials, settings.jwt_secret or _EPHEMERAL_SECRET)
