@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     orchestrator_url: str = ""                         # URL baked into templates for firstboot call-home
 
     db_path: str = ""
+    exclude_vmids: str = ""   # comma-separated VMIDs to hide from dashboard (e.g. "900")
 
     # Auth — always enabled. Default password is "admin"; UI forces a change on first login.
     # Set ADMIN_PASSWORD_HASH in .env to activate a real password and lift the forced-change flag.
@@ -41,6 +42,14 @@ class Settings(BaseSettings):
         return not bool(self.admin_password_hash)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    def exclude_vmids_set(self) -> set[int]:
+        result = set()
+        for part in self.exclude_vmids.split(","):
+            part = part.strip()
+            if part.isdigit():
+                result.add(int(part))
+        return result
 
     def env_file_path(self) -> Path:
         """Absolute path to the .env file — avoids CWD-dependent relative lookups."""

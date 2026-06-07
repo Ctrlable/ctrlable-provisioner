@@ -569,7 +569,7 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
     try:
         px = _pve()
         host_health = px.node_health()
-        raw_guests = px.list_guests()
+        raw_guests = px.list_guests(exclude_vmids=settings.exclude_vmids_set())
     except Exception as exc:
         return {"configured": True, "error": str(exc), "host": None, "guests": []}
 

@@ -60,9 +60,14 @@ class ProxmoxClient:
             uptime=s.get("uptime", 0),
         )
 
-    def list_guests(self) -> list[GuestSummary]:
+    def list_guests(self, exclude_vmids: set[int] | None = None) -> list[GuestSummary]:
+        skip = exclude_vmids or set()
         guests = []
         for g in self._px.nodes(self.node).lxc.get():
+            if g.get("template") == 1:
+                continue
+            if int(g["vmid"]) in skip:
+                continue
             guests.append(GuestSummary(
                 vmid=int(g["vmid"]),
                 name=g.get("name", ""),
@@ -73,6 +78,10 @@ class ProxmoxClient:
                 maxmem=g.get("maxmem", 0),
             ))
         for g in self._px.nodes(self.node).qemu.get():
+            if g.get("template") == 1:
+                continue
+            if int(g["vmid"]) in skip:
+                continue
             guests.append(GuestSummary(
                 vmid=int(g["vmid"]),
                 name=g.get("name", ""),
