@@ -38,7 +38,8 @@ function LoginScreen({ onLogin }) {
       })
       const data = await res.json()
       if (!res.ok) { setError(data.detail ?? 'Login failed'); return }
-      setToken(data.token); onLogin()
+      setToken(data.token)
+      onLogin({ mustChange: data.must_change_password })
     } catch { setError('Cannot reach server') }
     finally { setLoading(false) }
   }
@@ -57,6 +58,58 @@ function LoginScreen({ onLogin }) {
         </label>
         <button className="btn-primary" disabled={loading || !password}>
           {loading ? 'Signing in…' : 'Sign in'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// First-time setup screen (shown when must_change_password is true)
+// ---------------------------------------------------------------------------
+function SetupPasswordScreen({ onDone }) {
+  const [pw, setPw]           = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [error, setError]     = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  const submit = async (e) => {
+    e.preventDefault()
+    if (pw !== confirm) { setError('Passwords do not match'); return }
+    if (pw.length < 8)  { setError('Minimum 8 characters'); return }
+    setLoading(true); setError(null)
+    try {
+      const res = await fetch('/api/auth/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_password: pw }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setError(data.detail ?? 'Failed'); return }
+      setToken(data.token)
+      onDone()
+    } catch { setError('Cannot reach server') }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="login-wrap">
+      <form className="login-card card" onSubmit={submit}>
+        <h1 className="login-title">Ctrlable Provisioner</h1>
+        <div className="banner" style={{background:'var(--accent-subtle,#1a2a3a)',marginBottom:'.5rem'}}>
+          Welcome! Set an admin password to get started.
+        </div>
+        {error && <div className="banner error">{error}</div>}
+        <label className="field"><span>New password</span>
+          <input type="password" value={pw} onChange={e => setPw(e.target.value)}
+            autoComplete="new-password" autoFocus placeholder="Min. 8 characters" />
+        </label>
+        <label className="field"><span>Confirm password</span>
+          <input type="password" value={confirm} onChange={e => setConfirm(e.target.value)}
+            autoComplete="new-password" placeholder="Repeat password" />
+        </label>
+        <button className="btn-primary" disabled={loading || !pw || !confirm}>
+          {loading ? 'Saving…' : 'Set password & continue'}
         </button>
       </form>
     </div>
@@ -853,19 +906,22 @@ function PlatformTab() {
 // Root app
 // ---------------------------------------------------------------------------
 export default function App() {
-  const [authReady, setAuthReady]       = useState(false)
-  const [authEnabled, setAuthEnabled]   = useState(false)
-  const [loggedIn, setLoggedIn]         = useState(!!getToken())
-  const [tab, setTab]                   = useState('dashboard')
-  const [dashboard, setDashboard]       = useState(null)
-  const [releases, setReleases]         = useState([])
-  const [fetchErr, setFetchErr]         = useState(null)
-  const [showChangePwd, setShowChangePwd] = useState(false)
-  const [configGuest, setConfigGuest]   = useState(null)
+  const [authReady, setAuthReady]           = useState(false)
+  const [mustChangePassword, setMustChange] = useState(false)
+  const [loggedIn, setLoggedIn]             = useState(!!getToken())
+  const [tab, setTab]                       = useState('dashboard')
+  const [dashboard, setDashboard]           = useState(null)
+  const [releases, setReleases]             = useState([])
+  const [fetchErr, setFetchErr]             = useState(null)
+  const [showChangePwd, setShowChangePwd]   = useState(false)
+  const [configGuest, setConfigGuest]       = useState(null)
 
   useEffect(() => {
     fetch('/api/auth/status').then(r => r.json())
-      .then(d => { setAuthEnabled(d.auth_enabled); setAuthReady(true) })
+      .then(d => {
+        setMustChange(d.must_change_password)
+        setAuthReady(true)
+      })
       .catch(() => setAuthReady(true))
   }, [])
 
@@ -876,12 +932,12 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!authReady || (authEnabled && !loggedIn)) return
+    if (!authReady || !loggedIn) return
     loadDashboard()
     apiFetch('/api/releases').then(r => r.json()).then(setReleases).catch(() => {})
     const id = setInterval(loadDashboard, 30_000)
     return () => clearInterval(id)
-  }, [authReady, authEnabled, loggedIn, loadDashboard])
+  }, [authReady, loggedIn, loadDashboard])
 
   const handleAction = useCallback(async (vmid, action) => {
     await apiFetch(`/api/guests/${vmid}/${action}`, { method: 'POST' })
@@ -891,7 +947,11 @@ export default function App() {
   const logout = () => { clearToken(); setLoggedIn(false); setDashboard(null) }
 
   if (!authReady) return null
-  if (authEnabled && !loggedIn) return <LoginScreen onLogin={() => setLoggedIn(true)} />
+  // First-time setup: no login needed, just set the password
+  if (mustChangePassword) return <SetupPasswordScreen onDone={() => { setMustChange(false); setLoggedIn(true) }} />
+  if (!loggedIn) return <LoginScreen onLogin={({ mustChange }) => {
+    if (mustChange) { setMustChange(true) } else { setLoggedIn(true) }
+  }} />
   if (fetchErr) return <div className="banner error">Cannot reach API: {fetchErr}</div>
 
   const node   = dashboard?.host?.node ?? '…'
@@ -904,10 +964,8 @@ export default function App() {
         <div className="header-right">
           <span className="chip">{node}</span>
           {uptime > 0 && <span className="muted">up {fmtUptime(uptime)}</span>}
-          {authEnabled && <>
-            <button className="btn-xs" onClick={() => setShowChangePwd(true)}>Password</button>
-            <button className="btn-xs" onClick={logout}>Sign out</button>
-          </>}
+          <button className="btn-xs" onClick={() => setShowChangePwd(true)}>Password</button>
+          <button className="btn-xs" onClick={logout}>Sign out</button>
         </div>
       </header>
 

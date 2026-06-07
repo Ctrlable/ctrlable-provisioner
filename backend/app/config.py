@@ -20,11 +20,25 @@ class Settings(BaseSettings):
 
     db_path: str = ""
 
-    # Auth — if either is empty the API runs in open mode (no auth)
+    # Auth — always enabled. Default password is "admin"; UI forces a change on first login.
+    # Set ADMIN_PASSWORD_HASH in .env to activate a real password and lift the forced-change flag.
     admin_user: str = "admin"
-    admin_password_hash: str = ""   # bcrypt hash; generate with: python3 -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('yourpassword'))"
-    jwt_secret: str = ""            # random hex; generate with: python3 -c "import secrets; print(secrets.token_hex(32))"
+    admin_password_hash: str = ""   # leave blank to use default "admin" password (forced change on login)
+    jwt_secret: str = ""            # leave blank to use an ephemeral secret (tokens reset on restart)
     jwt_expire_hours: int = 24
+
+    # Pre-computed bcrypt hash of the string "admin" (rounds=10).
+    # When admin_password_hash is not set this is the active hash and must_change_password is True.
+    _DEFAULT_ADMIN_HASH: str = "$2b$10$uTYtcigetHsjTvbH4bjjnuVhafL2uN2pTSw/XfOcOBPp9al/Lj6hS"
+
+    @property
+    def effective_password_hash(self) -> str:
+        return self.admin_password_hash or self._DEFAULT_ADMIN_HASH
+
+    @property
+    def must_change_password(self) -> bool:
+        """True when the admin password is still the factory default."""
+        return not bool(self.admin_password_hash)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

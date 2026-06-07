@@ -53,23 +53,15 @@ def _decode(token: str, secret: str) -> str:
 
 
 def auth_enabled(settings: "Settings") -> bool:
-    return bool(settings.admin_password_hash and settings.jwt_secret)
+    return True  # auth is always on; default admin/admin with forced password change
 
 
 def require_auth(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str | None:
-    """FastAPI dependency — validates Bearer token when auth is enabled.
-
-    Import and call get_settings() inside to avoid circular imports.
-    Returns the username on success; raises 401 on failure.
-    When auth is disabled (missing config) this is a no-op.
-    """
+    """FastAPI dependency — validates Bearer token. Always enforced."""
     from .config import get_settings
     settings = get_settings()
-
-    if not auth_enabled(settings):
-        return None  # open mode
 
     if creds is None:
         raise HTTPException(
