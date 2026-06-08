@@ -351,6 +351,14 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
             "--boot",   "order=scsi0",
         ], check=True)
 
+        # Grow the disk to the requested size (image is smaller than target)
+        disk_gb = str(res.get("disk", 32))
+        log(f"[{name}] resizing disk to {disk_gb}G")
+        subprocess.run(
+            ["qm", "disk", "resize", str(vmid), "scsi0", f"{disk_gb}G"],
+            check=True,
+        )
+
         log(f"[{name}] converting to template")
         subprocess.run(["qm", "template", str(vmid)], check=True)
 

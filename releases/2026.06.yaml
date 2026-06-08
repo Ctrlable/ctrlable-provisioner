@@ -9,6 +9,10 @@ templates:
     rebrand: true
     base_backup: "ctrlable-base-2026.06.tar"
     vmid_base: 9000
+    resources:
+      cpu: 2
+      ram: 4096
+      disk: 32
   zwavejs:
     kind: lxc
     builder: ct/zwave-js-ui.sh
