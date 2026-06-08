@@ -293,9 +293,9 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
 
     temp_raw_path: str | None = None
     try:
-        # Decompress .xz to a temp file
+        # Decompress .xz to a temp file alongside the source (same filesystem = no cross-device copy)
         if haos_image_path.endswith(".xz"):
-            temp_raw_path = f"/tmp/ctrlable-haos-{vmid}.img"
+            temp_raw_path = os.path.join(os.path.dirname(haos_image_path), f"ctrlable-haos-{vmid}.img")
             log(f"[{name}] decompressing image to {temp_raw_path} (this may take a moment)...")
             with open(temp_raw_path, "wb") as fout:
                 subprocess.run(
@@ -363,9 +363,12 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
         subprocess.run(["qm", "template", str(vmid)], check=True)
 
     finally:
-        if temp_raw_path and os.path.exists(temp_raw_path):
-            log(f"[{name}] removing temp image {temp_raw_path}")
-            os.unlink(temp_raw_path)
+        if temp_raw_path:
+            try:
+                os.unlink(temp_raw_path)
+                log(f"[{name}] removed temp image {temp_raw_path}")
+            except FileNotFoundError:
+                pass
 
     log(f"[RESULT] name={name} vmid={vmid} kind=qemu")
     return vmid
@@ -401,7 +404,14 @@ def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, fir
     if not is_running(vmid):
         log(f"[{name}] starting container for post-build steps")
         subprocess.run(["pct", "start", str(vmid)], check=True)
-        import time; time.sleep(5)   # wait for boot
+    # Poll until running — 5s flat sleep is not enough on slow storage
+    import time
+    for _ in range(30):
+        if is_running(vmid):
+            break
+        time.sleep(2)
+    else:
+        die(f"[{name}] container {vmid} did not start within 60s")
 
     # Inject firstboot service + script
     log(f"[{name}] injecting ctrlable-firstboot")
@@ -437,9 +447,10 @@ def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, fir
         "journalctl --rotate --vacuum-time=1s 2>/dev/null || true"
     )
 
-    # Stop + convert to template
+    # Stop + convert to template — shutdown only if running (community script may have stopped it)
     log(f"[{name}] stopping container")
-    subprocess.run(["pct", "shutdown", str(vmid), "--timeout", "60"], check=True)
+    if is_running(vmid):
+        subprocess.run(["pct", "shutdown", str(vmid), "--timeout", "60"], check=True)
 
     log(f"[{name}] converting to template")
     subprocess.run(["pct", "template", str(vmid)], check=True)

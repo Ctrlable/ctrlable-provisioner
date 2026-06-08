@@ -49,6 +49,7 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.DEVNULL,   # must be closed so remote shell exits cleanly
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
