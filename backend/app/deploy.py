@@ -1,23 +1,25 @@
 """
-Deploy pipeline — M5.
+Deploy pipeline — direct deploy (no template+clone).
 
-deploy_instance(): clone template → fresh MAC → pending DB record → start guest
-deploy_stack():    create project → deploy all LXC templates for a release
+For each template in the manifest the orchestrator SSHes to the PVE host and runs:
+  ctrlable-build deploy <release> <template_name> <hostname>
+
+The host script creates the instance, injects firstboot, and starts it.
+A [RESULT] line is emitted on success with the assigned VMID and kind.
 """
 import asyncio
 import re
+from typing import TYPE_CHECKING
 
-from .manifest import load_all_manifests
-from .proxmox import ProxmoxClient
-from .state import StateDB
+if TYPE_CHECKING:
+    from .config import Settings
+    from .state import StateDB
 
+_RESULT_RE = re.compile(r"\[RESULT\]\s+name=(\S+)\s+vmid=(\d+)(?:\s+kind=(\S+))?")
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _slug(name: str) -> str:
-    return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 def _next_hostname(site: str, template: str, existing: set[str]) -> str:
@@ -31,7 +33,6 @@ def _next_hostname(site: str, template: str, existing: set[str]) -> str:
 
 
 def _wire_to_for(template_name: str, shared: dict) -> dict:
-    """Map the shared deploy config to the per-template wire_to blob."""
     base = {
         k: shared[k]
         for k in ("mqtt_host", "mqtt_port", "mqtt_user", "mqtt_pass")
@@ -44,64 +45,90 @@ def _wire_to_for(template_name: str, shared: dict) -> dict:
     return base
 
 
-# ---------------------------------------------------------------------------
-# Single-instance deploy (synchronous — called from thread executor)
-# ---------------------------------------------------------------------------
+async def _ssh_deploy(
+    release: str,
+    name: str,
+    hostname: str,
+    settings: "Settings",
+) -> tuple[int, str]:
+    """SSH to PVE host, run 'ctrlable-build deploy', return (vmid, kind)."""
+    cmd = [
+        "ssh",
+        "-i", settings.build_key_path,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=120",  # tolerate up to 1 hour of silence (community scripts are slow)
+        f"root@{settings.pve_host}",
+        f"ctrlable-build deploy {release} {name} {hostname}",
+    ]
 
-def deploy_instance(
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    vmid: int | None = None
+    kind: str = "lxc"
+
+    async for raw in proc.stdout:
+        line = raw.decode(errors="replace")
+        print(f"[deploy/{name}] {line}", end="", flush=True)
+        m = _RESULT_RE.search(line)
+        if m:
+            vmid = int(m.group(2))
+            if m.group(3):
+                kind = m.group(3)
+
+    await proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"deploy failed for {name!r} (exit {proc.returncode})")
+    if vmid is None:
+        raise RuntimeError(f"deploy for {name!r} produced no [RESULT] line")
+    return vmid, kind
+
+
+async def deploy_instance(
     project_id: int,
     template_name: str,
     release: str,
     wire_to: dict,
-    db: StateDB,
-    px: ProxmoxClient,
+    db: "StateDB",
+    settings: "Settings",
 ) -> dict:
-    """Clone a built template, assign a fresh MAC, record as pending, start."""
-    tmpl = db.get_template(release, template_name)
-    if not tmpl:
-        raise ValueError(
-            f"template '{template_name}' not built for release '{release}' — "
-            "run Build Release first"
-        )
+    project = await asyncio.to_thread(db.get_project, project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
 
-    kind = tmpl["kind"]  # "lxc" or "qemu"
-    project = db.get_project(project_id)
-    existing = {r["hostname"] for r in db.list_all_instances()}
-    hostname = _next_hostname(project["site_name"], template_name, existing)
+    existing = await asyncio.to_thread(db.list_all_instances)
+    existing_hostnames = {r["hostname"] for r in existing}
+    hostname = _next_hostname(project["site_name"], template_name, existing_hostnames)
 
-    newid = px.next_vmid()
-    if kind == "qemu":
-        px.clone_vm(int(tmpl["template_vmid"]), newid, hostname)
-    else:
-        px.clone_lxc(int(tmpl["template_vmid"]), newid, hostname)
-        px.set_lxc_fresh_mac(newid)
+    vmid, kind = await _ssh_deploy(release, template_name, hostname, settings)
 
-    db.create_instance(project_id, template_name, newid, hostname, wire_to)
-    px.start_guest(kind, newid)
+    await asyncio.to_thread(
+        db.create_instance, project_id, template_name, vmid, hostname, wire_to, kind
+    )
+    return dict(await asyncio.to_thread(db.get_instance_by_hostname, hostname))
 
-    return dict(db.get_instance_by_hostname(hostname))
-
-
-# ---------------------------------------------------------------------------
-# Full-stack deploy (runs as background asyncio task)
-# ---------------------------------------------------------------------------
 
 async def deploy_stack_async(
     project_id: int,
     release: str,
     shared_wire_to: dict,
-    db: StateDB,
-    px: ProxmoxClient,
+    db: "StateDB",
+    settings: "Settings",
 ) -> None:
-    """Deploy all LXC templates for a release into an existing project."""
+    from .manifest import load_all_manifests
     manifests = load_all_manifests()
     manifest = manifests[release]
 
-    for name, tmpl in manifest.templates.items():
+    for name in manifest.templates:
         wire_to = _wire_to_for(name, shared_wire_to)
         try:
-            await asyncio.to_thread(
-                deploy_instance, project_id, name, release, wire_to, db, px
-            )
+            await deploy_instance(project_id, name, release, wire_to, db, settings)
         except Exception as exc:
-            print(f"[deploy] {name} failed: {exc}")
+            print(f"[deploy] {name} failed: {exc}", flush=True)

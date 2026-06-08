@@ -5,19 +5,18 @@ ctrlable-build — runs on the PVE host, invoked via SSH command= restriction.
 authorized_keys entry:
   command="/usr/local/bin/ctrlable-build",restrict,no-pty ssh-rsa AAAA...
 
-$SSH_ORIGINAL_COMMAND = "ctrlable-build <release>"
+SSH_ORIGINAL_COMMAND format:
+  ctrlable-build deploy <release> <template_name> <hostname>
 
-Install:
-  cp host/ctrlable-build /usr/local/bin/ctrlable-build
-  chmod +x /usr/local/bin/ctrlable-build
-  mkdir -p /etc/ctrlable
-  cp host/ctrlable-build.conf.example /etc/ctrlable/build.conf
-  # edit build.conf with orchestrator URL + token
+Deploys a single instance directly (no templates, no clone):
+  - LXC: runs the community script, injects firstboot service, leaves running
+  - VM:  imports the branded HAOS .img.xz, configures, starts
 
 Config file /etc/ctrlable/build.conf (JSON):
   {
-    "orchestrator_url": "http://192.168.1.50:8000",
-    "build_token": "<same as BUILD_TOKEN in orchestrator .env>"
+    "orchestrator_url": "http://<ip>:8000",
+    "build_token": "<same as BUILD_TOKEN in orchestrator .env>",
+    "haos_image_path": "/opt/ctrlable/images/ctrlable-os-generic_x86_64-<ver>.img.xz"
   }
 """
 
@@ -26,6 +25,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -44,15 +44,19 @@ def die(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config + args
+# Args + config
 # ---------------------------------------------------------------------------
 
-def parse_release() -> str:
+def parse_args() -> tuple[str, str, str]:
+    """Return (release, template_name, hostname) from SSH_ORIGINAL_COMMAND."""
     original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     parts = original.split()
-    if len(parts) < 2 or parts[0] != "ctrlable-build":
-        die(f"Unexpected SSH_ORIGINAL_COMMAND: {original!r}")
-    return parts[1]
+    if len(parts) == 5 and parts[0] == "ctrlable-build" and parts[1] == "deploy":
+        return parts[2], parts[3], parts[4]
+    die(
+        f"Unexpected SSH_ORIGINAL_COMMAND: {original!r}\n"
+        f"Expected: ctrlable-build deploy <release> <template_name> <hostname>"
+    )
 
 
 def load_conf() -> dict:
@@ -63,21 +67,19 @@ def load_conf() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers (stdlib only — no requests on host)
+# HTTP helpers (stdlib only)
 # ---------------------------------------------------------------------------
 
-def _req(url: str, token: str) -> urllib.request.Request:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return urllib.request.Request(url, headers=headers)
-
-
 def fetch_json(url: str, token: str) -> dict:
-    with urllib.request.urlopen(_req(url, token), timeout=15) as resp:
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
 
 
 def fetch_text(url: str, token: str = "") -> str:
-    with urllib.request.urlopen(_req(url, token), timeout=30) as resp:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode()
 
 
@@ -85,9 +87,16 @@ def fetch_text(url: str, token: str = "") -> str:
 # PVE helpers
 # ---------------------------------------------------------------------------
 
+def next_vmid() -> int:
+    return int(subprocess.run(
+        ["pvesh", "get", "/cluster/nextid"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip())
+
+
 def list_vmids() -> set[int]:
-    lxc = subprocess.run(["pct", "list"], capture_output=True, text=True, check=True).stdout
-    qemu = subprocess.run(["qm", "list"], capture_output=True, text=True, check=True).stdout
+    lxc  = subprocess.run(["pct", "list"], capture_output=True, text=True, check=True).stdout
+    qemu = subprocess.run(["qm",  "list"], capture_output=True, text=True, check=True).stdout
     ids: set[int] = set()
     for output in (lxc, qemu):
         for line in output.strip().splitlines()[1:]:
@@ -101,10 +110,9 @@ def list_vmids() -> set[int]:
 
 
 def detect_pve_storages() -> tuple[str, str]:
-    """Return (container_storage, template_storage) by querying pvesm."""
     out = subprocess.run(["pvesm", "status"], capture_output=True, text=True).stdout
     container_st = "local-lvm"
-    template_st = "local"
+    template_st  = "local"
     for line in out.strip().splitlines()[1:]:
         parts = line.split()
         if len(parts) < 3:
@@ -112,19 +120,15 @@ def detect_pve_storages() -> tuple[str, str]:
         name, kind, status = parts[0], parts[1], parts[2]
         if status != "active":
             continue
-        # lvmthin / lvm / zfspool → good for rootdir (container disk)
         if kind in ("lvmthin", "lvm", "zfspool") and container_st == "local-lvm":
             container_st = name
-        # dir storage → good for vztmpl
         if kind == "dir" and template_st == "local":
             template_st = name
     return container_st, template_st
 
 
 def is_running(vmid: int) -> bool:
-    result = subprocess.run(
-        ["pct", "status", str(vmid)], capture_output=True, text=True
-    )
+    result = subprocess.run(["pct", "status", str(vmid)], capture_output=True, text=True)
     return "running" in result.stdout
 
 
@@ -137,13 +141,61 @@ def pct_push(vmid: int, src: str, dst: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Build a single LXC template
+# Firstboot injection (LXC)
+# ---------------------------------------------------------------------------
+
+def inject_firstboot(vmid: int, name: str, manifest: dict, conf: dict,
+                     firstboot_svc: str, firstboot_sh: str) -> None:
+    log(f"[{name}] injecting ctrlable-firstboot")
+    with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as f:
+        f.write(firstboot_svc)
+        svc_tmp = f.name
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+        f.write(firstboot_sh)
+        sh_tmp = f.name
+
+    try:
+        pct_push(vmid, svc_tmp, "/etc/systemd/system/ctrlable-firstboot.service")
+        pct_push(vmid, sh_tmp,  "/usr/local/bin/ctrlable-firstboot.sh")
+        pct_exec(vmid, "chmod", "+x", "/usr/local/bin/ctrlable-firstboot.sh")
+        pct_exec(vmid, "systemctl", "enable", "ctrlable-firstboot.service")
+    finally:
+        os.unlink(svc_tmp)
+        os.unlink(sh_tmp)
+
+    log(f"[{name}] writing /etc/ctrlable/firstboot.conf")
+    firstboot_conf_data = json.dumps({
+        "orchestrator_url": manifest.get("orchestrator_url", conf["orchestrator_url"]),
+        "firstboot_secret": manifest.get("firstboot_secret", ""),
+        "template_type":    name,
+    }, indent=2)
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        f.write(firstboot_conf_data)
+        conf_tmp = f.name
+    try:
+        pct_exec(vmid, "mkdir", "-p", "/etc/ctrlable")
+        pct_push(vmid, conf_tmp, "/etc/ctrlable/firstboot.conf")
+        pct_exec(vmid, "chmod", "600", "/etc/ctrlable/firstboot.conf")
+    finally:
+        os.unlink(conf_tmp)
+
+
+def set_lxc_hostname(vmid: int, hostname: str) -> None:
+    """Override hostname set by the community script to our naming convention."""
+    subprocess.run(["pct", "set", str(vmid), "--hostname", hostname], check=True)
+    pct_exec(vmid, "bash", "-c",
+        f"echo '{hostname}' > /etc/hostname; "
+        f"hostname '{hostname}'; "
+        f"sed -i '/127\\.0\\.1\\.1/d' /etc/hosts; "
+        f"echo '127.0.1.1 {hostname}' >> /etc/hosts"
+    )
+
+
+# ---------------------------------------------------------------------------
+# LXC deploy
 # ---------------------------------------------------------------------------
 
 def build_env(tmpl: dict, conf: dict) -> dict:
-    # Detect or read storage — must be set so community-scripts skip the
-    # interactive storage-picker whiptail (which calls exit_script → exit 0
-    # when there is no TTY, aborting the build silently).
     container_st = conf.get("container_storage") or None
     template_st  = conf.get("template_storage")  or None
     if not container_st or not template_st:
@@ -153,35 +205,24 @@ def build_env(tmpl: dict, conf: dict) -> dict:
 
     env = {
         **os.environ,
-        "METHOD": "default",
-        "DEBIAN_FRONTEND": "noninteractive",
-        "TERM": "xterm",
-        # community-scripts install_script() checks $mode to bypass its
-        # whiptail menu: "1" = Default Install, no interactive prompt.
-        "mode": "1",
-        # Pre-set storage so the storage-picker dialog is never shown.
+        "METHOD":                "default",
+        "DEBIAN_FRONTEND":       "noninteractive",
+        "TERM":                  "xterm",
+        "mode":                  "1",
         "var_container_storage": container_st,
         "var_template_storage":  template_st,
-        # Prevent "unbound variable" errors in community-scripts summary sections
-        # that reference $IP (e.g. docker.sh Portainer URL) when running non-interactively.
-        "IP": "",
+        "IP":                    "",
     }
-    res = tmpl.get("resources") or {}
-    if res.get("cpu"):
-        env["var_cpu"] = str(res["cpu"])
-    if res.get("ram"):
-        env["var_ram"] = str(res["ram"])
-    if res.get("disk"):
-        env["var_disk"] = str(res["disk"])
-    os_spec = tmpl.get("os") or {}
-    if os_spec.get("distro"):
-        env["var_os"] = os_spec["distro"]
-    if os_spec.get("version"):
-        env["var_version"] = str(os_spec["version"])
+    res  = tmpl.get("resources") or {}
+    os_s = tmpl.get("os")        or {}
+    if res.get("cpu"):              env["var_cpu"]               = str(res["cpu"])
+    if res.get("ram"):              env["var_ram"]               = str(res["ram"])
+    if res.get("disk"):             env["var_disk"]              = str(res["disk"])
+    if os_s.get("distro"):          env["var_os"]                = os_s["distro"]
+    if os_s.get("version"):         env["var_version"]           = str(os_s["version"])
     if tmpl.get("unprivileged") is not None:
         env["var_unprivileged"] = "1" if tmpl["unprivileged"] else "0"
-    if tmpl.get("portainer"):
-        env["var_install_portainer"] = "yes"
+    if tmpl.get("portainer"):       env["var_install_portainer"] = "yes"
     return env
 
 
@@ -189,86 +230,61 @@ def script_url(ref: str, builder: str) -> str:
     return f"https://raw.githubusercontent.com/community-scripts/ProxmoxVE/{ref}/{builder}"
 
 
-def write_firstboot_conf(vmid: int, name: str, orchestrator_url: str, secret: str) -> None:
-    conf = json.dumps({
-        "orchestrator_url": orchestrator_url,
-        "firstboot_secret": secret,
-        "template_type": name,
-    }, indent=2)
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        f.write(conf)
-        tmp = f.name
-    pct_exec(vmid, "mkdir", "-p", "/etc/ctrlable")
-    pct_push(vmid, tmp, "/etc/ctrlable/firstboot.conf")
-    pct_exec(vmid, "chmod", "600", "/etc/ctrlable/firstboot.conf")
-    os.unlink(tmp)
+def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
+               firstboot_svc: str, firstboot_sh: str, conf: dict) -> int:
+    ref = manifest["community_scripts_ref"]
+    url = script_url(ref, tmpl["builder"])
+    env = build_env(tmpl, conf)
+
+    log(f"[{name}] downloading builder: {url}")
+    before = list_vmids()
+
+    log(f"[{name}] running community script (METHOD=default)")
+    script = fetch_text(url)
+    result = subprocess.run(["bash", "-s"], input=script.encode(), env=env)
+    if result.returncode != 0:
+        die(f"[{name}] community script exited {result.returncode}")
+
+    after   = list_vmids()
+    new_ids = after - before
+    if len(new_ids) != 1:
+        die(f"[{name}] expected 1 new VMID after script, got {new_ids}")
+    vmid = new_ids.pop()
+    log(f"[{name}] container created: vmid={vmid}")
+
+    # Ensure running so we can exec/push into it
+    if not is_running(vmid):
+        log(f"[{name}] starting container")
+        subprocess.run(["pct", "start", str(vmid)], check=True)
+    for _ in range(30):
+        if is_running(vmid):
+            break
+        time.sleep(2)
+    else:
+        die(f"[{name}] container {vmid} did not start within 60s")
+
+    log(f"[{name}] setting hostname to {hostname}")
+    set_lxc_hostname(vmid, hostname)
+
+    inject_firstboot(vmid, name, manifest, conf, firstboot_svc, firstboot_sh)
+
+    log(f"[RESULT] name={name} vmid={vmid} kind=lxc")
+    return vmid
 
 
 # ---------------------------------------------------------------------------
-# Build a single VM template (HAOS / qemu)
+# VM deploy (ctrlable-pro / HAOS)
 # ---------------------------------------------------------------------------
 
-def find_backup_path(filename: str) -> str | None:
-    """Return the full path to a vzdump backup file, or None if not found."""
-    # Check dump directory for each active dir-type storage
-    try:
-        out = subprocess.run(["pvesm", "status"], capture_output=True, text=True).stdout
-        for line in out.strip().splitlines()[1:]:
-            parts = line.split()
-            if len(parts) < 3 or parts[2] != "active":
-                continue
-            # Ask pvesm for the real filesystem path of a backup content item
-            detail = subprocess.run(
-                ["pvesm", "path", f"{parts[0]}:backup/{filename}"],
-                capture_output=True, text=True,
-            )
-            if detail.returncode == 0 and detail.stdout.strip():
-                p = detail.stdout.strip()
-                if os.path.exists(p):
-                    return p
-    except Exception:
-        pass
-    # Fallback: common local dump path
-    p = os.path.join("/var/lib/vz/dump", filename)
-    if os.path.exists(p):
-        return p
-    return None
-
-
-def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
-    """Build a QEMU VM template from a vzdump backup or a branded .img/.img.xz."""
-    vmid_base = int(tmpl.get("vmid_base", 9000))
-    existing = list_vmids()
-    vmid = vmid_base
-    while vmid in existing:
-        vmid += 1
-
+def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) -> int:
+    vmid = next_vmid()
     container_st, _ = detect_pve_storages()
 
-    # ── Option 1: restore from a pre-made vzdump backup ──────────────────────
-    base_backup = tmpl.get("base_backup", "")
-    if base_backup:
-        backup_path = find_backup_path(base_backup)
-        if backup_path:
-            log(f"[{name}] restoring from backup: {backup_path} → vmid={vmid}")
-            subprocess.run(
-                ["qmrestore", backup_path, str(vmid),
-                 "--unique", "1", "--storage", container_st],
-                check=True,
-            )
-            log(f"[{name}] converting to template")
-            subprocess.run(["qm", "template", str(vmid)], check=True)
-            log(f"[RESULT] name={name} vmid={vmid} kind=qemu")
-            return vmid
-        log(f"[{name}] backup '{base_backup}' not found — falling back to image import")
-
-    # ── Option 2: import a raw/compressed image ───────────────────────────────
     haos_image_path = conf.get("haos_image_path", "")
     if not haos_image_path:
-        # Check standard locations
         for d in ["/opt/ctrlable/images", "/var/lib/vz/template/iso"]:
             if os.path.isdir(d):
-                for f in sorted(os.listdir(d)):
+                for f in sorted(os.listdir(d), reverse=True):
                     if f.endswith(".img.xz") or f.endswith(".img"):
                         haos_image_path = os.path.join(d, f)
                         break
@@ -277,26 +293,24 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
 
     if not haos_image_path or not os.path.exists(haos_image_path):
         die(
-            f"[{name}] no HAOS image or backup found.\n"
-            f"  To fix — choose one of:\n"
-            f"  A) Copy the branded .img.xz to the PVE host and set in build.conf:\n"
-            f"       \"haos_image_path\": \"/opt/ctrlable/images/ctrlable-os-generic_x86_64.img.xz\"\n"
-            f"  B) Create a Proxmox vzdump backup of the branded VM and place at:\n"
-            f"       /var/lib/vz/dump/{base_backup or 'ctrlable-base-<release>.tar'}\n"
-            f"  Build the branded image with: ./build-haos.sh <client_id>  (in rebrand-tools)"
+            f"[{name}] branded HAOS image not found.\n"
+            f"  Set 'haos_image_path' in /etc/ctrlable/build.conf or copy the .img.xz to\n"
+            f"  /opt/ctrlable/images/"
         )
 
-    log(f"[{name}] building VM vmid={vmid} from image: {haos_image_path}")
-    res = tmpl.get("resources") or {}
-    cores = str(res.get("cpu", 2))
-    mem   = str(res.get("ram", 4096))
+    log(f"[{name}] deploying VM vmid={vmid} from image: {haos_image_path}")
+    res   = tmpl.get("resources") or {}
+    cores = str(res.get("cpu",  2))
+    mem   = str(res.get("ram",  4096))
+    disk  = str(res.get("disk", 32))
 
     temp_raw_path: str | None = None
     try:
-        # Decompress .xz to a temp file alongside the source (same filesystem = no cross-device copy)
         if haos_image_path.endswith(".xz"):
-            temp_raw_path = os.path.join(os.path.dirname(haos_image_path), f"ctrlable-haos-{vmid}.img")
-            log(f"[{name}] decompressing image to {temp_raw_path} (this may take a moment)...")
+            temp_raw_path = os.path.join(
+                os.path.dirname(haos_image_path), f"ctrlable-haos-{vmid}.img"
+            )
+            log(f"[{name}] decompressing image to {temp_raw_path} ...")
             with open(temp_raw_path, "wb") as fout:
                 subprocess.run(
                     ["xz", "--decompress", "--stdout", haos_image_path],
@@ -306,31 +320,28 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
         else:
             raw_img = haos_image_path
 
-        # Create the VM skeleton
         log(f"[{name}] creating VM")
         subprocess.run([
             "qm", "create", str(vmid),
-            "--name",    name,
-            "--memory",  mem,
-            "--cores",   cores,
-            "--cpu",     "host",
-            "--machine", "q35",
-            "--bios",    "ovmf",
+            "--name",     hostname,
+            "--memory",   mem,
+            "--cores",    cores,
+            "--cpu",      "host",
+            "--machine",  "q35",
+            "--bios",     "ovmf",
             "--efidisk0", f"{container_st}:0,efitype=4m,pre-enrolled-keys=0",
-            "--net0",    "virtio,bridge=vmbr0",
-            "--ostype",  "l26",
-            "--tablet",  "0",
-            "--balloon", "0",
+            "--net0",     "virtio,bridge=vmbr0",
+            "--ostype",   "l26",
+            "--tablet",   "0",
+            "--balloon",  "0",
         ], check=True)
 
-        # Import disk image
         log(f"[{name}] importing disk")
         subprocess.run(
             ["qm", "importdisk", str(vmid), raw_img, container_st, "--format", "qcow2"],
             check=True,
         )
 
-        # Find the unused disk slot created by importdisk
         cfg = subprocess.run(
             ["qm", "config", str(vmid)], capture_output=True, text=True, check=True
         ).stdout
@@ -340,9 +351,8 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
                 disk_ref = line.split(":", 1)[1].strip()
                 break
         if not disk_ref:
-            die(f"[{name}] could not find imported disk in VM config after importdisk")
+            die(f"[{name}] could not find imported disk after importdisk")
 
-        # Attach disk and set boot order
         log(f"[{name}] attaching disk {disk_ref}")
         subprocess.run([
             "qm", "set", str(vmid),
@@ -351,16 +361,14 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
             "--boot",   "order=scsi0",
         ], check=True)
 
-        # Grow the disk to the requested size (image is smaller than target)
-        disk_gb = str(res.get("disk", 32))
-        log(f"[{name}] resizing disk to {disk_gb}G")
+        log(f"[{name}] resizing disk to {disk}G")
         subprocess.run(
-            ["qm", "disk", "resize", str(vmid), "scsi0", f"{disk_gb}G"],
+            ["qm", "disk", "resize", str(vmid), "scsi0", f"{disk}G"],
             check=True,
         )
 
-        log(f"[{name}] converting to template")
-        subprocess.run(["qm", "template", str(vmid)], check=True)
+        log(f"[{name}] starting VM")
+        subprocess.run(["qm", "start", str(vmid)], check=True)
 
     finally:
         if temp_raw_path:
@@ -375,103 +383,17 @@ def build_vm(name: str, tmpl: dict, manifest: dict, conf: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Build a single LXC template
-# ---------------------------------------------------------------------------
-
-def build_lxc(name: str, tmpl: dict, manifest: dict, firstboot_service: str, firstboot_sh: str, conf: dict) -> int:
-    ref = manifest["community_scripts_ref"]
-    url = script_url(ref, tmpl["builder"])
-    env = build_env(tmpl, conf)
-
-    log(f"[{name}] downloading builder: {url}")
-    before = list_vmids()
-
-    log(f"[{name}] running community script (METHOD=default)")
-    # Pipe the script to bash stdin to avoid shell quoting issues with the URL.
-    script = fetch_text(url, "")
-    result = subprocess.run(["bash", "-s"], input=script.encode(), env=env)
-    if result.returncode != 0:
-        die(f"[{name}] community script exited {result.returncode}")
-
-    after = list_vmids()
-    new_ids = after - before
-    if len(new_ids) != 1:
-        die(f"[{name}] expected 1 new VMID after build, got {new_ids}")
-    vmid = new_ids.pop()
-    log(f"[{name}] guest created: vmid={vmid}")
-
-    # Ensure container is running for exec/push
-    if not is_running(vmid):
-        log(f"[{name}] starting container for post-build steps")
-        subprocess.run(["pct", "start", str(vmid)], check=True)
-    # Poll until running — 5s flat sleep is not enough on slow storage
-    import time
-    for _ in range(30):
-        if is_running(vmid):
-            break
-        time.sleep(2)
-    else:
-        die(f"[{name}] container {vmid} did not start within 60s")
-
-    # Inject firstboot service + script
-    log(f"[{name}] injecting ctrlable-firstboot")
-    with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as f:
-        f.write(firstboot_service)
-        svc_tmp = f.name
-    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
-        f.write(firstboot_sh)
-        sh_tmp = f.name
-
-    pct_push(vmid, svc_tmp, "/etc/systemd/system/ctrlable-firstboot.service")
-    pct_push(vmid, sh_tmp, "/usr/local/bin/ctrlable-firstboot.sh")
-    pct_exec(vmid, "chmod", "+x", "/usr/local/bin/ctrlable-firstboot.sh")
-    pct_exec(vmid, "systemctl", "enable", "ctrlable-firstboot.service")
-    os.unlink(svc_tmp)
-    os.unlink(sh_tmp)
-
-    # Bake per-template firstboot config
-    log(f"[{name}] writing /etc/ctrlable/firstboot.conf")
-    write_firstboot_conf(
-        vmid, name,
-        manifest.get("orchestrator_url", ""),
-        manifest.get("firstboot_secret", ""),
-    )
-
-    # Clean instance state that must not clone
-    log(f"[{name}] cleaning instance state")
-    pct_exec(vmid, "bash", "-c",
-        "truncate -s0 /etc/machine-id; "
-        "rm -f /var/lib/dbus/machine-id; "
-        "rm -f /etc/ssh/ssh_host_*; "
-        "apt-get clean -y 2>/dev/null || true; "
-        "journalctl --rotate --vacuum-time=1s 2>/dev/null || true"
-    )
-
-    # Stop + convert to template — shutdown only if running (community script may have stopped it)
-    log(f"[{name}] stopping container")
-    if is_running(vmid):
-        subprocess.run(["pct", "shutdown", str(vmid), "--timeout", "60"], check=True)
-
-    log(f"[{name}] converting to template")
-    subprocess.run(["pct", "template", str(vmid)], check=True)
-
-    log(f"[RESULT] name={name} vmid={vmid} kind=lxc")
-    return vmid
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    release = parse_release()
-    conf = load_conf()
+    release, template_name, hostname = parse_args()
+    conf     = load_conf()
     base_url = conf["orchestrator_url"].rstrip("/")
-    token = conf["build_token"]
+    token    = conf["build_token"]
 
-    log(f"[ctrlable-build] release={release}")
+    log(f"[ctrlable-build] deploy release={release} name={template_name} hostname={hostname}")
 
-    # Fetch manifest from orchestrator
     manifest_url = f"{base_url}/api/releases/{release}/manifest?token={token}"
     log(f"fetching manifest: {manifest_url}")
     try:
@@ -479,44 +401,21 @@ def main() -> None:
     except Exception as exc:
         die(f"could not fetch manifest: {exc}")
 
-    # Fetch firstboot assets from orchestrator (single source of truth)
-    try:
-        firstboot_sh = fetch_text(f"{base_url}/api/provision/firstboot-script?token={token}", token)
-        firstboot_svc = fetch_text(f"{base_url}/api/provision/firstboot-service-unit?token={token}", token)
-    except Exception as exc:
-        die(f"could not fetch firstboot assets: {exc}")
+    templates = manifest.get("templates", {})
+    if template_name not in templates:
+        die(f"template {template_name!r} not found in release {release!r}")
+    tmpl = templates[template_name]
+    kind = tmpl.get("kind", "lxc")
 
-    # Fetch already-built templates so we can skip them on a resumed build
-    try:
-        existing = fetch_json(f"{base_url}/api/releases/{release}/templates?token={token}", token)
-        already_built = {t["name"]: t["template_vmid"] for t in existing}
-    except Exception:
-        already_built = {}
-    if already_built:
-        log(f"[ctrlable-build] skipping already-built: {sorted(already_built)}")
-
-    built: list[str] = []
-    skipped: list[str] = []
-
-    for name, tmpl in manifest.get("templates", {}).items():
-        if name in already_built:
-            log(f"[SKIP] name={name} already built vmid={already_built[name]}")
-            skipped.append(name)
-            continue
-
-        log(f"\n=== building template: {name} ({tmpl['kind']}) ===")
+    if kind == "vm":
+        deploy_vm(template_name, hostname, tmpl, manifest, conf)
+    else:
         try:
-            if tmpl["kind"] == "vm":
-                build_vm(name, tmpl, manifest, conf)
-            else:
-                build_lxc(name, tmpl, manifest, firstboot_svc, firstboot_sh, conf)
-            built.append(name)
-        except SystemExit:
-            raise
+            firstboot_sh  = fetch_text(f"{base_url}/api/provision/firstboot-script?token={token}", token)
+            firstboot_svc = fetch_text(f"{base_url}/api/provision/firstboot-service-unit?token={token}", token)
         except Exception as exc:
-            die(f"[{name}] unhandled error: {exc}")
-
-    log(f"\n[ctrlable-build] done  built={built}  skipped={skipped}")
+            die(f"could not fetch firstboot assets: {exc}")
+        deploy_lxc(template_name, hostname, tmpl, manifest, firstboot_svc, firstboot_sh, conf)
 
 
 if __name__ == "__main__":

@@ -88,6 +88,7 @@ class StateDB:
                 "ALTER TABLE platform_state ADD COLUMN lan_iface TEXT",
                 "ALTER TABLE platform_state ADD COLUMN lan_subnet TEXT",
                 "ALTER TABLE platform_state ADD COLUMN proxy_subnet TEXT",
+                "ALTER TABLE instances ADD COLUMN kind TEXT NOT NULL DEFAULT 'lxc'",
             ]:
                 try:
                     conn.execute(migration)
@@ -214,13 +215,14 @@ class StateDB:
         vmid: int,
         hostname: str,
         wire_to: dict[str, Any] | None = None,
+        kind: str = "lxc",
     ) -> int:
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO instances"
-                " (project_id, type, vmid, hostname, status, wire_to, created_at)"
-                " VALUES (?, ?, ?, ?, 'pending', ?, ?)",
-                (project_id, type_, vmid, hostname, json.dumps(wire_to) if wire_to else None, _now()),
+                " (project_id, type, vmid, hostname, status, wire_to, kind, created_at)"
+                " VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (project_id, type_, vmid, hostname, json.dumps(wire_to) if wire_to else None, kind, _now()),
             )
             return cur.lastrowid
 

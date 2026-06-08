@@ -308,19 +308,15 @@ class DeployStackRequest(BaseModel):
 
 @app.post("/api/projects", status_code=202)
 async def create_project_deploy(req: DeployStackRequest, _: str | None = Depends(require_auth)) -> dict:
-    if not settings.configured():
-        raise HTTPException(400, "Proxmox not configured")
+    if not settings.build_configured():
+        raise HTTPException(400, "Build plane not configured (BUILD_KEY_PATH / BUILD_TOKEN)")
     manifests = load_all_manifests()
     if req.release not in manifests:
         raise HTTPException(404, f"release {req.release!r} not found")
 
-    built = db.list_templates(req.release)
-    if not built:
-        raise HTTPException(400, f"Release {req.release!r} has no built templates — run a build first")
-
     project_id = db.create_project(req.site_name, req.release)
     asyncio.create_task(
-        deploy_stack_async(project_id, req.release, req.model_dump(), db, _pve())
+        deploy_stack_async(project_id, req.release, req.model_dump(), db, settings)
     )
     return {"project_id": project_id, "status": "deploying"}
 
@@ -336,9 +332,8 @@ async def add_instance(project_id: int, req: AddInstanceRequest, _: str | None =
     if not project:
         raise HTTPException(404)
     try:
-        inst = await asyncio.to_thread(
-            deploy_instance, project_id, req.template_name,
-            project["release"], req.wire_to, db, _pve()
+        inst = await deploy_instance(
+            project_id, req.template_name, project["release"], req.wire_to, db, settings
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -397,11 +392,7 @@ def list_pci(_: str | None = Depends(require_auth)) -> list[dict]:
 @app.get("/api/guests/{vmid}/config")
 def get_guest_config(vmid: int, _: str | None = Depends(require_auth)) -> dict:
     inst = db.get_instance_by_vmid(vmid)
-    kind = "lxc"
-    if inst:
-        tmpl = db.get_template(inst["release"], inst["type"])
-        if tmpl:
-            kind = tmpl["kind"]
+    kind = inst["kind"] if inst else "lxc"
     # Fallback: try both and return whichever works
     px = _pve()
     try:
@@ -490,11 +481,7 @@ def guest_action(vmid: int, action: str, _: str | None = Depends(require_auth)) 
         raise HTTPException(400, f"invalid action: {action!r}")
 
     inst = db.get_instance_by_vmid(vmid)
-    kind = "lxc"
-    if inst:
-        tmpl = db.get_template(inst["release"], inst["type"])
-        if tmpl:
-            kind = tmpl["kind"]
+    kind = inst["kind"] if inst else "lxc"
 
     px = _pve()
     if action == "start":
