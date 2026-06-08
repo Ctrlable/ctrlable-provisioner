@@ -108,6 +108,8 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
 .project-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .instance-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
 .inst-host { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-row .inst-del { margin-left: auto; opacity: 0.35; }
+.instance-row:hover .inst-del { opacity: 1; }
 
 /* releases tab */
 .releases-tab {}

@@ -358,11 +358,45 @@ def get_project_api(project_id: int, _: str | None = Depends(require_auth)) -> d
     return {**dict(project), "instances": [dict(i) for i in instances]}
 
 
-@app.delete("/api/projects/{project_id}", status_code=204)
-def delete_project_api(project_id: int, _: str | None = Depends(require_auth)) -> None:
+@app.delete("/api/projects/{project_id}/instances/{instance_id}", status_code=204)
+def delete_instance_api(
+    project_id: int,
+    instance_id: int,
+    destroy: bool = False,
+    _: str | None = Depends(require_auth),
+) -> None:
+    inst = db.get_instance_by_vmid(0)  # just to get the row shape; fetch by id below
+    # fetch by id via list
     instances = db.list_instances(project_id)
-    if instances:
-        raise HTTPException(400, "Cannot delete a project that has running instances")
+    inst = next((i for i in instances if i["id"] == instance_id), None)
+    if not inst:
+        raise HTTPException(404)
+    if destroy and settings.configured():
+        try:
+            kind = inst["kind"] if inst["kind"] else "lxc"
+            _pve().destroy_guest(kind, inst["vmid"])
+        except Exception:
+            pass
+    db.delete_instance(instance_id)
+
+
+@app.delete("/api/projects/{project_id}", status_code=204)
+def delete_project_api(
+    project_id: int,
+    destroy: bool = False,
+    _: str | None = Depends(require_auth),
+) -> None:
+    if not db.get_project(project_id):
+        raise HTTPException(404)
+    if destroy and settings.configured():
+        instances = db.list_instances(project_id)
+        px = _pve()
+        for inst in instances:
+            try:
+                kind = inst["kind"] if inst["kind"] else "lxc"
+                px.destroy_guest(kind, inst["vmid"])
+            except Exception:
+                pass
     if not db.delete_project(project_id):
         raise HTTPException(404)
 

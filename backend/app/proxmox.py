@@ -161,6 +161,14 @@ class ProxmoxClient:
     def stop_guest(self, kind: str, vmid: int) -> None:
         getattr(self._px.nodes(self.node), kind)(vmid).status.stop.post()
 
+    def destroy_guest(self, kind: str, vmid: int) -> None:
+        node = getattr(self._px.nodes(self.node), kind)(vmid)
+        try:
+            node.status.stop.post()
+        except Exception:
+            pass
+        node.delete(purge=1, **{"destroy-unreferenced-disks": 1})
+
     def reboot_guest(self, kind: str, vmid: int) -> None:
         getattr(self._px.nodes(self.node), kind)(vmid).status.reboot.post()
 

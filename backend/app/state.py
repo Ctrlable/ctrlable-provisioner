@@ -257,8 +257,14 @@ class StateDB:
                 (project_id,),
             ).fetchall()
 
+    def delete_instance(self, instance_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
+            return cur.rowcount > 0
+
     def delete_project(self, project_id: int) -> bool:
         with self._conn() as conn:
+            conn.execute("DELETE FROM instances WHERE project_id = ?", (project_id,))
             cur = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
             return cur.rowcount > 0
 

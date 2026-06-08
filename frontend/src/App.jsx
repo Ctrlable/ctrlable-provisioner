@@ -519,13 +519,14 @@ function Field({ label, value, onChange, type='text', placeholder='' }) {
   )
 }
 
-function InstanceRow({ inst }) {
+function InstanceRow({ inst, onDelete }) {
   return (
     <div className="instance-row">
       <StatusDot status={inst.status} />
       <span className="inst-host">{inst.hostname}</span>
       <span className="tag">{inst.type}</span>
       <span className={`tag status-${inst.status}`}>{inst.status}</span>
+      <button className="btn-xs danger inst-del" title="Remove instance" onClick={() => onDelete(inst)}>✕</button>
     </div>
   )
 }
@@ -566,13 +567,22 @@ function DeployTab({ releases }) {
     } catch (e) { setError(e.message) } finally { setDeploying(false) }
   }
 
-  const deleteProject = async (id) => {
-    if (!confirm('Delete this stuck project?')) return
-    await apiFetch(`/api/projects/${id}`, { method: 'DELETE' })
+  const deleteInstance = async (projectId, inst) => {
+    if (!confirm(`Remove ${inst.hostname} from the orchestrator?\n\nClick OK to remove DB record only.\nThe Proxmox guest will NOT be destroyed automatically — delete it manually in Proxmox if needed.`)) return
+    await apiFetch(`/api/projects/${projectId}/instances/${inst.id}`, { method: 'DELETE' })
     loadProjects()
   }
 
-  const releaseReady = builtTemplates.length > 0
+  const deleteProject = async (p) => {
+    const msg = p.instances.length > 0
+      ? `Delete project "${p.site_name}" and remove all ${p.instances.length} instance record(s) from the orchestrator?\n\nProxmox guests will NOT be destroyed — delete them manually.`
+      : `Delete empty project "${p.site_name}"?`
+    if (!confirm(msg)) return
+    await apiFetch(`/api/projects/${p.id}`, { method: 'DELETE' })
+    loadProjects()
+  }
+
+  const releaseReady = true  // deploy no longer requires pre-built templates
 
   return (
     <div className="deploy-tab">
@@ -593,12 +603,7 @@ function DeployTab({ releases }) {
           <Field label="Zigbee coordinator" value={form.zigbee_coordinator} onChange={set('zigbee_coordinator')} placeholder="tcp://192.168.1.20:6638" />
           <Field label="Z-Wave coordinator" value={form.zwave_coordinator} onChange={set('zwave_coordinator')} placeholder="tcp://192.168.1.21:8888" />
         </div>
-        {!releaseReady && form.release && (
-          <div className="banner error" style={{marginBottom:'.75rem'}}>
-            Release <strong>{form.release}</strong> has no built templates — go to the Releases tab and run a build first.
-          </div>
-        )}
-        <button className="btn-primary" onClick={deploy} disabled={deploying || !form.site_name.trim() || !form.release || !releaseReady}>
+        <button className="btn-primary" onClick={deploy} disabled={deploying || !form.site_name.trim() || !form.release}>
           {deploying ? 'Deploying…' : 'Deploy Stack'}
         </button>
       </section>
@@ -611,16 +616,12 @@ function DeployTab({ releases }) {
               <div className="project-card-header">
                 <strong>{p.site_name}</strong>
                 <span className="tag accent">{p.release}</span>
-                {p.instances.length > 0 && (
-                  <button className="btn-xs" onClick={() => setAddInstProject(p)}>+ Add Instance</button>
-                )}
-                {p.instances.length === 0 && (
-                  <button className="btn-xs danger" onClick={() => deleteProject(p.id)}>Delete</button>
-                )}
+                <button className="btn-xs" onClick={() => setAddInstProject(p)}>+ Add Instance</button>
+                <button className="btn-xs danger" onClick={() => deleteProject(p)}>Delete Project</button>
               </div>
               {p.instances.length === 0
-                ? <p className="empty small muted">No instances — deploy may have failed. Delete and retry after building the release.</p>
-                : p.instances.map(i => <InstanceRow key={i.id} inst={i} />)}
+                ? <p className="empty small muted">No instances yet — deploy is running or failed.</p>
+                : p.instances.map(i => <InstanceRow key={i.id} inst={i} onDelete={inst => deleteInstance(p.id, inst)} />)}
             </div>
           ))}
         </section>
