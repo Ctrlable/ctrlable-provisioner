@@ -72,7 +72,6 @@ def deploy_instance(
     newid = px.next_vmid()
     if kind == "qemu":
         px.clone_vm(int(tmpl["template_vmid"]), newid, hostname)
-        px.set_vm_fresh_mac(newid)
     else:
         px.clone_lxc(int(tmpl["template_vmid"]), newid, hostname)
         px.set_lxc_fresh_mac(newid)
