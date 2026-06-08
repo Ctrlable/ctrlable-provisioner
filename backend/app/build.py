@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 _RESULT_RE = re.compile(r"\[RESULT\]\s+name=(\S+)\s+vmid=(\d+)(?:\s+kind=(\S+))?")
 _running: set[str] = set()   # releases currently building; prevents concurrent builds
 
+_LOG_FLUSH_LINES = 20        # flush accumulated log lines to DB every N lines
+_LOG_FLUSH_SECONDS = 2.0     # also flush if this many seconds pass without a flush
+
 
 async def trigger_build(release: str, db: "StateDB", settings: "Settings") -> int:
     if release in _running:
@@ -34,6 +37,15 @@ async def _run_build(build_id: int, release: str, db: "StateDB", settings: "Sett
         _running.discard(release)
 
 
+async def _flush_log(build_id: int, db: "StateDB", buf: list[str]) -> None:
+    """Write accumulated log lines to the DB in a thread so the event loop stays free."""
+    if not buf:
+        return
+    chunk = "".join(buf)
+    buf.clear()
+    await asyncio.to_thread(db.append_build_log, build_id, chunk)
+
+
 async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settings") -> None:
     cmd = [
         "ssh",
@@ -49,22 +61,29 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
-        stdin=asyncio.subprocess.DEVNULL,   # must be closed so remote shell exits cleanly
+        stdin=asyncio.subprocess.DEVNULL,   # closed immediately so remote shell exits cleanly
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
 
+    log_buf: list[str] = []
+    line_count = 0
+    last_flush = asyncio.get_event_loop().time()
+
     async for raw in proc.stdout:
         line = raw.decode(errors="replace")
-        db.append_build_log(build_id, line)
+        log_buf.append(line)
+        line_count += 1
 
+        # Parse [RESULT] lines immediately — don't wait for the flush batch
         m = _RESULT_RE.search(line)
         if m:
             name, vmid = m.group(1), int(m.group(2))
-            kind_hint = m.group(3)  # emitted by ctrlable-build as kind=lxc or kind=qemu
-            tmpl = db.get_template(release, name)
+            kind_hint = m.group(3)
+            tmpl = await asyncio.to_thread(db.get_template, release, name)
             kind = tmpl["kind"] if tmpl else (kind_hint or "lxc")
-            db.record_template(
+            await asyncio.to_thread(
+                db.record_template,
                 release=release,
                 name=name,
                 kind=kind,
@@ -72,6 +91,23 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
                 app_version=None,
                 builder_ref=settings.community_scripts_ref_for(release),
             )
+            # Always flush immediately on a result line so the UI updates
+            await _flush_log(build_id, db, log_buf)
+            line_count = 0
+            last_flush = asyncio.get_event_loop().time()
+            continue
+
+        # Batch ordinary log lines to avoid per-line DB writes for spinner output
+        now = asyncio.get_event_loop().time()
+        if line_count >= _LOG_FLUSH_LINES or (now - last_flush) >= _LOG_FLUSH_SECONDS:
+            await _flush_log(build_id, db, log_buf)
+            line_count = 0
+            last_flush = now
+
+    # Flush any remaining buffered lines
+    await _flush_log(build_id, db, log_buf)
 
     await proc.wait()
-    db.finish_build(build_id, "success" if proc.returncode == 0 else "failed")
+    await asyncio.to_thread(
+        db.finish_build, build_id, "success" if proc.returncode == 0 else "failed"
+    )
