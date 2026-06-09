@@ -17,6 +17,18 @@ if TYPE_CHECKING:
 
 _RESULT_RE = re.compile(r"\[RESULT\]\s+name=(\S+)\s+vmid=(\d+)(?:\s+kind=(\S+))?")
 
+# Only one deploy runs at a time — prevents VMID collision when parallel add_instance
+# calls are made. deploy_stack_async already runs sequentially, but this guards
+# individual add_instance API calls too.
+_deploy_lock: asyncio.Lock | None = None
+
+def _get_lock() -> asyncio.Lock:
+    global _deploy_lock
+    if _deploy_lock is None:
+        _deploy_lock = asyncio.Lock()
+    return _deploy_lock
+
+
 
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
@@ -107,7 +119,8 @@ async def deploy_instance(
     existing_hostnames = {r["hostname"] for r in existing}
     hostname = _next_hostname(project["site_name"], template_name, existing_hostnames)
 
-    vmid, kind = await _ssh_deploy(release, template_name, hostname, settings)
+    async with _get_lock():
+        vmid, kind = await _ssh_deploy(release, template_name, hostname, settings)
 
     await asyncio.to_thread(
         db.create_instance, project_id, template_name, vmid, hostname, wire_to, kind

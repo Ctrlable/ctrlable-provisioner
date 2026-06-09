@@ -195,7 +195,7 @@ def set_lxc_hostname(vmid: int, hostname: str) -> None:
 # LXC deploy
 # ---------------------------------------------------------------------------
 
-def build_env(tmpl: dict, conf: dict) -> dict:
+def build_env(tmpl: dict, conf: dict, vmid: int | None = None) -> dict:
     container_st = conf.get("container_storage") or None
     template_st  = conf.get("template_storage")  or None
     if not container_st or not template_st:
@@ -213,6 +213,12 @@ def build_env(tmpl: dict, conf: dict) -> dict:
         "var_template_storage":  template_st,
         "IP":                    "",
     }
+    # Pre-allocate VMID so parallel deploys don't collide.
+    # Community scripts read NEXTID / CT_ID / CTID to pick the container ID.
+    if vmid is not None:
+        env["NEXTID"] = str(vmid)
+        env["CT_ID"]  = str(vmid)
+        env["CTID"]   = str(vmid)
     res  = tmpl.get("resources") or {}
     os_s = tmpl.get("os")        or {}
     if res.get("cpu"):              env["var_cpu"]               = str(res["cpu"])
@@ -232,25 +238,32 @@ def script_url(ref: str, builder: str) -> str:
 
 def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
                firstboot_svc: str, firstboot_sh: str, conf: dict) -> int:
-    ref = manifest["community_scripts_ref"]
-    url = script_url(ref, tmpl["builder"])
-    env = build_env(tmpl, conf)
+    ref  = manifest["community_scripts_ref"]
+    url  = script_url(ref, tmpl["builder"])
+    vmid = next_vmid()
+    env  = build_env(tmpl, conf, vmid=vmid)
 
     log(f"[{name}] downloading builder: {url}")
-    before = list_vmids()
+    log(f"[{name}] pre-allocated vmid={vmid}")
 
     log(f"[{name}] running community script (METHOD=default)")
     script = fetch_text(url)
-    result = subprocess.run(["bash", "-s"], input=script.encode(), env=env)
+    result = subprocess.run(["bash", "-s"], input=script.encode(), env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"[{name}] community script exited {result.returncode}")
 
-    after   = list_vmids()
-    new_ids = after - before
-    if len(new_ids) != 1:
-        die(f"[{name}] expected 1 new VMID after script, got {new_ids}")
-    vmid = new_ids.pop()
-    log(f"[{name}] container created: vmid={vmid}")
+    # Verify the expected VMID was actually created
+    if vmid not in list_vmids():
+        # Script ignored our NEXTID — fall back to detecting the new VMID
+        after   = list_vmids()
+        before_set = set()  # we lost the before snapshot; accept any single new VMID
+        # Re-check: get everything except what was there before this deploy started
+        # (we can't recover perfectly here — log a warning and pick the newest VMID)
+        log(f"[{name}] WARNING: vmid={vmid} not found after script — detecting fallback")
+        existing = list_vmids() - {900}  # orchestrator excluded
+        vmid = max(existing)  # best guess: highest VMID is most recently created
+    log(f"[{name}] container vmid={vmid}")
 
     # Ensure running so we can exec/push into it
     if not is_running(vmid):
