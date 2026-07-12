@@ -213,6 +213,14 @@ def build_env(tmpl: dict, conf: dict, vmid: int | None = None) -> dict:
         "var_template_storage":  template_st,
         "IP":                    "",
     }
+    # Ctrlable-owned builders (e.g. dali-bridge.sh) fetch their app source from a
+    # private repo — pass the clone settings from build.conf so the builder sees
+    # them (community-script builders ignore these).
+    for key, cf in (("DALI_BRIDGE_REPO", "dali_bridge_repo"),
+                    ("DALI_BRIDGE_REF",  "dali_bridge_ref"),
+                    ("DALI_BRIDGE_TOKEN", "dali_bridge_token")):
+        if conf.get(cf):
+            env[key] = str(conf[cf])
     # Pre-allocate VMID so parallel deploys don't collide.
     # Community scripts read NEXTID / CT_ID / CTID to pick the container ID.
     if vmid is not None:
