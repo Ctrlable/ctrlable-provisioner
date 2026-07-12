@@ -331,13 +331,10 @@ async def add_instance(project_id: int, req: AddInstanceRequest, _: str | None =
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(404)
-    try:
-        inst = await deploy_instance(
-            project_id, req.template_name, project["release"], req.wire_to, db, settings
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    return inst
+    asyncio.create_task(
+        deploy_instance(project_id, req.template_name, project["release"], req.wire_to, db, settings)
+    )
+    return {"status": "deploying", "template_name": req.template_name}
 
 
 @app.get("/api/projects")

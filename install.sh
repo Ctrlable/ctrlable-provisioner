@@ -356,6 +356,16 @@ install_host_tools() {
     pct_pull /opt/ctrlable-provisioner/host/ctrlable-build /usr/local/bin/ctrlable-build
     chmod +x /usr/local/bin/ctrlable-build
     ok "ctrlable-build installed at /usr/local/bin/ctrlable-build"
+
+    # Ctrlable-owned builders (e.g. dali-bridge.sh) — bundled, not community-scripts.
+    log "installing ctrlable builders on host"
+    mkdir -p /opt/ctrlable/builders
+    local b
+    for b in $(pct_exec ls -1 /opt/ctrlable-provisioner/host/builders 2>/dev/null); do
+        pct_pull "/opt/ctrlable-provisioner/host/builders/${b}" "/opt/ctrlable/builders/${b}"
+    done
+    chmod +x /opt/ctrlable/builders/*.sh 2>/dev/null || true
+    ok "ctrlable builders installed at /opt/ctrlable/builders"
 }
 
 # ---------------------------------------------------------------------------

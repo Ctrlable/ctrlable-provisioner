@@ -217,6 +217,31 @@ YAML
     systemctl restart frigate 2>/dev/null || true
 }
 
+wire_dali() {
+    # Ctrlable DALI → MQTT bridge. Point config.yaml at the site MQTT broker and
+    # restart. USB pass-through for the hasseb master is set on the host at deploy
+    # time (privileged CT + bind mounts); the base topic stays 'dali'.
+    local wire_to="$1"
+    local mqtt_host mqtt_port mqtt_user mqtt_pass cfg=/opt/dali-bridge/config.yaml
+    mqtt_host=$(jget "$wire_to" "mqtt_host" "localhost")
+    mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
+    mqtt_user=$(jget "$wire_to" "mqtt_user" "")
+    mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
+
+    [[ -f "$cfg" ]] || { log "dali: $cfg missing (bridge not installed?)"; return 0; }
+    python3 - "$cfg" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_pass" <<'PY'
+import sys, yaml
+path, host, port, user, pw = sys.argv[1:6]
+d = yaml.safe_load(open(path)) or {}
+d.update({"mqtt_host": host, "mqtt_port": int(port),
+          "mqtt_username": user or None, "mqtt_password": pw or None})
+yaml.safe_dump(d, open(path, "w"), default_flow_style=False, sort_keys=False)
+PY
+    chmod 600 "$cfg" 2>/dev/null || true
+    log "dali: config.yaml pointed at ${mqtt_host}:${mqtt_port}"
+    systemctl restart dali-bridge 2>/dev/null || true
+}
+
 wire_docker_portainer() {
     # Docker + Portainer has no standard MQTT wiring.
     # Service wiring is done manually through Portainer UI post-deploy.
@@ -277,6 +302,7 @@ main() {
     case "$template_type" in
         zigbee2mqtt)     wire_zigbee2mqtt "$wire_to" ;;
         zwavejs)         wire_zwavejs     "$wire_to" ;;
+        dali-bridge)     wire_dali        "$wire_to" ;;
         frigate)         wire_frigate     "$wire_to" ;;
         docker-portainer) wire_docker_portainer "$wire_to" ;;
         freepbx)         wire_freepbx    "$wire_to" ;;

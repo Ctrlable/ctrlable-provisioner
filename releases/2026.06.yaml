@@ -65,3 +65,17 @@ templates:
       cpu: 2
       ram: 2048
       disk: 16
+  dali-bridge:
+    kind: lxc
+    # ctrlable-owned builder (no community-script) — bundled at host/builders/.
+    builder: ctrlable/dali-bridge.sh
+    app_version: "0.2.0"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 1024
+      disk: 8
+    # USB HID (hasseb) pass-through needs a privileged CT + nesting.
+    unprivileged: false
