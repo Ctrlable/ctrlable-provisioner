@@ -21,11 +21,21 @@ VMID="${VMID:?ctrlable-build must export VMID}"
 CT_HOSTNAME="${CT_HOSTNAME:-dali-bridge}"
 STORAGE="${var_container_storage:-local-lvm}"
 SRC="${DALI_BRIDGE_SRC:-/opt/ctrlable/dali-bridge-src}"
+REPO="${DALI_BRIDGE_REPO:-https://github.com/Ctrlable/dali-bridge.git}"
+REF="${DALI_BRIDGE_REF:-v0.2.0}"           # pinned to the release manifest
+TOKEN="${DALI_BRIDGE_TOKEN:-}"             # PAT/deploy token for the private repo
 
-[ -x "$SRC/deploy/provision-dali-lxc.sh" ] || {
-  echo "dali-bridge builder: bridge source not found at $SRC (set DALI_BRIDGE_SRC)" >&2
-  exit 1
-}
+# Fetch the bridge source (pinned) if it isn't already staged on the build host.
+if [ ! -x "$SRC/deploy/provision-dali-lxc.sh" ]; then
+  url="$REPO"
+  [ -n "$TOKEN" ] && url="https://x-access-token:${TOKEN}@${REPO#https://}"
+  echo "dali-bridge builder: cloning $REPO @ $REF -> $SRC"
+  rm -rf "$SRC"
+  git clone --depth 1 --branch "$REF" "$url" "$SRC" || {
+    echo "dali-bridge builder: source not at $SRC and clone failed (set DALI_BRIDGE_TOKEN?)" >&2
+    exit 1
+  }
+fi
 
 # Placeholder MQTT (127.0.0.1) satisfies the provisioner; wire_dali() overwrites
 # it on first boot with the site broker. The bridge retries MQTT harmlessly until
