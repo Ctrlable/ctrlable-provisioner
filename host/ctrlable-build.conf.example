@@ -7,8 +7,9 @@
 
   "haos_image_path": "/opt/ctrlable/images/ctrlable-os-generic_x86_64.img.xz",
 
-  "_comment_dali": "Private Ctrlable/dali-bridge clone for the dali-bridge builder.",
+  "_comment_dali": "Private Ctrlable/dali-bridge clone for the dali-bridge builder. Prefer the read-only deploy key; token is an HTTPS fallback.",
   "dali_bridge_repo": "https://github.com/Ctrlable/dali-bridge.git",
   "dali_bridge_ref": "v0.2.0",
-  "dali_bridge_token": "<read-only PAT with contents:read on Ctrlable/dali-bridge>"
+  "dali_bridge_ssh_key": "/etc/ctrlable/dali-bridge-deploy-key",
+  "dali_bridge_token": ""
 }

@@ -22,19 +22,27 @@ CT_HOSTNAME="${CT_HOSTNAME:-dali-bridge}"
 STORAGE="${var_container_storage:-local-lvm}"
 SRC="${DALI_BRIDGE_SRC:-/opt/ctrlable/dali-bridge-src}"
 REPO="${DALI_BRIDGE_REPO:-https://github.com/Ctrlable/dali-bridge.git}"
-REF="${DALI_BRIDGE_REF:-v0.2.0}"           # pinned to the release manifest
-TOKEN="${DALI_BRIDGE_TOKEN:-}"             # PAT/deploy token for the private repo
+REF="${DALI_BRIDGE_REF:-v0.2.0}"                       # pinned to the release manifest
+KEY="${DALI_BRIDGE_SSH_KEY:-/etc/ctrlable/dali-bridge-deploy-key}"  # read-only deploy key
+TOKEN="${DALI_BRIDGE_TOKEN:-}"                         # HTTPS PAT fallback
 
 # Fetch the bridge source (pinned) if it isn't already staged on the build host.
+# Prefer the read-only deploy key (SSH); fall back to an HTTPS token.
 if [ ! -x "$SRC/deploy/provision-dali-lxc.sh" ]; then
-  url="$REPO"
-  [ -n "$TOKEN" ] && url="https://x-access-token:${TOKEN}@${REPO#https://}"
-  echo "dali-bridge builder: cloning $REPO @ $REF -> $SRC"
   rm -rf "$SRC"
-  git clone --depth 1 --branch "$REF" "$url" "$SRC" || {
-    echo "dali-bridge builder: source not at $SRC and clone failed (set DALI_BRIDGE_TOKEN?)" >&2
+  echo "dali-bridge builder: cloning $REPO @ $REF -> $SRC"
+  if [ -f "$KEY" ]; then
+    ssh_url="$REPO"
+    case "$REPO" in https://github.com/*) ssh_url="git@github.com:${REPO#https://github.com/}";; esac
+    GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+      git clone --depth 1 --branch "$REF" "$ssh_url" "$SRC"
+  elif [ -n "$TOKEN" ]; then
+    git clone --depth 1 --branch "$REF" "https://x-access-token:${TOKEN}@${REPO#https://}" "$SRC"
+  else
+    echo "dali-bridge builder: no deploy key at $KEY and no DALI_BRIDGE_TOKEN" >&2
     exit 1
-  }
+  fi
+  [ -x "$SRC/deploy/provision-dali-lxc.sh" ] || { echo "dali-bridge builder: clone failed" >&2; exit 1; }
 fi
 
 # Placeholder MQTT (127.0.0.1) satisfies the provisioner; wire_dali() overwrites

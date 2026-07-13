@@ -218,6 +218,7 @@ def build_env(tmpl: dict, conf: dict, vmid: int | None = None) -> dict:
     # them (community-script builders ignore these).
     for key, cf in (("DALI_BRIDGE_REPO", "dali_bridge_repo"),
                     ("DALI_BRIDGE_REF",  "dali_bridge_ref"),
+                    ("DALI_BRIDGE_SSH_KEY", "dali_bridge_ssh_key"),
                     ("DALI_BRIDGE_TOKEN", "dali_bridge_token")):
         if conf.get(cf):
             env[key] = str(conf[cf])
