@@ -22,7 +22,7 @@ CT_HOSTNAME="${CT_HOSTNAME:-dali-bridge}"
 STORAGE="${var_container_storage:-local-lvm}"
 SRC="${DALI_BRIDGE_SRC:-/opt/ctrlable/dali-bridge-src}"
 REPO="${DALI_BRIDGE_REPO:-https://github.com/Ctrlable/dali-bridge.git}"
-REF="${DALI_BRIDGE_REF:-v0.2.2}"                       # pinned to the release manifest
+REF="${DALI_BRIDGE_REF:-v0.2.3}"                       # pinned to the release manifest
 KEY="${DALI_BRIDGE_SSH_KEY:-/etc/ctrlable/dali-bridge-deploy-key}"  # read-only deploy key
 TOKEN="${DALI_BRIDGE_TOKEN:-}"                         # HTTPS PAT fallback
 
