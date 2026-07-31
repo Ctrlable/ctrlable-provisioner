@@ -5,7 +5,8 @@
   "container_storage": "",
   "template_storage": "",
 
-  "haos_image_path": "/opt/ctrlable/images/ctrlable-os-generic_x86_64.img.xz",
+  "_comment_haos": "The staged branded HAOS image IS what gets deployed — ctrlable-build never downloads it, so the manifest's haos_version pin is only honoured if this file matches it. Stage the release asset from github.com/ctrlable/haos-base. Anything built before 2026-06-27 has a throwaway RAUC key and can never OTA.",
+  "haos_image_path": "/opt/ctrlable/images/ctrlable-pro-os-generic-x86-64-18.1.img.xz",
 
   "_comment_dali": "Private Ctrlable/dali-bridge clone for the dali-bridge builder. Prefer the read-only deploy key; token is an HTTPS fallback.",
   "dali_bridge_repo": "https://github.com/Ctrlable/dali-bridge.git",

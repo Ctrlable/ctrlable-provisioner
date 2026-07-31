@@ -1,0 +1,99 @@
+# Ctrlable release manifest 2026.08
+#
+# Only the ctrlable-pro HAOS pin moves versus 2026.06. Everything else —
+# community_scripts_ref and every LXC app_version — is deliberately identical,
+# because the point of a manifest is a combination validated *together*; bumping
+# the LXC builders here would silently invalidate that validation.
+#
+# Why the HAOS bump matters beyond being newer: images built before 2026-06-27
+# carry a throwaway RAUC signing key (upstream generated a fresh one per build
+# and discarded it), so their OTA verification fails permanently with
+# "signature verification failed: Verify error: self-signed certificate". An
+# appliance provisioned from the old 15.1 pin can never update its OS without
+# manually writing the inactive A/B slot. 18.1 carries the stable key and the
+# hardened single-cert keyring, so OTA works normally from first boot.
+release: "2026.08"
+community_scripts_ref: "2026-06-01"
+proxmox_min_version: "8.2"
+templates:
+  ctrlable-pro:
+    kind: vm
+    builder: vm/haos-vm.sh
+    # Staged locally as /opt/ctrlable/images/ctrlable-pro-os-generic-x86-64-18.1.img.xz
+    # (haos_image_path in /etc/ctrlable/build.conf). ctrlable-build never
+    # downloads this — the file on the host is what actually gets deployed, so
+    # this pin is only honoured if the staged image matches it.
+    haos_version: "18.1"
+    rebrand: true
+    base_backup: "ctrlable-base-2026.08.tar"
+    vmid_base: 9000
+    resources:
+      cpu: 2
+      ram: 4096
+      disk: 32
+  zwavejs:
+    kind: lxc
+    builder: ct/zwave-js-ui.sh
+    app_version: "9.x"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 8
+    unprivileged: true
+  zigbee2mqtt:
+    kind: lxc
+    builder: ct/zigbee2mqtt.sh
+    app_version: "1.x"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 8
+    unprivileged: true
+  docker-portainer:
+    kind: lxc
+    builder: ct/docker.sh
+    portainer: true
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 4
+      ram: 4096
+      disk: 20
+    unprivileged: false
+  frigate:
+    kind: lxc
+    builder: ct/frigate.sh
+    app_version: "0.14.x"
+    resources:
+      cpu: 4
+      ram: 4096
+      disk: 32
+    unprivileged: false
+  freepbx:
+    kind: lxc
+    builder: ct/freepbx.sh
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 16
+  dali-bridge:
+    kind: lxc
+    # ctrlable-owned builder (no community-script) — bundled at host/builders/.
+    builder: ctrlable/dali-bridge.sh
+    app_version: "0.2.3"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 1024
+      disk: 8
+    # USB HID (hasseb) pass-through needs a privileged CT + nesting.
+    unprivileged: false
