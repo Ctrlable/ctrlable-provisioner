@@ -22,6 +22,7 @@ Config file /etc/ctrlable/build.conf (JSON):
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -47,15 +48,18 @@ def die(msg: str) -> None:
 # Args + config
 # ---------------------------------------------------------------------------
 
-def parse_args() -> tuple[str, str, str]:
-    """Return (release, template_name, hostname) from SSH_ORIGINAL_COMMAND."""
+def parse_args() -> tuple[str, str, str | None, str | None]:
+    """Return (action, release, template_name, hostname) from SSH_ORIGINAL_COMMAND."""
     original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     parts = original.split()
     if len(parts) == 5 and parts[0] == "ctrlable-build" and parts[1] == "deploy":
-        return parts[2], parts[3], parts[4]
+        return "deploy", parts[2], parts[3], parts[4]
+    if len(parts) == 3 and parts[0] == "ctrlable-build" and parts[1] == "preflight":
+        return "preflight", parts[2], None, None
     die(
         f"Unexpected SSH_ORIGINAL_COMMAND: {original!r}\n"
-        f"Expected: ctrlable-build deploy <release> <template_name> <hostname>"
+        f"Expected: ctrlable-build deploy <release> <template_name> <hostname>\n"
+        f"      or: ctrlable-build preflight <release>"
     )
 
 
@@ -312,20 +316,109 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
 # VM deploy (ctrlable-pro / HAOS)
 # ---------------------------------------------------------------------------
 
+def resolve_haos_image(conf: dict) -> str:
+    """Path to the branded HAOS image this host will actually deploy, or "".
+
+    Explicit haos_image_path wins. Otherwise fall back to the newest-looking
+    .img/.img.xz in the usual directories — reverse-sorted, so a stray file can
+    win. Preflight reports whichever this returns, so what it checks is exactly
+    what deploy_vm will use.
+    """
+    path = conf.get("haos_image_path", "")
+    if path:
+        return path
+    for d in ["/opt/ctrlable/images", "/var/lib/vz/template/iso"]:
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d), reverse=True):
+                if f.endswith(".img.xz") or f.endswith(".img"):
+                    return os.path.join(d, f)
+    return ""
+
+
+def preflight(release: str, manifest: dict, conf: dict) -> None:
+    """Check that this host can actually deploy the release, and say why not.
+
+    Deploys are direct — each one runs a community script or imports the staged
+    HAOS image on the spot — so there is no build step that would surface a
+    missing image or an unreachable builder early. Without this, the first sign
+    of trouble is a half-created guest. Every check prints [CHECK] ok/FAIL and a
+    non-zero exit marks the build record failed.
+    """
+    failures: list[str] = []
+
+    def check(label: str, ok: bool, detail: str = "") -> None:
+        log(f"[CHECK] {'ok  ' if ok else 'FAIL'} {label}{(' — ' + detail) if detail else ''}")
+        if not ok:
+            failures.append(label)
+
+    log(f"[ctrlable-build] preflight release={release}")
+
+    # --- PVE tooling -------------------------------------------------------
+    for tool in ("pct", "qm", "pvesh", "pvesm"):
+        found = subprocess.run(["sh", "-c", f"command -v {tool}"],
+                               capture_output=True).returncode == 0
+        check(f"tool {tool}", found, "" if found else "not on PATH")
+
+    # --- storages ----------------------------------------------------------
+    try:
+        container_st, template_st = detect_pve_storages()
+        check("pve storages", True, f"container={container_st} template={template_st}")
+    except Exception as exc:
+        check("pve storages", False, str(exc))
+
+    templates = manifest.get("templates", {}) or {}
+    vm_templates  = {n: t for n, t in templates.items() if t.get("kind") == "vm"}
+    lxc_templates = {n: t for n, t in templates.items() if t.get("kind") != "vm"}
+
+    # --- staged HAOS image -------------------------------------------------
+    if vm_templates:
+        image = resolve_haos_image(conf)
+        exists = bool(image) and os.path.exists(image)
+        check("haos image staged", exists,
+              image or "no haos_image_path set and nothing found in /opt/ctrlable/images")
+        if exists:
+            if image.endswith(".xz"):
+                intact = subprocess.run(["xz", "-t", image], capture_output=True).returncode == 0
+                check("haos image intact", intact, "xz -t" + ("" if intact else " failed — truncated download?"))
+            # The manifest pin is advisory: deploy imports whatever is staged. A
+            # mismatch here is the difference between shipping the OS you think
+            # you pinned and silently shipping another one.
+            for name, tmpl in vm_templates.items():
+                want = str(tmpl.get("haos_version", "")).strip()
+                if not want:
+                    continue
+                m = re.search(r"(\d+\.\d+(?:\.\d+)?)\.img(?:\.xz)?$", os.path.basename(image))
+                got = m.group(1) if m else ""
+                check(f"{name} image matches pin {want}", got == want,
+                      f"staged image looks like {got or 'unknown version'} ({os.path.basename(image)})")
+
+    # --- community-script builders reachable at the pinned ref -------------
+    ref = manifest.get("community_scripts_ref", "")
+    for name, tmpl in lxc_templates.items():
+        builder = tmpl.get("builder", "")
+        if not builder or builder.startswith("ctrlable/"):
+            # ctrlable-owned builders ship in host/builders/, nothing to fetch.
+            check(f"{name} builder", bool(builder), "bundled" if builder else "no builder set")
+            continue
+        url = script_url(ref, builder)
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                ok = 200 <= resp.status < 300
+            check(f"{name} builder @ {ref}", ok, url)
+        except Exception as exc:
+            check(f"{name} builder @ {ref}", False, f"{url} — {exc}")
+
+    if failures:
+        die(f"preflight failed: {len(failures)} check(s) — " + ", ".join(failures))
+    log(f"[ctrlable-build] preflight passed — release {release} is deployable on this host")
+
+
 def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) -> int:
     vmid = next_vmid()
     container_st, _ = detect_pve_storages()
 
-    haos_image_path = conf.get("haos_image_path", "")
-    if not haos_image_path:
-        for d in ["/opt/ctrlable/images", "/var/lib/vz/template/iso"]:
-            if os.path.isdir(d):
-                for f in sorted(os.listdir(d), reverse=True):
-                    if f.endswith(".img.xz") or f.endswith(".img"):
-                        haos_image_path = os.path.join(d, f)
-                        break
-            if haos_image_path:
-                break
+    haos_image_path = resolve_haos_image(conf)
 
     if not haos_image_path or not os.path.exists(haos_image_path):
         die(
@@ -423,12 +516,13 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    release, template_name, hostname = parse_args()
+    action, release, template_name, hostname = parse_args()
     conf     = load_conf()
     base_url = conf["orchestrator_url"].rstrip("/")
     token    = conf["build_token"]
 
-    log(f"[ctrlable-build] deploy release={release} name={template_name} hostname={hostname}")
+    if action == "deploy":
+        log(f"[ctrlable-build] deploy release={release} name={template_name} hostname={hostname}")
 
     manifest_url = f"{base_url}/api/releases/{release}/manifest?token={token}"
     log(f"fetching manifest: {manifest_url}")
@@ -436,6 +530,10 @@ def main() -> None:
         manifest = fetch_json(manifest_url, token)
     except Exception as exc:
         die(f"could not fetch manifest: {exc}")
+
+    if action == "preflight":
+        preflight(release, manifest, conf)
+        return
 
     templates = manifest.get("templates", {})
     if template_name not in templates:

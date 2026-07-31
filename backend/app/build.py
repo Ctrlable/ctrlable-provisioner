@@ -1,10 +1,24 @@
 """
-Orchestrator-side build trigger.
+Orchestrator-side release preflight.
 
-Spawns an async task that SSHes to the PVE host and runs ctrlable-build <release>.
-Output is streamed line-by-line into the build log in the DB.
-Result lines emitted by the host script (prefixed [RESULT]) are parsed to record
-template VMIDs.
+Spawns an async task that SSHes to the PVE host and runs
+`ctrlable-build preflight <release>`, streaming output line-by-line into the
+build log in the DB.
+
+This used to send `ctrlable-build <release>` and expect the host to build
+Proxmox templates. The host tool was rewritten to deploy instances directly —
+no templates, no clone — and its argument parser only accepts the `deploy` and
+`preflight` forms, so the old command died on every run with "Unexpected
+SSH_ORIGINAL_COMMAND" and the button could never succeed.
+
+Deploys being direct means nothing validates a release until a guest is half
+created, so the useful job here is readiness: is the branded HAOS image staged
+and intact, does it match the manifest's pin, are the pinned community-script
+builders reachable, is the PVE tooling present. Exit status decides
+success/failed on the build record.
+
+[RESULT] parsing below is retained for the template model; preflight emits
+[CHECK] lines instead and simply never matches it.
 """
 import asyncio
 import re
@@ -56,7 +70,7 @@ async def _execute(build_id: int, release: str, db: "StateDB", settings: "Settin
         "-o", "ServerAliveInterval=30",   # keepalive every 30s
         "-o", "ServerAliveCountMax=60",   # tolerate 30 min of silence
         f"root@{settings.pve_host}",
-        f"ctrlable-build {release}",
+        f"ctrlable-build preflight {release}",
     ]
 
     proc = await asyncio.create_subprocess_exec(
