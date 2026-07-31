@@ -16,7 +16,7 @@ Config file /etc/ctrlable/build.conf (JSON):
   {
     "orchestrator_url": "http://<ip>:8000",
     "build_token": "<same as BUILD_TOKEN in orchestrator .env>",
-    "haos_image_path": "/opt/ctrlable/images/ctrlable-os-generic_x86_64-<ver>.img.xz"
+    "haos_image_path": "/opt/ctrlable/images/ctrlable-pro-os-generic-x86-64-<ver>.img.xz"
   }
 """
 
