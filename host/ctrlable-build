@@ -124,6 +124,24 @@ def list_vmids() -> set[int]:
     return ids
 
 
+def list_ct_vmids() -> set[int]:
+    """Container VMIDs only — deliberately never VMs.
+
+    deploy_lxc's fallback adopts the newest guest when a community script
+    ignores our NEXTID; using the merged pct+qm list there let it adopt a VM.
+    """
+    out = subprocess.run(["pct", "list"], capture_output=True, text=True, check=True).stdout
+    ids: set[int] = set()
+    for line in out.strip().splitlines()[1:]:
+        parts = line.split()
+        if parts:
+            try:
+                ids.add(int(parts[0]))
+            except ValueError:
+                pass
+    return ids
+
+
 def detect_pve_storages() -> tuple[str, str]:
     out = subprocess.run(["pvesm", "status"], capture_output=True, text=True).stdout
     container_st = "local-lvm"
@@ -295,15 +313,17 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
             die(f"[{name}] community script exited {result.returncode}")
 
     # Verify the expected VMID was actually created
-    if vmid not in list_vmids():
-        # Script ignored our NEXTID — fall back to detecting the new VMID
-        after   = list_vmids()
-        before_set = set()  # we lost the before snapshot; accept any single new VMID
-        # Re-check: get everything except what was there before this deploy started
-        # (we can't recover perfectly here — log a warning and pick the newest VMID)
+    if vmid not in list_ct_vmids():
+        # The community script ignored our NEXTID. Recover by adopting the newest
+        # container — but containers ONLY. list_vmids() merges pct and qm, and
+        # taking max() across both adopted a freshly created VM during a full
+        # stack deploy: the appliance VM had just taken vmid 100, so zwavejs ran
+        # `pct start 100` against a QEMU guest and died with exit 255.
         log(f"[{name}] WARNING: vmid={vmid} not found after script — detecting fallback")
-        existing = list_vmids() - {900}  # orchestrator excluded
-        vmid = max(existing)  # best guess: highest VMID is most recently created
+        candidates = list_ct_vmids() - {900}  # orchestrator excluded
+        if not candidates:
+            die(f"[{name}] community script created no container, and none exist to adopt")
+        vmid = max(candidates)
     log(f"[{name}] container vmid={vmid}")
 
     # Ensure running so we can exec/push into it
@@ -413,8 +433,18 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
     for name, tmpl in lxc_templates.items():
         builder = tmpl.get("builder", "")
         if not builder or builder.startswith("ctrlable/"):
-            # ctrlable-owned builders ship in host/builders/, nothing to fetch.
-            check(f"{name} builder", bool(builder), "bundled" if builder else "no builder set")
+            # ctrlable-owned builders are staged on this host, not fetched. Stat
+            # the file — an earlier version only checked that a builder string
+            # existed, so a host missing the script passed preflight and then
+            # failed mid-deploy with "bundled builder missing".
+            if not builder:
+                check(f"{name} builder", False, "no builder set")
+                continue
+            builders_dir = os.environ.get("CTRLABLE_BUILDERS_DIR", "/opt/ctrlable/builders")
+            local = os.path.join(builders_dir, os.path.basename(builder))
+            present = os.path.isfile(local)
+            check(f"{name} builder staged", present,
+                  local if present else f"{local} missing — copy it from host/builders/")
             continue
         url = script_url(ref, builder)
         try:
