@@ -44,6 +44,17 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
+# Deploys are long and mostly silent (a 551 MB decompress, then a community
+# script that prints its own spinner). The orchestrator parses these markers to
+# drive a progress bar, so the count must stay honest: emit every phase exactly
+# once, in order, and keep the total equal to the number a path really has.
+PHASE_TOTAL = 6
+
+
+def phase(n: int, label: str) -> None:
+    log(f"[PHASE] {n}/{PHASE_TOTAL} {label}")
+
+
 # ---------------------------------------------------------------------------
 # Args + config
 # ---------------------------------------------------------------------------
@@ -271,8 +282,11 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
             die(f"[{name}] ctrlable builder exited {result.returncode}")
     else:
         url = script_url(ref, builder)
+        phase(2, "downloading builder")
         log(f"[{name}] downloading builder: {url}")
+        phase(3, "allocating vmid")
         log(f"[{name}] pre-allocated vmid={vmid}")
+        phase(4, "running community script")
         log(f"[{name}] running community script (METHOD=default)")
         script = fetch_text(url)
         result = subprocess.run(["bash", "-s"], input=script.encode(), env=env,
@@ -294,6 +308,7 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
 
     # Ensure running so we can exec/push into it
     if not is_running(vmid):
+        phase(5, "starting container")
         log(f"[{name}] starting container")
         subprocess.run(["pct", "start", str(vmid)], check=True)
     for _ in range(30):
@@ -303,6 +318,7 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
     else:
         die(f"[{name}] container {vmid} did not start within 60s")
 
+    phase(6, "configuring guest")
     log(f"[{name}] setting hostname to {hostname}")
     set_lxc_hostname(vmid, hostname)
 
@@ -415,6 +431,7 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
 
 
 def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) -> int:
+    phase(2, "allocating vmid")
     vmid = next_vmid()
     container_st, _ = detect_pve_storages()
 
@@ -439,6 +456,7 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
             temp_raw_path = os.path.join(
                 os.path.dirname(haos_image_path), f"ctrlable-haos-{vmid}.img"
             )
+            phase(3, "decompressing image")
             log(f"[{name}] decompressing image to {temp_raw_path} ...")
             with open(temp_raw_path, "wb") as fout:
                 subprocess.run(
@@ -449,6 +467,7 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
         else:
             raw_img = haos_image_path
 
+        phase(4, "creating VM")
         log(f"[{name}] creating VM")
         subprocess.run([
             "qm", "create", str(vmid),
@@ -465,6 +484,7 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
             "--balloon",  "0",
         ], check=True)
 
+        phase(5, "importing disk")
         log(f"[{name}] importing disk")
         subprocess.run(
             ["qm", "importdisk", str(vmid), raw_img, container_st, "--format", "qcow2"],
@@ -496,6 +516,7 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
             check=True,
         )
 
+        phase(6, "starting VM")
         log(f"[{name}] starting VM")
         subprocess.run(["qm", "start", str(vmid)], check=True)
 
@@ -524,6 +545,8 @@ def main() -> None:
     if action == "deploy":
         log(f"[ctrlable-build] deploy release={release} name={template_name} hostname={hostname}")
 
+    if action == "deploy":
+        phase(1, "fetching manifest")
     manifest_url = f"{base_url}/api/releases/{release}/manifest?token={token}"
     log(f"fetching manifest: {manifest_url}")
     try:

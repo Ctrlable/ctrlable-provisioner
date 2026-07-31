@@ -16,6 +16,11 @@ if TYPE_CHECKING:
     from .state import StateDB
 
 _RESULT_RE = re.compile(r"\[RESULT\]\s+name=(\S+)\s+vmid=(\d+)(?:\s+kind=(\S+))?")
+# [PHASE] 3/6 decompressing image — emitted by the host tool at each step.
+_PHASE_RE = re.compile(r"\[PHASE\]\s+(\d+)/(\d+)\s+(.+)")
+
+_LOG_FLUSH_LINES = 20        # flush accumulated log lines to DB every N lines
+_LOG_FLUSH_SECONDS = 2.0     # also flush if this many seconds pass without a flush
 
 # Only one deploy runs at a time — prevents VMID collision when parallel add_instance
 # calls are made. deploy_stack_async already runs sequentially, but this guards
@@ -62,8 +67,14 @@ async def _ssh_deploy(
     name: str,
     hostname: str,
     settings: "Settings",
+    db: "StateDB | None" = None,
 ) -> tuple[int, str]:
-    """SSH to PVE host, run 'ctrlable-build deploy', return (vmid, kind)."""
+    """SSH to PVE host, run 'ctrlable-build deploy', return (vmid, kind).
+
+    When `db` is given, output is streamed into the instance row as it arrives
+    and [PHASE] markers update the progress fields, so the UI can show what is
+    happening. Output still goes to stdout for journald either way.
+    """
     cmd = [
         "ssh",
         "-i", settings.build_key_path,
@@ -86,15 +97,44 @@ async def _ssh_deploy(
     vmid: int | None = None
     kind: str = "lxc"
 
+    buf: list[str] = []
+    last_flush = asyncio.get_event_loop().time()
+
+    async def _flush() -> None:
+        if db is None or not buf:
+            return
+        chunk = "".join(buf)
+        buf.clear()
+        await asyncio.to_thread(db.append_instance_log, hostname, chunk)
+
     async for raw in proc.stdout:
         line = raw.decode(errors="replace")
         print(f"[deploy/{name}] {line}", end="", flush=True)
+        buf.append(line)
+
         m = _RESULT_RE.search(line)
         if m:
             vmid = int(m.group(2))
             if m.group(3):
                 kind = m.group(3)
 
+        p = _PHASE_RE.search(line)
+        if p and db is not None:
+            # Flush first so the log tail and the phase the UI renders agree.
+            await _flush()
+            await asyncio.to_thread(
+                db.update_instance_phase, hostname,
+                int(p.group(1)), int(p.group(2)), p.group(3).strip(),
+            )
+            last_flush = asyncio.get_event_loop().time()
+            continue
+
+        now = asyncio.get_event_loop().time()
+        if len(buf) >= _LOG_FLUSH_LINES or (now - last_flush) >= _LOG_FLUSH_SECONDS:
+            await _flush()
+            last_flush = now
+
+    await _flush()
     await proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(f"deploy failed for {name!r} (exit {proc.returncode})")
@@ -119,12 +159,24 @@ async def deploy_instance(
     existing_hostnames = {r["hostname"] for r in existing}
     hostname = _next_hostname(project["site_name"], template_name, existing_hostnames)
 
-    async with _get_lock():
-        vmid, kind = await _ssh_deploy(release, template_name, hostname, settings)
-
+    # Create the row BEFORE deploying. The deploy takes minutes, and previously
+    # the row only appeared once it finished — so the UI had nothing to show
+    # meanwhile, and a failed deploy left no trace at all. vmid is 0 until the
+    # host reports the real one in its [RESULT] line.
     await asyncio.to_thread(
-        db.create_instance, project_id, template_name, vmid, hostname, wire_to, kind
+        db.create_instance, project_id, template_name, 0, hostname, wire_to, "lxc",
+        "provisioning",
     )
+
+    try:
+        async with _get_lock():
+            vmid, kind = await _ssh_deploy(release, template_name, hostname, settings, db)
+    except Exception as exc:
+        await asyncio.to_thread(db.append_instance_log, hostname, f"\n[ERROR] {exc}\n")
+        await asyncio.to_thread(db.set_instance_status, hostname, "error")
+        raise
+
+    await asyncio.to_thread(db.finish_instance, hostname, vmid, kind, "active")
     return dict(await asyncio.to_thread(db.get_instance_by_hostname, hostname))
 
 
