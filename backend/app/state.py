@@ -89,6 +89,14 @@ class StateDB:
                 "ALTER TABLE platform_state ADD COLUMN lan_subnet TEXT",
                 "ALTER TABLE platform_state ADD COLUMN proxy_subnet TEXT",
                 "ALTER TABLE instances ADD COLUMN kind TEXT NOT NULL DEFAULT 'lxc'",
+                # Deploy progress. The row is now created before the deploy runs
+                # (vmid 0 until the host reports one), so the UI has something to
+                # show while it works — and a failed deploy leaves a visible row
+                # instead of vanishing.
+                "ALTER TABLE instances ADD COLUMN phase_index INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE instances ADD COLUMN phase_total INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE instances ADD COLUMN phase_label TEXT",
+                "ALTER TABLE instances ADD COLUMN deploy_log TEXT",
             ]:
                 try:
                     conn.execute(migration)
@@ -216,13 +224,15 @@ class StateDB:
         hostname: str,
         wire_to: dict[str, Any] | None = None,
         kind: str = "lxc",
+        status: str = "pending",
     ) -> int:
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO instances"
                 " (project_id, type, vmid, hostname, status, wire_to, kind, created_at)"
-                " VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
-                (project_id, type_, vmid, hostname, json.dumps(wire_to) if wire_to else None, kind, _now()),
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (project_id, type_, vmid, hostname, status,
+                 json.dumps(wire_to) if wire_to else None, kind, _now()),
             )
             return cur.lastrowid
 
@@ -233,6 +243,39 @@ class StateDB:
                 "UPDATE instances SET status = ?, activated_at = COALESCE(?, activated_at)"
                 " WHERE hostname = ?",
                 (status, activated_at, hostname),
+            )
+
+    def update_instance_phase(self, hostname: str, index: int, total: int, label: str) -> None:
+        """Record which deploy phase a provisioning instance is in."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE instances SET phase_index = ?, phase_total = ?, phase_label = ?"
+                " WHERE hostname = ?",
+                (index, total, label, hostname),
+            )
+
+    def append_instance_log(self, hostname: str, chunk: str) -> None:
+        """Append streamed deploy output.
+
+        Capped so a chatty community script cannot grow the row without bound —
+        the tail is what anyone actually reads.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE instances"
+                " SET deploy_log = substr(COALESCE(deploy_log, '') || ?, -65536)"
+                " WHERE hostname = ?",
+                (chunk, hostname),
+            )
+
+    def finish_instance(self, hostname: str, vmid: int, kind: str, status: str) -> None:
+        """Settle a deploy: real vmid + kind from the host, and a final status."""
+        activated_at = _now() if status == "active" else None
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE instances SET vmid = ?, kind = ?, status = ?,"
+                " activated_at = COALESCE(?, activated_at) WHERE hostname = ?",
+                (vmid, kind, status, activated_at, hostname),
             )
 
     def get_instance_by_vmid(self, vmid: int) -> sqlite3.Row | None:
