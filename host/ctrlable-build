@@ -389,8 +389,10 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
 
     log(f"[ctrlable-build] preflight release={release}")
 
-    # --- PVE tooling -------------------------------------------------------
-    for tool in ("pct", "qm", "pvesh", "pvesm"):
+    # --- host tooling ------------------------------------------------------
+    # git is NOT part of a stock Proxmox install, and ctrlable-owned builders
+    # clone their source at deploy time — a host without it fails mid-deploy.
+    for tool in ("pct", "qm", "pvesh", "pvesm", "git"):
         found = subprocess.run(["sh", "-c", f"command -v {tool}"],
                                capture_output=True).returncode == 0
         check(f"tool {tool}", found, "" if found else "not on PATH")
@@ -445,6 +447,14 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
             present = os.path.isfile(local)
             check(f"{name} builder staged", present,
                   local if present else f"{local} missing — copy it from host/builders/")
+            # Bundled builders clone private sources, so a staged script is not
+            # enough — without a credential the deploy dies after the guest is
+            # already being created.
+            key = os.environ.get("DALI_BRIDGE_SSH_KEY", "/etc/ctrlable/dali-bridge-deploy-key")
+            if name == "dali-bridge":
+                has_cred = os.path.isfile(key) or bool(conf.get("dali_bridge_token"))
+                check(f"{name} source credential", has_cred,
+                      key if os.path.isfile(key) else "no deploy key and no dali_bridge_token in build.conf")
             continue
         url = script_url(ref, builder)
         try:
