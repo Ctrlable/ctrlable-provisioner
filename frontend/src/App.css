@@ -106,10 +106,34 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
 .field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
 .form-note { font-size: 11px; color: var(--muted); margin-top: 12px; }
 .project-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.instance-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
+/* A row is a column now: the header line, then progress / log while deploying. */
+.instance-row { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; border-top: 1px solid var(--border); }
+.instance-row-main { display: flex; align-items: center; gap: 8px; }
 .inst-host { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .instance-row .inst-del { margin-left: auto; opacity: 0.35; }
 .instance-row:hover .inst-del { opacity: 1; }
+.inst-vmid { opacity: .65; }
+.inst-log-toggle { opacity: .6; }
+.instance-row:hover .inst-log-toggle { opacity: 1; }
+
+/* Deploy progress. Width is driven by the host tool's [PHASE] n/m markers, so it
+   only advances when a real step completes — it never creeps on a timer. */
+.inst-progress { display: flex; align-items: center; gap: 8px; padding-left: 18px; }
+.inst-progress-track { flex: 1; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.inst-progress-fill { height: 100%; background: #6366f1; border-radius: 2px; transition: width .4s ease; }
+.inst-progress-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+/* Long phases (the community script) look stalled otherwise — this says "alive",
+   without implying progress the bar hasn't actually made. */
+.instance-row-busy .inst-progress-fill { animation: inst-pulse 2s ease-in-out infinite; }
+@keyframes inst-pulse { 0%,100% { opacity: 1 } 50% { opacity: .55 } }
+
+.inst-error { padding-left: 18px; font-size: 11px; color: #ef4444; }
+.inst-log {
+  margin-left: 18px; font-family: monospace; font-size: 11px; line-height: 1.45;
+  padding: .6rem; background: #0a0b0f; color: #94a3b8; border: 1px solid var(--border);
+  border-radius: 6px; max-height: 220px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-all;
+}
 
 /* releases tab */
 .releases-tab {}
