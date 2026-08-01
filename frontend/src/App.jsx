@@ -520,13 +520,49 @@ function Field({ label, value, onChange, type='text', placeholder='' }) {
 }
 
 function InstanceRow({ inst, onDelete }) {
+  const [showLog, setShowLog] = useState(false)
+  const busy  = inst.status === 'provisioning'
+  const failed = inst.status === 'error'
+  const total = inst.phase_total || 0
+  const idx   = inst.phase_index || 0
+  // Phases come from the host tool's [PHASE] n/m markers, so this tracks real
+  // steps. Deliberately no time-based estimate: "running community script" can
+  // take a minute or twenty, and a bar that invents progress is worse than one
+  // that sits still and says what it is doing.
+  const pct = total ? Math.round((idx / total) * 100) : 0
+
   return (
-    <div className="instance-row">
-      <StatusDot status={inst.status} />
-      <span className="inst-host">{inst.hostname}</span>
-      <span className="tag">{inst.type}</span>
-      <span className={`tag status-${inst.status}`}>{inst.status}</span>
-      <button className="btn-xs danger inst-del" title="Remove instance" onClick={() => onDelete(inst)}>✕</button>
+    <div className={`instance-row${busy ? ' instance-row-busy' : ''}`}>
+      <div className="instance-row-main">
+        <StatusDot status={inst.status} />
+        <span className="inst-host">{inst.hostname}</span>
+        <span className="tag">{inst.type}</span>
+        <span className={`tag status-${inst.status}`}>{inst.status}</span>
+        {inst.vmid > 0 && <span className="tag inst-vmid">vmid {inst.vmid}</span>}
+        {(busy || failed) && inst.deploy_log && (
+          <button className="btn-xs inst-log-toggle" onClick={() => setShowLog(v => !v)}>
+            {showLog ? 'hide log' : 'log'}
+          </button>
+        )}
+        <button className="btn-xs danger inst-del" title="Remove instance" onClick={() => onDelete(inst)}>✕</button>
+      </div>
+
+      {busy && (
+        <div className="inst-progress">
+          <div className="inst-progress-track">
+            <div className="inst-progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+          <span className="inst-progress-label">
+            {total ? `${idx}/${total}` : '…'} {inst.phase_label || 'starting deploy'}
+          </span>
+        </div>
+      )}
+
+      {failed && <div className="inst-error">deploy failed — see log</div>}
+
+      {showLog && inst.deploy_log && (
+        <pre className="inst-log">{inst.deploy_log.split('\n').slice(-14).join('\n')}</pre>
+      )}
     </div>
   )
 }
