@@ -83,6 +83,25 @@ templates:
       cpu: 2
       ram: 2048
       disk: 16
+  hardware-manager:
+    kind: lxc
+    # ctrlable-owned builder (no community-script) — bundled at host/builders/.
+    builder: ctrlable/hardware-manager.sh
+    app_version: "0.1.0"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 1024
+      disk: 8
+    # Nothing inside the CT touches hardware, so it can be unprivileged. The
+    # agent does touch hardware and runs on the HOST — which is the one way this
+    # template differs from every other one here: provisioning it installs a
+    # systemd unit on the hypervisor as well as creating a container. Additive
+    # and read-only, but not confined to the CT.
+    unprivileged: true
+
   dali-bridge:
     kind: lxc
     # ctrlable-owned builder (no community-script) — bundled at host/builders/.
