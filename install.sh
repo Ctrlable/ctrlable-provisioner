@@ -31,13 +31,18 @@ LOCAL_SRC=""            # path to local repo checkout (--local <path>)
 ENROLL_TOKEN=""         # portal.ctrlable.com enrollment token (--enroll-token TOKEN)
 PORTAL_URL="https://portal.ctrlable.com"   # override with --portal-url
 PORTAL_EMAIL=""         # required when using --portal-password; set with --portal-email
-PORTAL_PASSWORD=""      # read from CTRLABLE_PORTAL_PASSWORD env var or --portal-password PW
+PORTAL_PASSWORD=""
+# Branded HAOS image staged on this host. ctrlable-build NEVER downloads it --
+# the file here is what gets deployed -- so preflight fails without it.
+HAOS_IMAGE=""
+# Credential for the private dali-bridge source, required by its builder.
+DALI_TOKEN=""
 
 # ---------------------------------------------------------------------------
 # Arg parsing
 # ---------------------------------------------------------------------------
 usage() {
-    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF] [--enroll-token TOKEN] [--portal-url URL] [--portal-email EMAIL] [--portal-password PW]"
+    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF] [--enroll-token TOKEN] [--portal-url URL] [--portal-email EMAIL] [--portal-password PW] [--haos-image PATH] [--dali-token TOKEN]"
     exit 1
 }
 
@@ -53,6 +58,10 @@ while [[ $# -gt 0 ]]; do
         --portal-url)      PORTAL_URL="$2";    shift 2 ;;
         --portal-email)    PORTAL_EMAIL="$2";  shift 2 ;;
         --portal-password) PORTAL_PASSWORD="$2"; shift 2 ;;
+        # Both of these are preflight requirements that build.conf never carried,
+        # so a fresh host could not build a release without hand-editing it.
+        --haos-image)      HAOS_IMAGE="$2";    shift 2 ;;
+        --dali-token)      DALI_TOKEN="$2";    shift 2 ;;
         --help|-h) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -216,11 +225,16 @@ setup_lxc() {
         apt-get install -y -qq python3 python3-pip python3-venv git curl ca-certificates gnupg
     "
 
+    # --batch --yes on the dearmor: without them gpg prompts "File exists.
+    # Overwrite?" on any re-run, and with no TTY that is fatal under set -e. The
+    # installer therefore succeeded exactly once and failed every retry, aborting
+    # before install_host_tools() and leaving the host without git -- which then
+    # showed up as an unrelated-looking preflight failure.
     log "installing Node.js 20 LTS"
     pct_exec bash -c "
         set -euo pipefail
         curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-            | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
+            | gpg --batch --yes --dearmor -o /usr/share/keyrings/nodesource.gpg
         echo 'deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main' \
             > /etc/apt/sources.list.d/nodesource.list
         apt-get update -qq
@@ -303,12 +317,20 @@ ENV
     fi
 
     log "writing host build.conf"
-    cat > /etc/ctrlable/build.conf <<JSON
-{
-  "orchestrator_url": "http://${ORCHESTRATOR_IP}:8000",
-  "build_token": "${BUILD_TOKEN}"
-}
-JSON
+    # haos_image_path and dali_bridge_token are both PREFLIGHT REQUIREMENTS.
+    # Omitting them produced an installer whose own printed next step ("Build
+    # release") could never succeed on a clean host -- the release build failed
+    # on three checks, two of which live in this file. Written only when
+    # supplied, so an unset value stays absent rather than becoming an empty
+    # string that reads as "configured".
+    {
+      printf '{\n'
+      printf '  "orchestrator_url": "http://%s:8000",\n' "${ORCHESTRATOR_IP}"
+      printf '  "build_token": "%s"' "${BUILD_TOKEN}"
+      [[ -n "$HAOS_IMAGE" ]] && printf ',\n  "haos_image_path": "%s"' "$HAOS_IMAGE"
+      [[ -n "$DALI_TOKEN" ]] && printf ',\n  "dali_bridge_token": "%s"' "$DALI_TOKEN"
+      printf '\n}\n'
+    } > /etc/ctrlable/build.conf
     chmod 600 /etc/ctrlable/build.conf
     ok "configuration written"
 }
@@ -352,6 +374,29 @@ print(json.dumps({'email': sys.argv[1], 'password': sys.argv[2]}))
 # Install ctrlable-build on host
 # ---------------------------------------------------------------------------
 install_host_tools() {
+    # HOST dependencies, not LXC ones. setup_lxc installs git *inside* the
+    # orchestrator container, which is what it needs to fetch its own source --
+    # but ctrlable-build runs on the HOST and its preflight checks for git there,
+    # with the comment "git is NOT part of a stock Proxmox install". On every
+    # appliance so far git happened to be present already, so the gap stayed
+    # hidden; the first genuinely clean host (2026-08-16) failed preflight
+    # immediately after a successful install. An installer that leaves a host
+    # unable to pass its own preflight is broken regardless of how often it
+    # gets away with it.
+    log "installing host dependencies"
+    local missing=""
+    local t
+    for t in git curl; do
+        command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+    done
+    if [[ -n "$missing" ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing >/dev/null 2>&1 \
+            || warn "could not install:$missing — preflight may fail"
+        ok "host dependencies installed:$missing"
+    else
+        ok "host dependencies already present"
+    fi
+
     log "installing ctrlable-build on host"
     pct_pull /opt/ctrlable-provisioner/host/ctrlable-build /usr/local/bin/ctrlable-build
     chmod +x /usr/local/bin/ctrlable-build
@@ -404,9 +449,27 @@ print_summary() {
     echo "  1. Open the web UI → Platform tab → paste an enrollment token"
     echo "     (or re-run with --portal-password to auto-enroll)"
     fi
-    echo "  2. Go to Releases → Build release 2026.06"
-    echo "  3. Wait for all LXC templates to build (~10 min)"
-    echo "  4. Deploy your first stack"
+    # Only advertise the build step once it can actually succeed. Printing
+    # "Build release" unconditionally sent people at a step that fails preflight
+    # on three checks, two of which this installer is responsible for.
+    local n=2
+    if [[ -z "$HAOS_IMAGE" ]] && ! ls /opt/ctrlable/images/*.img* >/dev/null 2>&1; then
+        echo "  ${n}. Stage the branded HAOS image (REQUIRED before any release build):"
+        echo "     copy it to /opt/ctrlable/images/, or re-run with --haos-image PATH"
+        echo "     ctrlable-build never downloads this — the staged file is what deploys"
+        n=$((n+1))
+    fi
+    if [[ -z "$DALI_TOKEN" ]] && ! grep -q dali_bridge_token /etc/ctrlable/build.conf 2>/dev/null; then
+        echo "  ${n}. Add the dali-bridge source credential:"
+        echo "     re-run with --dali-token TOKEN, or add dali_bridge_token to"
+        echo "     /etc/ctrlable/build.conf (only needed if the release includes dali-bridge)"
+        n=$((n+1))
+    fi
+    echo "  ${n}. Go to Releases → Build release"
+    n=$((n+1))
+    echo "  ${n}. Wait for all LXC templates to build (~10 min)"
+    n=$((n+1))
+    echo "  ${n}. Deploy your first stack"
     echo ""
     echo -e "  To view logs: ${CYAN}pct exec $VMID -- journalctl -fu ctrlable-provisioner${NC}"
     echo ""
