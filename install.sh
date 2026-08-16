@@ -37,12 +37,14 @@ PORTAL_PASSWORD=""
 HAOS_IMAGE=""
 # Credential for the private dali-bridge source, required by its builder.
 DALI_TOKEN=""
+# GitHub PAT (admin:public_key) used only to register deploy keys. Never stored.
+GITHUB_TOKEN=""
 
 # ---------------------------------------------------------------------------
 # Arg parsing
 # ---------------------------------------------------------------------------
 usage() {
-    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF] [--enroll-token TOKEN] [--portal-url URL] [--portal-email EMAIL] [--portal-password PW] [--haos-image PATH] [--dali-token TOKEN]"
+    echo "Usage: $0 [--vmid N] [--bridge BR] [--storage ST] [--local PATH] [--repo URL] [--ref REF] [--enroll-token TOKEN] [--portal-url URL] [--portal-email EMAIL] [--portal-password PW] [--haos-image PATH] [--dali-token TOKEN] [--github-token PAT]"
     exit 1
 }
 
@@ -62,6 +64,10 @@ while [[ $# -gt 0 ]]; do
         # so a fresh host could not build a release without hand-editing it.
         --haos-image)      HAOS_IMAGE="$2";    shift 2 ;;
         --dali-token)      DALI_TOKEN="$2";    shift 2 ;;
+        # PAT with admin:public_key — lets the installer create and register the
+        # read-only deploy keys the private builders need, instead of leaving it
+        # as the one manual step in a "one-click" provisioner.
+        --github-token)    GITHUB_TOKEN="$2";  shift 2 ;;
         --help|-h) usage ;;
         *) echo "Unknown argument: $1"; usage ;;
     esac
@@ -74,11 +80,13 @@ done
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 log()  { echo -e "${CYAN}[install]${NC} $*"; }
 ok()   { echo -e "${GREEN}[✓]${NC} $*"; }
 die()  { echo -e "${RED}[✗] $*${NC}" >&2; exit 1; }
+# Non-fatal: the run continues and preflight reports whatever is missing.
+warn() { echo -e "${YELLOW}[!]${NC} $*" >&2; }
 
 pct_exec() { pct exec "$VMID" -- "$@"; }
 pct_push() { pct push "$VMID" "$1" "$2"; }
@@ -373,6 +381,52 @@ print(json.dumps({'email': sys.argv[1], 'password': sys.argv[2]}))
 # ---------------------------------------------------------------------------
 # Install ctrlable-build on host
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Deploy keys for private builder sources
+# ---------------------------------------------------------------------------
+setup_deploy_keys() {
+    # Private builders (dali-bridge, hardware-manager) clone their source at
+    # deploy time and need a read-only deploy key on the build host. Creating
+    # those by hand was the last manual step in a "one-click" provisioner, and
+    # skipping it produced a preflight failure or -- worse, before the credential
+    # check was generalised -- a deploy that died with the guest half-created.
+    #
+    # The private half is generated HERE and never leaves the host; only the
+    # public half is sent to GitHub. The PAT is used for the API call and not
+    # written anywhere.
+    local -a names=(dali-bridge hardware-manager)
+    local -A repos=(
+        [dali-bridge]="Ctrlable/dali-bridge"
+        [hardware-manager]="Ctrlable/ctrlable-hardware-manager-src"
+    )
+    local n key pub repo code
+    for n in "${names[@]}"; do
+        key="/etc/ctrlable/${n}-deploy-key"
+        if [[ -f "$key" ]]; then
+            ok "deploy key present: $n"
+            continue
+        fi
+        if [[ -z "$GITHUB_TOKEN" ]]; then
+            log "no --github-token; skipping deploy key for $n (preflight will report it)"
+            continue
+        fi
+        ssh-keygen -t ed25519 -N '' -C "$(hostname -s) builder (${n})" -f "$key" >/dev/null 2>&1             || { warn "could not generate key for $n"; continue; }
+        chmod 600 "$key"
+        pub=$(cat "${key}.pub")
+        repo="${repos[$n]}"
+        code=$(curl -s -o /dev/null -w '%{http_code}' -X POST             -H "Authorization: Bearer ${GITHUB_TOKEN}"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/${repo}/keys"             -d "$(printf '{"title":"%s builder (read-only)","key":"%s","read_only":true}' \
+                   "$(hostname -s)" "$pub")")
+        if [[ "$code" == "201" ]]; then
+            ok "deploy key registered on ${repo}"
+        else
+            # Leave the private half in place: a key that exists locally but is
+            # not registered is visible to preflight's clone check, whereas
+            # deleting it hides the failure until deploy.
+            warn "could not register deploy key on ${repo} (HTTP $code) — add ${key}.pub manually"
+        fi
+    done
+}
+
 install_host_tools() {
     # HOST dependencies, not LXC ones. setup_lxc installs git *inside* the
     # orchestrator container, which is what it needs to fetch its own source --
@@ -466,8 +520,14 @@ print_summary() {
         echo "     ctrlable-build never downloads this — the staged file is what deploys"
         n=$((n+1))
     fi
-    if [[ -z "$DALI_TOKEN" ]] && ! grep -q dali_bridge_token /etc/ctrlable/build.conf 2>/dev/null; then
+    # A deploy key satisfies this just as well as a token -- checking only the
+    # token told people to fix something that was already working.
+    if [[ ! -f /etc/ctrlable/dali-bridge-deploy-key ]] \
+       && [[ -z "$DALI_TOKEN" ]] \
+       && ! grep -q dali_bridge_token /etc/ctrlable/build.conf 2>/dev/null; then
         echo "  ${n}. Add the dali-bridge source credential:"
+        echo "     easiest: re-run with --github-token PAT (admin:public_key) and"
+        echo "     the installer creates + registers read-only deploy keys itself"
         echo "     re-run with --dali-token TOKEN, or add dali_bridge_token to"
         echo "     /etc/ctrlable/build.conf (only needed if the release includes dali-bridge)"
         n=$((n+1))
@@ -497,6 +557,7 @@ setup_build_key
 setup_lxc
 fetch_enroll_token
 write_config
+setup_deploy_keys
 install_host_tools
 start_orchestrator
 print_summary
