@@ -530,7 +530,36 @@ def guest_action(vmid: int, action: str, _: str | None = Depends(require_auth)) 
 
 @app.get("/api/releases/{release}/built-templates")
 def list_built_templates(release: str, _: str | None = Depends(require_auth)) -> list[dict]:
-    return [dict(r) for r in db.list_templates(release)]
+    """Templates that can be deployed for a release.
+
+    Was `db.list_templates()` — the templates BUILT by the old
+    template-and-clone model. ctrlable-build was rewritten to deploy instances
+    directly, so nothing is ever recorded there and this always returned []. The
+    Add Instance dialog reads this endpoint, so it always showed "No built
+    templates" and a single component could never be deployed on its own: after
+    any partial stack failure the only route back was redeploying everything.
+
+    The manifest is the real source of what a release can deploy, so read that.
+    Rows recorded by db.list_templates are merged in when present, to keep any
+    extra fields (template_vmid, app_version) a legacy deployment may still show.
+    """
+    built = {r["name"]: dict(r) for r in db.list_templates(release)}
+    # load_all_manifests() returns pydantic ReleaseManifest objects, not dicts —
+    # templates is dict[str, TemplateSpec], so reach through attributes.
+    manifest = load_all_manifests().get(release)
+    rows: list[dict] = []
+    for name, tmpl in (manifest.templates if manifest else {}).items():
+        row = {"name": name,
+               "kind": getattr(tmpl, "kind", "lxc"),
+               "app_version": getattr(tmpl, "app_version", None),
+               "template_vmid": None}
+        row.update(built.get(name) or {})
+        rows.append(row)
+    # Anything recorded but no longer in the manifest still deserves listing.
+    for name, row in built.items():
+        if not any(r["name"] == name for r in rows):
+            rows.append(row)
+    return rows
 
 
 # ---------------------------------------------------------------------------
