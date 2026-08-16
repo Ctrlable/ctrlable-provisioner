@@ -307,8 +307,39 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
         phase(4, "running community script")
         log(f"[{name}] running community script (METHOD=default)")
         script = fetch_text(url)
-        result = subprocess.run(["bash", "-s"], input=script.encode(), env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        # RUN FROM A FILE, NOT PIPED INTO `bash -s`.
+        #
+        # Piping puts the script text on stdin, so any `read` inside
+        # community-scripts' build.func consumes the script's own remaining lines
+        # instead of prompting. The script then executes a truncated version of
+        # itself, exits 0, and creates nothing -- which surfaced as
+        # "community script created no container, and none exist to adopt"
+        # (2026-08-16, zwavejs). The identical script from a file, same env,
+        # completed and built the container.
+        #
+        # stdin is /dev/null so a prompt fails fast rather than hanging a deploy.
+        #
+        # And CAPTURE the output. It was stdout=DEVNULL with stderr folded into
+        # it, so every clue about why a build failed was discarded -- the log said
+        # only that nothing had been created. These scripts are the part most
+        # likely to break on a new PVE release; their output is exactly what is
+        # needed when they do.
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+            fh.write(script)
+            script_path = fh.name
+        try:
+            result = subprocess.run(["bash", script_path], env=env,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        finally:
+            os.unlink(script_path)
+        out = result.stdout.decode(errors="replace")
+        # Spinner frames are one line each and drown the real messages; keep the
+        # lines that carry information.
+        for line in out.splitlines():
+            clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line).strip()
+            if clean and not re.match(r"^[\u2800-\u28ff\s]*$", clean):
+                log(f"[{name}] {clean[:300]}")
         if result.returncode != 0:
             die(f"[{name}] community script exited {result.returncode}")
 
