@@ -532,11 +532,13 @@ print_summary() {
         echo "     /etc/ctrlable/build.conf (only needed if the release includes dali-bridge)"
         n=$((n+1))
     fi
-    echo "  ${n}. Go to Releases → Build release"
+    # "Build release" is a PREFLIGHT ONLY -- it creates nothing. ctrlable-build
+    # was rewritten to deploy instances directly (no templates, no clone), so the
+    # old "wait ~10 min for templates" wording sent people staring at a finished
+    # 2-second job wondering why no guests appeared.
+    echo "  ${n}. Go to Releases → Build release (validates this host; creates nothing)"
     n=$((n+1))
-    echo "  ${n}. Wait for all LXC templates to build (~10 min)"
-    n=$((n+1))
-    echo "  ${n}. Deploy your first stack"
+    echo "  ${n}. Deploy your first stack — this is what creates the LXCs and VMs"
     echo ""
     echo -e "  To view logs: ${CYAN}pct exec $VMID -- journalctl -fu ctrlable-provisioner${NC}"
     echo ""
