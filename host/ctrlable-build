@@ -352,6 +352,65 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
 # VM deploy (ctrlable-pro / HAOS)
 # ---------------------------------------------------------------------------
 
+# The branded HAOS image lives in a PUBLIC GitHub release, so there is no reason
+# a fresh host should need a 551MB file hand-copied onto it before it can build.
+# It was documented as "ctrlable-build never downloads this", which made sense
+# when the artefact was private; it is not, and the manual step was the last
+# thing standing between a clean install and a working build (2026-08-16).
+#
+# Everything needed is already in the manifest: the template name is the brand
+# ("ctrlable-pro"), haos_version is the tag. Both are overridable for a release
+# that publishes somewhere else.
+HAOS_IMAGE_REPO_DEFAULT = "Ctrlable/haos-base"
+HAOS_IMAGE_DIR = "/opt/ctrlable/images"
+
+
+def haos_image_url(name: str, tmpl: dict) -> tuple:
+    """(url, filename) for a vm template's branded image, or ("", "")."""
+    ver = str(tmpl.get("haos_version", "")).strip()
+    if not ver:
+        return "", ""
+    repo = str(tmpl.get("haos_image_repo", HAOS_IMAGE_REPO_DEFAULT)).strip()
+    asset = str(tmpl.get("haos_image_asset", "")).strip() or f"{name}-os-generic-x86-64-{ver}.img.xz"
+    tag = str(tmpl.get("haos_image_tag", "")).strip() or f"haos-{ver}"
+    return f"https://github.com/{repo}/releases/download/{tag}/{asset}", asset
+
+
+def haos_image_available(url: str) -> bool:
+    """Is the release asset actually fetchable? HEAD only -- preflight must not
+    quietly pull half a gigabyte as a side effect of being run."""
+    if not url:
+        return False
+    try:
+        r = subprocess.run(["curl", "-sIL", "-o", "/dev/null", "-w", "%{http_code}",
+                            "--max-time", "20", url], capture_output=True, text=True)
+        return r.stdout.strip() == "200"
+    except Exception:
+        return False
+
+
+def download_haos_image(url: str, asset: str) -> str:
+    """Fetch to HAOS_IMAGE_DIR, atomically. Returns the path, or "" on failure."""
+    os.makedirs(HAOS_IMAGE_DIR, exist_ok=True)
+    dest = os.path.join(HAOS_IMAGE_DIR, asset)
+    if os.path.exists(dest):
+        return dest
+    tmp = dest + ".part"
+    log(f"[ctrlable-build] downloading {asset} ...")
+    # -C - resumes a partial .part from an interrupted run rather than restarting
+    # half a gigabyte. Written to .part and renamed only on success, so a killed
+    # download can never be mistaken for a staged image by resolve_haos_image.
+    r = subprocess.run(["curl", "-fL", "-C", "-", "--retry", "3", "-o", tmp, url])
+    if r.returncode != 0:
+        return ""
+    if subprocess.run(["xz", "-t", tmp], capture_output=True).returncode != 0:
+        log("[ctrlable-build] downloaded image failed xz -t — discarding")
+        os.unlink(tmp)
+        return ""
+    os.rename(tmp, dest)
+    return dest
+
+
 def resolve_haos_image(conf: dict) -> str:
     """Path to the branded HAOS image this host will actually deploy, or "".
 
@@ -412,8 +471,19 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
     if vm_templates:
         image = resolve_haos_image(conf)
         exists = bool(image) and os.path.exists(image)
-        check("haos image staged", exists,
-              image or "no haos_image_path set and nothing found in /opt/ctrlable/images")
+        if not exists:
+            # Not staged is no longer fatal: if the release asset is reachable,
+            # deploy will fetch it. Preflight only HEADs it -- pulling 551MB as a
+            # side effect of a check would be a nasty surprise, and preflight is
+            # run to find out whether a build CAN work, not to do half of it.
+            for vname, vtmpl in vm_templates.items():
+                url, asset = haos_image_url(vname, vtmpl)
+                avail = haos_image_available(url)
+                check(f"{vname} image available", avail,
+                      (f"will download {asset}" if avail else
+                       f"not staged and not fetchable: {url or 'no haos_version in manifest'}"))
+        check("haos image staged", exists or True,
+              image if exists else "not staged — will be downloaded at deploy")
         if exists:
             if image.endswith(".xz"):
                 intact = subprocess.run(["xz", "-t", image], capture_output=True).returncode == 0
@@ -476,6 +546,11 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
     container_st, _ = detect_pve_storages()
 
     haos_image_path = resolve_haos_image(conf)
+    if not haos_image_path or not os.path.exists(haos_image_path):
+        # Fetch on demand rather than failing with "stage this by hand".
+        url, asset = haos_image_url(name, tmpl)
+        if url:
+            haos_image_path = download_haos_image(url, asset)
 
     if not haos_image_path or not os.path.exists(haos_image_path):
         die(
