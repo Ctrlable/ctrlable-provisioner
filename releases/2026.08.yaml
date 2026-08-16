@@ -19,10 +19,16 @@ templates:
   ctrlable-pro:
     kind: vm
     builder: vm/haos-vm.sh
-    # Staged locally as /opt/ctrlable/images/ctrlable-pro-os-generic-x86-64-18.1.img.xz
-    # (haos_image_path in /etc/ctrlable/build.conf). ctrlable-build never
-    # downloads this — the file on the host is what actually gets deployed, so
-    # this pin is only honoured if the staged image matches it.
+    # Fetched automatically from the PUBLIC release Ctrlable/haos-base @
+    # haos-18.1, asset ctrlable-pro-os-generic-x86-64-18.1.img.xz. The URL is
+    # derived rather than configured: the template name IS the brand, and
+    # haos_version is the tag. Override with haos_image_repo / haos_image_tag /
+    # haos_image_asset if a release ever publishes elsewhere.
+    #
+    # A file already staged in /opt/ctrlable/images (or haos_image_path in
+    # build.conf) still wins, so an air-gapped site can pre-seed it. What
+    # changed is that a connected host no longer needs a 551MB manual copy
+    # before it can build anything.
     haos_version: "18.1"
     rebrand: true
     base_backup: "ctrlable-base-2026.08.tar"
