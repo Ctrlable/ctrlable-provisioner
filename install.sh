@@ -417,8 +417,15 @@ install_host_tools() {
 # Start orchestrator
 # ---------------------------------------------------------------------------
 start_orchestrator() {
+    # RESTART, not start. On a re-run setup_pve_auth revokes and recreates the
+    # PVE API token and write_config writes the new secret to .env -- but a
+    # `start` against an already-running unit is a no-op, so the orchestrator
+    # kept serving with the credential that had just been revoked. The dashboard
+    # then showed "Proxmox error: 401 Unauthorized" and an empty Releases tab,
+    # with nothing in the installer output to suggest anything had gone wrong.
+    # Observed 2026-08-16.
     log "starting orchestrator service"
-    pct_exec systemctl start ctrlable-provisioner
+    pct_exec systemctl restart ctrlable-provisioner
 
     local i
     for i in $(seq 1 20); do
