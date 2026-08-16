@@ -411,6 +411,27 @@ def download_haos_image(url: str, asset: str) -> str:
     return dest
 
 
+def builder_credential(builder_path: str):
+    """(deploy_key_path, build_conf_token_key) for a builder that clones private
+    source, or None.
+
+    Read out of the builder script itself -- it already declares its own default,
+    e.g.  KEY="${DALI_BRIDGE_SSH_KEY:-/etc/ctrlable/dali-bridge-deploy-key}"
+    -- so a new private builder needs no change here to be checked.
+    """
+    try:
+        src = open(builder_path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return None
+    m = re.search(r'KEY="\$\{[A-Z_]*SSH_KEY:-([^}"]+)\}"', src)
+    if not m:
+        return None
+    key_path = m.group(1)
+    # /etc/ctrlable/dali-bridge-deploy-key -> dali_bridge_token
+    stem = os.path.basename(key_path).replace("-deploy-key", "").replace("-", "_")
+    return key_path, f"{stem}_token"
+
+
 def resolve_haos_image(conf: dict) -> str:
     """Path to the branded HAOS image this host will actually deploy, or "".
 
@@ -520,11 +541,19 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
             # Bundled builders clone private sources, so a staged script is not
             # enough — without a credential the deploy dies after the guest is
             # already being created.
-            key = os.environ.get("DALI_BRIDGE_SSH_KEY", "/etc/ctrlable/dali-bridge-deploy-key")
-            if name == "dali-bridge":
-                has_cred = os.path.isfile(key) or bool(conf.get("dali_bridge_token"))
+            # Derived from the builder script, not hardcoded per name. This check
+            # only ever covered dali-bridge, so hardware-manager -- which clones
+            # an equally private repo via HW_MANAGER_SSH_KEY -- passed preflight
+            # and then died mid-deploy, which is precisely the failure the check
+            # exists to prevent. Any future private builder is now covered by
+            # declaring its key the same way.
+            cred = builder_credential(local)
+            if cred:
+                key_path, token_key = cred
+                has_cred = os.path.isfile(key_path) or bool(conf.get(token_key))
                 check(f"{name} source credential", has_cred,
-                      key if os.path.isfile(key) else "no deploy key and no dali_bridge_token in build.conf")
+                      key_path if os.path.isfile(key_path)
+                      else f"no deploy key at {key_path} and no {token_key} in build.conf")
             continue
         url = script_url(ref, builder)
         try:
