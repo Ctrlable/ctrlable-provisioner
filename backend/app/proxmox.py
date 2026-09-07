@@ -1,33 +1,30 @@
+"""Proxmox VE implementation of the Provider interface.
+
+Everything Proxmox-specific lives here: the proxmoxer client, the VMID/name
+mapping, the lxc/qemu endpoint routing, and the async UPID/task polling. The
+rest of the orchestrator sees only the neutral Provider surface (provider.py),
+so a second backend (libvirt/Incus on a Debian base) is a sibling of this class
+rather than a rewrite. See provider.py for why that seam exists (AGPL / product
+licensing) and for the per-method porting notes.
+"""
+from __future__ import annotations
+
 import random
 import time
-from dataclasses import dataclass
+from typing import Optional
 
 from proxmoxer import ProxmoxAPI
 
-
-@dataclass
-class NodeHealth:
-    node: str
-    cpu: float          # fraction 0.0–1.0
-    mem_used: int       # bytes
-    mem_total: int
-    disk_used: int
-    disk_total: int
-    uptime: int         # seconds
+from .provider import (
+    GuestKind,
+    GuestRef,
+    GuestSummary,
+    NodeHealth,
+    Provider,
+)
 
 
-@dataclass
-class GuestSummary:
-    vmid: int
-    name: str
-    kind: str           # "lxc" | "qemu"
-    status: str
-    cpu: float
-    mem: int
-    maxmem: int
-
-
-class ProxmoxClient:
+class ProxmoxProvider(Provider):
     def __init__(
         self,
         host: str,
@@ -46,6 +43,35 @@ class ProxmoxClient:
         )
         self.node = node
 
+    # -- internal helpers -----------------------------------------------------
+
+    def _endpoint(self, ref: GuestRef):
+        """The proxmoxer node-endpoint for a guest: .lxc(vmid) or .qemu(vmid)."""
+        return getattr(self._px.nodes(self.node), ref.kind.proxmox)(int(ref.id))
+
+    def _wait_task(self, upid: str, timeout: int = 120) -> None:
+        """Block until a Proxmox task finishes. This is what makes every mutating
+        method synchronous to the caller -- the async UPID model never leaves
+        this file."""
+        node = upid.split(":")[1]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            result = self._px.nodes(node).tasks(upid).status.get()
+            if result.get("status") == "stopped":
+                if result.get("exitstatus") != "OK":
+                    raise RuntimeError(f"PVE task failed: {result.get('exitstatus')}")
+                return
+            time.sleep(2)
+        raise TimeoutError(f"PVE task {upid} did not complete within {timeout}s")
+
+    @staticmethod
+    def _random_mac() -> str:
+        # Locally administered, unicast.
+        octets = [0x02, 0x00] + [random.randint(0x00, 0xFF) for _ in range(4)]
+        return ":".join(f"{b:02x}" for b in octets)
+
+    # -- inventory / health ---------------------------------------------------
+
     def node_health(self) -> NodeHealth:
         s = self._px.nodes(self.node).status.get()
         mem = s.get("memory", {})
@@ -60,137 +86,98 @@ class ProxmoxClient:
             uptime=s.get("uptime", 0),
         )
 
-    def list_guests(self, exclude_vmids: set[int] | None = None) -> list[GuestSummary]:
-        skip = exclude_vmids or set()
-        guests = []
-        for g in self._px.nodes(self.node).lxc.get():
-            if g.get("template") == 1:
-                continue
-            if int(g["vmid"]) in skip:
-                continue
-            guests.append(GuestSummary(
-                vmid=int(g["vmid"]),
-                name=g.get("name", ""),
-                kind="lxc",
-                status=g.get("status", "unknown"),
-                cpu=g.get("cpu", 0.0),
-                mem=g.get("mem", 0),
-                maxmem=g.get("maxmem", 0),
-            ))
-        for g in self._px.nodes(self.node).qemu.get():
-            if g.get("template") == 1:
-                continue
-            if int(g["vmid"]) in skip:
-                continue
-            guests.append(GuestSummary(
-                vmid=int(g["vmid"]),
-                name=g.get("name", ""),
-                kind="qemu",
-                status=g.get("status", "unknown"),
-                cpu=g.get("cpu", 0.0),
-                mem=g.get("mem", 0),
-                maxmem=g.get("maxmem", 0),
-            ))
+    def list_guests(self, exclude: Optional[set[str]] = None) -> list[GuestSummary]:
+        skip = exclude or set()
+        guests: list[GuestSummary] = []
+        for kind, proxmox_kind in ((GuestKind.CONTAINER, "lxc"),
+                                   (GuestKind.VM, "qemu")):
+            for g in getattr(self._px.nodes(self.node), proxmox_kind).get():
+                if g.get("template") == 1:
+                    continue
+                gid = str(g["vmid"])
+                if gid in skip:
+                    continue
+                guests.append(GuestSummary(
+                    ref=GuestRef(id=gid, kind=kind),
+                    name=g.get("name", ""),
+                    status=g.get("status", "unknown"),
+                    cpu=g.get("cpu", 0.0),
+                    mem=g.get("mem", 0),
+                    maxmem=g.get("maxmem", 0),
+                ))
         return sorted(guests, key=lambda g: g.name)
 
-    # ---------------------------------------------------------------------------
-    # Deploy plane — clone / configure / lifecycle
-    # ---------------------------------------------------------------------------
+    # -- lifecycle ------------------------------------------------------------
 
-    def _wait_task(self, upid: str, timeout: int = 120) -> None:
-        node = upid.split(":")[1]
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            result = self._px.nodes(node).tasks(upid).status.get()
-            if result.get("status") == "stopped":
-                if result.get("exitstatus") != "OK":
-                    raise RuntimeError(f"PVE task failed: {result.get('exitstatus')}")
-                return
-            time.sleep(2)
-        raise TimeoutError(f"PVE task {upid} did not complete within {timeout}s")
+    def start(self, ref: GuestRef) -> None:
+        self._endpoint(ref).status.start.post()
 
-    def next_vmid(self) -> int:
-        return int(self._px.cluster.nextid.get())
+    def stop(self, ref: GuestRef) -> None:
+        self._endpoint(ref).status.stop.post()
 
-    def clone_lxc(self, tmpl_vmid: int, newid: int, hostname: str) -> None:
-        upid = self._px.nodes(self.node).lxc(tmpl_vmid).clone.post(
-            newid=newid,
-            hostname=hostname,
-            full=1,
-        )
-        self._wait_task(upid)
+    def reboot(self, ref: GuestRef) -> None:
+        self._endpoint(ref).status.reboot.post()
 
-    def clone_vm(self, tmpl_vmid: int, newid: int, name: str) -> None:
-        upid = self._px.nodes(self.node).qemu(tmpl_vmid).clone.post(
-            newid=newid,
-            name=name,
-            full=1,
-        )
-        self._wait_task(upid)
-
-    @staticmethod
-    def _random_mac() -> str:
-        # Locally administered, unicast
-        octets = [0x02, 0x00] + [random.randint(0x00, 0xFF) for _ in range(4)]
-        return ":".join(f"{b:02x}" for b in octets)
-
-    def set_lxc_fresh_mac(self, vmid: int) -> str:
-        mac = self._random_mac()
-        config = self._px.nodes(self.node).lxc(vmid).config.get()
-        net0 = config.get("net0", "name=eth0,bridge=vmbr0,ip=dhcp")
-        parts = [p for p in net0.split(",") if not p.lower().startswith("hwaddr=")]
-        parts.append(f"hwaddr={mac}")
-        self._px.nodes(self.node).lxc(vmid).config.put(net0=",".join(parts))
-        return mac
-
-    def set_vm_fresh_mac(self, vmid: int) -> str:
-        mac = self._random_mac()
-        config = self._px.nodes(self.node).qemu(vmid).config.get()
-        for key in [f"net{i}" for i in range(4)]:
-            val = config.get(key)
-            if val:
-                parts = [p for p in val.split(",") if not p.lower().startswith("macaddr=")]
-                parts.append(f"macaddr={mac}")
-                self._px.nodes(self.node).qemu(vmid).config.put(**{key: ",".join(parts)})
-                break
-        return mac
-
-    def start_guest(self, kind: str, vmid: int) -> None:
-        getattr(self._px.nodes(self.node), kind)(vmid).status.start.post()
-
-    def stop_guest(self, kind: str, vmid: int) -> None:
-        getattr(self._px.nodes(self.node), kind)(vmid).status.stop.post()
-
-    def destroy_guest(self, kind: str, vmid: int) -> None:
-        node = getattr(self._px.nodes(self.node), kind)(vmid)
+    def destroy(self, ref: GuestRef) -> None:
+        ep = self._endpoint(ref)
         try:
-            node.status.stop.post()
+            ep.status.stop.post()
         except Exception:
             pass
-        node.delete(purge=1, **{"destroy-unreferenced-disks": 1})
+        ep.delete(purge=1, **{"destroy-unreferenced-disks": 1})
 
-    def reboot_guest(self, kind: str, vmid: int) -> None:
-        getattr(self._px.nodes(self.node), kind)(vmid).status.reboot.post()
+    # -- provisioning ---------------------------------------------------------
 
-    # ---------------------------------------------------------------------------
-    # Config / hardware
-    # ---------------------------------------------------------------------------
+    def allocate_id(self) -> str:
+        return str(int(self._px.cluster.nextid.get()))
 
-    def get_guest_config(self, kind: str, vmid: int) -> dict:
-        return getattr(self._px.nodes(self.node), kind)(vmid).config.get()
+    def clone(self, template: GuestRef, new_id: str, name: str) -> GuestRef:
+        ep = self._endpoint(template)
+        if template.kind is GuestKind.CONTAINER:
+            upid = ep.clone.post(newid=int(new_id), hostname=name, full=1)
+        else:
+            upid = ep.clone.post(newid=int(new_id), name=name, full=1)
+        self._wait_task(upid)
+        return GuestRef(id=str(new_id), kind=template.kind)
 
-    def update_guest_config(self, kind: str, vmid: int,
-                            changes: dict | None = None,
-                            deletes: list[str] | None = None) -> None:
+    def set_fresh_mac(self, ref: GuestRef) -> str:
+        mac = self._random_mac()
+        ep = self._endpoint(ref)
+        config = ep.config.get()
+        if ref.kind is GuestKind.CONTAINER:
+            net0 = config.get("net0", "name=eth0,bridge=vmbr0,ip=dhcp")
+            parts = [p for p in net0.split(",")
+                     if not p.lower().startswith("hwaddr=")]
+            parts.append(f"hwaddr={mac}")
+            ep.config.put(net0=",".join(parts))
+        else:
+            for key in [f"net{i}" for i in range(4)]:
+                val = config.get(key)
+                if val:
+                    parts = [p for p in val.split(",")
+                             if not p.lower().startswith("macaddr=")]
+                    parts.append(f"macaddr={mac}")
+                    ep.config.put(**{key: ",".join(parts)})
+                    break
+        return mac
+
+    # -- config / hardware ----------------------------------------------------
+
+    def get_config(self, ref: GuestRef) -> dict:
+        return self._endpoint(ref).config.get()
+
+    def update_config(self, ref: GuestRef,
+                      changes: Optional[dict] = None,
+                      deletes: Optional[list[str]] = None) -> None:
         kwargs = dict(changes or {})
         if deletes:
             kwargs["delete"] = ",".join(deletes)
-        getattr(self._px.nodes(self.node), kind)(vmid).config.put(**kwargs)
+        self._endpoint(ref).config.put(**kwargs)
 
-    def resize_disk(self, kind: str, vmid: int, disk: str, size: str) -> None:
-        getattr(self._px.nodes(self.node), kind)(vmid).resize.put(
-            disk=disk, size=size
-        )
+    def resize_disk(self, ref: GuestRef, disk: str, size: str) -> None:
+        self._endpoint(ref).resize.put(disk=disk, size=size)
+
+    # -- host hardware discovery ---------------------------------------------
 
     def list_usb_devices(self) -> list[dict]:
         try:
@@ -203,3 +190,31 @@ class ProxmoxClient:
             return self._px.nodes(self.node).hardware.pci.get()
         except Exception:
             return []
+
+    # -- backup ---------------------------------------------------------------
+
+    def backup(self, ref: GuestRef, *, mode: str = "snapshot",
+               exclude_paths: Optional[list[str]] = None,
+               stream_to: Optional[str] = None) -> str:
+        """Back up via the Proxmox vzdump API.
+
+        stream_to is accepted for interface parity but not supported through the
+        API path (the CLI's --stdout streaming has no API equivalent); passing it
+        raises so a caller relying on streaming fails loudly rather than silently
+        writing to local storage. The migrations done by hand used the CLI form;
+        wiring that here is a follow-up if the orchestrator needs to drive it."""
+        if stream_to:
+            raise NotImplementedError(
+                "streaming backup is CLI-only (vzdump --stdout); not exposed via "
+                "the Proxmox API. Drive it out-of-band for now.")
+        params: dict = {"vmid": int(ref.id), "mode": mode, "remove": 0}
+        if exclude_paths:
+            params["exclude-path"] = exclude_paths
+        upid = self._px.nodes(self.node).vzdump.post(**params)
+        self._wait_task(upid, timeout=3600)
+        return upid
+
+
+# Back-compat alias: the class was ProxmoxClient before the Provider seam landed.
+# Kept so any lingering import does not break; new code depends on Provider.
+ProxmoxClient = ProxmoxProvider

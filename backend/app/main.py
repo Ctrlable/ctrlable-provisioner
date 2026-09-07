@@ -17,7 +17,8 @@ from .manifest import load_all_manifests
 from .lan import setup_lan_access
 from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
 from .provision import complete_provisioning, get_assignment
-from .proxmox import ProxmoxClient
+from .provider import GuestKind, GuestRef, Provider
+from .proxmox import ProxmoxProvider
 from .state import StateDB
 
 settings = get_settings()
@@ -56,14 +57,24 @@ app.add_middleware(
 )
 
 
-def _pve() -> ProxmoxClient:
-    return ProxmoxClient(
+def _provider() -> Provider:
+    """The virtualization backend. Returns the neutral Provider interface, not a
+    concrete class -- swapping Proxmox for a Debian/libvirt backend later is a
+    change here and in provider construction only. See provider.py."""
+    return ProxmoxProvider(
         settings.pve_host,
         settings.pve_token_id,
         settings.pve_token_secret,
         settings.pve_node,
         settings.pve_verify_ssl,
     )
+
+
+def _ref(vmid: int, kind: str) -> GuestRef:
+    """Bridge the app's VMID-native world to a GuestRef. The DB and REST API
+    still speak integer vmids and "lxc"/"qemu"; this converts at the boundary so
+    the provider interface stays hypervisor-neutral."""
+    return GuestRef(id=str(vmid), kind=GuestKind.from_proxmox(kind))
 
 
 def _check_build_token(token: str) -> None:
@@ -371,7 +382,7 @@ def delete_instance_api(
     if destroy and settings.configured():
         try:
             kind = inst["kind"] if inst["kind"] else "lxc"
-            _pve().destroy_guest(kind, inst["vmid"])
+            _provider().destroy(_ref(inst["vmid"], kind))
         except Exception:
             pass
     db.delete_instance(instance_id)
@@ -387,11 +398,11 @@ def delete_project_api(
         raise HTTPException(404)
     if destroy and settings.configured():
         instances = db.list_instances(project_id)
-        px = _pve()
+        px = _provider()
         for inst in instances:
             try:
                 kind = inst["kind"] if inst["kind"] else "lxc"
-                px.destroy_guest(kind, inst["vmid"])
+                px.destroy(_ref(inst["vmid"], kind))
             except Exception:
                 pass
     if not db.delete_project(project_id):
@@ -406,14 +417,14 @@ def delete_project_api(
 def list_usb(_: str | None = Depends(require_auth)) -> list[dict]:
     if not settings.configured():
         return []
-    return _pve().list_usb_devices()
+    return _provider().list_usb_devices()
 
 
 @app.get("/api/host/devices/pci")
 def list_pci(_: str | None = Depends(require_auth)) -> list[dict]:
     if not settings.configured():
         return []
-    return _pve().list_pci_devices()
+    return _provider().list_pci_devices()
 
 
 # ---------------------------------------------------------------------------
@@ -425,13 +436,13 @@ def get_guest_config(vmid: int, _: str | None = Depends(require_auth)) -> dict:
     inst = db.get_instance_by_vmid(vmid)
     kind = inst["kind"] if inst else "lxc"
     # Fallback: try both and return whichever works
-    px = _pve()
+    px = _provider()
     try:
-        return {"kind": kind, "config": px.get_guest_config(kind, vmid)}
+        return {"kind": kind, "config": px.get_config(_ref(vmid, kind))}
     except Exception:
         other = "qemu" if kind == "lxc" else "lxc"
         try:
-            return {"kind": other, "config": px.get_guest_config(other, vmid)}
+            return {"kind": other, "config": px.get_config(_ref(vmid, other))}
         except Exception as e:
             raise HTTPException(404, f"Could not get config: {e}")
 
@@ -453,7 +464,7 @@ def update_guest_config(
     cfg_resp = get_guest_config(vmid)
     kind = cfg_resp["kind"]
     cfg = cfg_resp["config"]
-    px = _pve()
+    px = _provider()
     changes: dict = {}
     deletes: list[str] = []
 
@@ -478,7 +489,7 @@ def update_guest_config(
         deletes.append(req.pci_del)
 
     if changes or deletes:
-        px.update_guest_config(kind, vmid, changes or None, deletes or None)
+        px.update_config(_ref(vmid, kind), changes or None, deletes or None)
     return {"ok": True}
 
 
@@ -496,7 +507,7 @@ def resize_guest_disk(
     cfg_resp = get_guest_config(vmid)
     kind = cfg_resp["kind"]
     try:
-        _pve().resize_disk(kind, vmid, req.disk, req.size)
+        _provider().resize_disk(_ref(vmid, kind), req.disk, req.size)
     except Exception as e:
         raise HTTPException(400, str(e))
     return {"ok": True}
@@ -514,13 +525,14 @@ def guest_action(vmid: int, action: str, _: str | None = Depends(require_auth)) 
     inst = db.get_instance_by_vmid(vmid)
     kind = inst["kind"] if inst else "lxc"
 
-    px = _pve()
+    px = _provider()
+    ref = _ref(vmid, kind)
     if action == "start":
-        px.start_guest(kind, vmid)
+        px.start(ref)
     elif action == "stop":
-        px.stop_guest(kind, vmid)
+        px.stop(ref)
     elif action == "reboot":
-        px.reboot_guest(kind, vmid)
+        px.reboot(ref)
     return {"ok": True}
 
 
@@ -614,9 +626,10 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
         return {"configured": False, "host": None, "guests": []}
 
     try:
-        px = _pve()
+        px = _provider()
         host_health = px.node_health()
-        raw_guests = px.list_guests(exclude_vmids=settings.exclude_vmids_set())
+        raw_guests = px.list_guests(
+            exclude={str(v) for v in settings.exclude_vmids_set()})
     except Exception as exc:
         return {"configured": True, "error": str(exc), "host": None, "guests": []}
 
