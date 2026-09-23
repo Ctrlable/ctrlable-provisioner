@@ -222,6 +222,85 @@ setup_build_key() {
 }
 
 
+
+# ---------------------------------------------------------------------------
+# Management interface: DHCP
+# ---------------------------------------------------------------------------
+# Appliances ship with a static management address from the factory image. That
+# address belongs to the bench it was built on, not to the site it is installed
+# at, so a dealer who racks one finds a hypervisor on a subnet nothing at the
+# site can reach — and, headless, no way to correct it without driving out with
+# a monitor. One appliance reached its customer with a gateway that did not
+# exist on that LAN, so it had no route off the host at all.
+#
+# DHCP is the fix, and the risk of taking it is the obvious one: a site with no
+# DHCP server, or a lease that never comes. So the factory address is kept as a
+# second address on the bridge, and if no lease arrives the whole change is
+# rolled back. Either way the host stays reachable at the address it had when
+# this started, including for the session running this installer.
+ensure_dhcp_management() {
+    local f=/etc/network/interfaces
+    [[ -w "$f" ]] || { warn "cannot write $f — leaving networking alone"; return 0; }
+
+    if ! grep -qE '^[[:space:]]*iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+static' "$f"; then
+        log "management interface is not static — leaving networking alone"
+        return 0
+    fi
+
+    if [[ "${KEEP_STATIC_MGMT:-0}" == "1" ]]; then
+        log "KEEP_STATIC_MGMT=1 — leaving the static management address in place"
+        return 0
+    fi
+
+    local keep backup
+    keep=$(awk '/^[[:space:]]*iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+static/{s=1;next}
+                s && /^[[:space:]]*iface[[:space:]]/{exit}
+                s && /^[[:space:]]*address[[:space:]]/{print $2; exit}' "$f")
+    backup="${f}.static-$(date +%Y%m%d%H%M%S)"
+    cp "$f" "$backup"
+    log "switching management interface to DHCP (keeping ${keep:-none}; backup: $backup)"
+
+    awk -v keep="$keep" '
+      /^[[:space:]]*iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+static/ {
+          print "iface vmbr0 inet dhcp"
+          if (keep != "") {
+              print "        # Keeps the factory management address alongside the lease, so"
+              print "        # a site with no DHCP is never locked out of its own hypervisor."
+              print "        post-up ip addr add " keep " dev vmbr0 || true"
+          }
+          s = 1; next
+      }
+      s && /^[[:space:]]*(auto|iface|source)[[:space:]]/ { s = 0 }
+      s && /^[[:space:]]*(address|gateway)[[:space:]]/   { next }
+      { print }
+    ' "$backup" > "$f"
+
+    if ! ifreload -a 2>/dev/null; then
+        warn "ifreload failed — restoring $backup"
+        cp "$backup" "$f"; ifreload -a 2>/dev/null || true
+        return 0
+    fi
+
+    # A lease, or nothing: anything else is not worth keeping.
+    local i lease=""
+    for i in $(seq 1 20); do
+        lease=$(ip -4 -br addr show vmbr0 2>/dev/null | tr ' ' '\n' \
+                | grep -E '^[0-9.]+/[0-9]+$' | grep -v "^${keep}$" | head -1) || true
+        [[ -n "$lease" ]] && break
+        sleep 3
+    done
+
+    if [[ -z "$lease" ]]; then
+        warn "no DHCP lease after 60 s — restoring the static address"
+        cp "$backup" "$f"; ifreload -a 2>/dev/null || true
+        warn "this site appears to have no DHCP server for the management VLAN"
+        return 0
+    fi
+
+    ok "management interface now on DHCP: ${lease%%/*} (${keep:-no} fallback address retained)"
+    echo -e "  ${YELLOW}Reserve ${lease%%/*} for MAC $(cat /sys/class/net/vmbr0/address) on the router.${NC}"
+}
+
 # ---------------------------------------------------------------------------
 # SSH into the orchestrator
 # ---------------------------------------------------------------------------
@@ -598,6 +677,7 @@ echo -e "${BOLD}Ctrlable Provisioner — bootstrap installer${NC}"
 echo ""
 
 preflight
+ensure_dhcp_management
 get_template
 create_lxc
 setup_pve_auth

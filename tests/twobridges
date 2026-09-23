@@ -1,0 +1,10 @@
+auto vmbr0
+iface vmbr0 inet static
+        address 172.16.0.115/23
+        gateway 172.16.0.1
+        bridge-ports nic0
+
+auto vmbr1
+iface vmbr1 inet static
+        address 10.99.0.1/24
+        bridge-ports nic1
