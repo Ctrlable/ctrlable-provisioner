@@ -221,6 +221,48 @@ setup_build_key() {
     ok "build SSH key installed"
 }
 
+
+# ---------------------------------------------------------------------------
+# SSH into the orchestrator
+# ---------------------------------------------------------------------------
+# Without this the orchestrator is reachable only through "pct exec" from the
+# host — which is no help at all in the situation that needs it most: a site
+# whose Proxmox management address is on a subnet nobody at the site can reach.
+# The orchestrator sits on the LAN and can see both, so it is the way in; it
+# just had no door.
+#
+# Key-only, and the key is the host's own: whoever administers the hypervisor
+# already has "pct exec", so this grants nothing new. Passwords stay off.
+enable_lxc_ssh() {
+    local host_key="/root/.ssh/id_ed25519"
+
+    if [[ ! -f "${host_key}.pub" ]]; then
+        log "generating a host key for orchestrator access"
+        ssh-keygen -t ed25519 -N '' -C "$(hostname -s) → orchestrator" \
+            -f "$host_key" >/dev/null 2>&1 || {
+            warn "could not generate a host key; orchestrator SSH will be key-less"
+            return 0
+        }
+    fi
+
+    log "enabling SSH on the orchestrator"
+    pct_exec bash -c "
+        set -euo pipefail
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+        # Key-only: a dealer appliance on a customer LAN should not answer a
+        # password guess, and nothing here needs one.
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+        systemctl restart ssh
+    "
+
+    local pub
+    pub=$(cat "${host_key}.pub")
+    pct_exec bash -c "grep -qxF '$pub' /root/.ssh/authorized_keys || echo '$pub' >> /root/.ssh/authorized_keys"
+    ok "orchestrator SSH enabled (key-only, from this host)"
+}
+
 # ---------------------------------------------------------------------------
 # Inner LXC setup
 # ---------------------------------------------------------------------------
@@ -230,8 +272,11 @@ setup_lxc() {
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq python3 python3-pip python3-venv git curl ca-certificates gnupg
+        apt-get install -y -qq python3 python3-pip python3-venv git curl ca-certificates gnupg openssh-server
+        systemctl enable --now ssh
     "
+
+    enable_lxc_ssh
 
     # --batch --yes on the dearmor: without them gpg prompts "File exists.
     # Overwrite?" on any re-run, and with no TTY that is fatal under set -e. The
@@ -541,6 +586,7 @@ print_summary() {
     echo "  ${n}. Deploy your first stack — this is what creates the LXCs and VMs"
     echo ""
     echo -e "  To view logs: ${CYAN}pct exec $VMID -- journalctl -fu ctrlable-provisioner${NC}"
+    echo -e "  Shell in    : ${CYAN}ssh root@${ORCHESTRATOR_IP}${NC} (from this host, key-only)"
     echo ""
 }
 
