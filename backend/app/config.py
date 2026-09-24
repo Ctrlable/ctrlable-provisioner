@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     build_key_path: str = "/etc/ctrlable/build_key"   # SSH private key for host trigger
     build_token: str = ""                              # token for manifest + firstboot fetches
     orchestrator_url: str = ""                         # URL baked into templates for firstboot call-home
+    provisioning_key: str = ""                         # shared appliance-enrol key, handed to
+    #                                                    self-updating LXCs (dali-bridge, hardware-manager)
 
     db_path: str = ""
     exclude_vmids: str = ""   # comma-separated VMIDs to hide from dashboard (e.g. "900")

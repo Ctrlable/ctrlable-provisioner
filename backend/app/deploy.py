@@ -59,6 +59,10 @@ def _wire_to_for(template_name: str, shared: dict) -> dict:
         base["coordinator_url"] = shared["zigbee_coordinator"]
     if template_name == "zwavejs" and shared.get("zwave_coordinator"):
         base["coordinator_url"] = shared["zwave_coordinator"]
+    # The DALI bridge and the hardware-manager enrol as their own LXC device to
+    # self-update, so hand them the shared provisioning key when one is set.
+    if template_name in ("dali-bridge", "hardware-manager") and shared.get("provisioning_key"):
+        base["provisioning_key"] = shared["provisioning_key"]
     return base
 
 
@@ -191,8 +195,10 @@ async def deploy_stack_async(
     manifests = load_all_manifests()
     manifest = manifests[release]
 
+    # Make the shared provisioning key available to the self-updating templates.
+    shared = {**shared_wire_to, "provisioning_key": settings.provisioning_key}
     for name in manifest.templates:
-        wire_to = _wire_to_for(name, shared_wire_to)
+        wire_to = _wire_to_for(name, shared)
         try:
             await deploy_instance(project_id, name, release, wire_to, db, settings)
         except Exception as exc:
