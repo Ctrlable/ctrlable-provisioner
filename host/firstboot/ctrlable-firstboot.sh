@@ -222,19 +222,27 @@ wire_dali() {
     # restart. USB pass-through for the hasseb master is set on the host at deploy
     # time (privileged CT + bind mounts); the base topic stays 'dali'.
     local wire_to="$1"
-    local mqtt_host mqtt_port mqtt_user mqtt_pass cfg=/opt/dali-bridge/config.yaml
+    local mqtt_host mqtt_port mqtt_user mqtt_pass prov_key cfg=/opt/dali-bridge/config.yaml
     mqtt_host=$(jget "$wire_to" "mqtt_host" "localhost")
     mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
+    # Self-enrolment for the in-webui self-updater (v0.5.3+): the bridge enrols as
+    # its own LXC device with this shared provisioning key and then checks the
+    # store's private bridge lane. Blank is fine — the Software card just shows
+    # "not enrolled" until a key is set.
+    prov_key=$(jget "$wire_to" "provisioning_key" "")
 
     [[ -f "$cfg" ]] || { log "dali: $cfg missing (bridge not installed?)"; return 0; }
-    python3 - "$cfg" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_pass" <<'PY'
+    python3 - "$cfg" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_pass" "$prov_key" <<'PY'
 import sys, yaml
-path, host, port, user, pw = sys.argv[1:6]
+path, host, port, user, pw, prov = sys.argv[1:7]
 d = yaml.safe_load(open(path)) or {}
 d.update({"mqtt_host": host, "mqtt_port": int(port),
-          "mqtt_username": user or None, "mqtt_password": pw or None})
+          "mqtt_username": user or None, "mqtt_password": pw or None,
+          "updates_enabled": True})
+if prov:
+    d["provisioning_key"] = prov
 yaml.safe_dump(d, open(path, "w"), default_flow_style=False, sort_keys=False)
 PY
     chmod 600 "$cfg" 2>/dev/null || true
