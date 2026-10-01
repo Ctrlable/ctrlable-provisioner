@@ -507,7 +507,9 @@ ENV
     # password change, plus JWT_SECRET. Overwriting it outright meant every
     # re-run silently put a deployed appliance back on admin/admin. Carry over
     # every key this installer does not manage.
-    if pct_pull /opt/ctrlable-provisioner/backend/.env "$TMPDIR_PRIV/old.env" 2>/dev/null; then
+    # (Test first: pct pull exits 0 on a missing file and leaves an empty one.)
+    if pct_exec test -s /opt/ctrlable-provisioner/backend/.env \
+       && pct_pull /opt/ctrlable-provisioner/backend/.env "$TMPDIR_PRIV/old.env" 2>/dev/null; then
         local managed
         managed=$(sed -n 's/^\([A-Z_]*\)=.*/\1/p' "$TMPDIR_PRIV/ctrlable.env" | paste -sd'|')
         grep -vE "^(${managed})=" "$TMPDIR_PRIV/old.env" | grep -E '^[A-Z_]+=' \
