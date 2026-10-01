@@ -176,7 +176,7 @@ pick_bridge() {
     elif [[ -d /sys/class/net/vmbr0/bridge ]]; then
         BRIDGE=vmbr0
     else
-        BRIDGE=$(for b in /sys/class/net/*/bridge; do [[ -d "$b" ]] && basename "$(dirname "$b")"; done | head -1)
+        BRIDGE=$(for b in /sys/class/net/*/bridge; do [[ -d "$b" ]] && basename "$(dirname "$b")"; done | head -1) || true
         [[ -n "$BRIDGE" ]] || die "no Linux bridge on this host — create vmbr0 (Datacenter → node → System → Network → Create → Linux Bridge, bridge port = the LAN NIC), apply, and re-run"
     fi
     ok "bridge: $BRIDGE"
