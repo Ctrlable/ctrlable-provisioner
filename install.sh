@@ -23,7 +23,7 @@ LXC_HOSTNAME=ctrlable-orchestrator
 MEMORY=2048
 CORES=2
 DISK_SIZE=8
-BRIDGE=vmbr0
+BRIDGE=""               # vmbr0 if present, else the first Linux bridge (see pick_bridge)
 STORAGE=""              # auto-detected unless --storage is given (see pick_storage)
 REPO_URL=https://github.com/ctrlable/ctrlable-provisioner
 REPO_REF=main
@@ -121,6 +121,7 @@ preflight() {
     [[ $(id -u) -eq 0 ]] || die "must run as root"
 
     pick_storage
+    pick_bridge
 
     PVE_NODE=$(hostname -s)
     PVE_HOST=$(hostname -I | awk '{print $1}')
@@ -163,6 +164,20 @@ pick_storage() {
         STORAGE=local
     fi
     ok "storage: $STORAGE"
+}
+
+# Proxmox installed on top of Debian has no vmbr0 until someone creates one;
+# pct create then fails with a cryptic "bridge does not exist".
+pick_bridge() {
+    if [[ -n "$BRIDGE" ]]; then
+        [[ -d "/sys/class/net/$BRIDGE/bridge" ]] || die "bridge '$BRIDGE' does not exist"
+    elif [[ -d /sys/class/net/vmbr0/bridge ]]; then
+        BRIDGE=vmbr0
+    else
+        BRIDGE=$(for b in /sys/class/net/*/bridge; do [[ -d "$b" ]] && basename "$(dirname "$b")"; done | head -1)
+        [[ -n "$BRIDGE" ]] || die "no Linux bridge on this host — create vmbr0 (Datacenter → node → System → Network → Create → Linux Bridge, bridge port = the LAN NIC), apply, and re-run"
+    fi
+    ok "bridge: $BRIDGE"
 }
 
 # ---------------------------------------------------------------------------
