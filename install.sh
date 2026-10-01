@@ -120,8 +120,10 @@ preflight() {
     command -v pveam  >/dev/null 2>&1 || die "pveam not found"
     [[ $(id -u) -eq 0 ]] || die "must run as root"
 
-    pick_storage
+    # Bridge first: pick_storage may change storage config, so stop on a
+    # missing bridge before touching anything.
     pick_bridge
+    pick_storage
 
     PVE_NODE=$(hostname -s)
     PVE_HOST=$(hostname -I | awk '{print $1}')
