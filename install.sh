@@ -32,8 +32,8 @@ ENROLL_TOKEN=""         # portal.ctrlable.com enrollment token (--enroll-token T
 PORTAL_URL="https://portal.ctrlable.com"   # override with --portal-url
 PORTAL_EMAIL=""         # required when using --portal-password; set with --portal-email
 PORTAL_PASSWORD=""
-# Branded HAOS image staged on this host. ctrlable-build NEVER downloads it --
-# the file here is what gets deployed -- so preflight fails without it.
+# Branded HAOS image staged on this host. Optional: ctrlable-build downloads
+# the release's image at deploy time when nothing is staged.
 HAOS_IMAGE=""
 # Credential for the private dali-bridge source, required by its builder.
 DALI_TOKEN=""
@@ -502,6 +502,18 @@ ORCHESTRATOR_URL=http://${ORCHESTRATOR_IP}:8000
 ENV
 )
     printf '%s\n' "$env_content" > "$TMPDIR_PRIV/ctrlable.env"
+
+    # The app writes to this file too: ADMIN_PASSWORD_HASH on the forced
+    # password change, plus JWT_SECRET. Overwriting it outright meant every
+    # re-run silently put a deployed appliance back on admin/admin. Carry over
+    # every key this installer does not manage.
+    if pct_pull /opt/ctrlable-provisioner/backend/.env "$TMPDIR_PRIV/old.env" 2>/dev/null; then
+        local managed
+        managed=$(sed -n 's/^\([A-Z_]*\)=.*/\1/p' "$TMPDIR_PRIV/ctrlable.env" | paste -sd'|')
+        grep -vE "^(${managed})=" "$TMPDIR_PRIV/old.env" | grep -E '^[A-Z_]+=' \
+            >> "$TMPDIR_PRIV/ctrlable.env" || true
+        ok "kept existing orchestrator settings (admin password, JWT secret, ...)"
+    fi
     pct_push "$TMPDIR_PRIV/ctrlable.env" /opt/ctrlable-provisioner/backend/.env
     pct_exec chmod 600 /opt/ctrlable-provisioner/backend/.env
 
@@ -713,12 +725,6 @@ print_summary() {
     # "Build release" unconditionally sent people at a step that fails preflight
     # on three checks, two of which this installer is responsible for.
     local n=2
-    if [[ -z "$HAOS_IMAGE" ]] && ! ls /opt/ctrlable/images/*.img* >/dev/null 2>&1; then
-        echo "  ${n}. Stage the branded HAOS image (REQUIRED before any release build):"
-        echo "     copy it to /opt/ctrlable/images/, or re-run with --haos-image PATH"
-        echo "     ctrlable-build never downloads this — the staged file is what deploys"
-        n=$((n+1))
-    fi
     # A deploy key satisfies this just as well as a token -- checking only the
     # token told people to fix something that was already working.
     if [[ ! -f /etc/ctrlable/dali-bridge-deploy-key ]] \
