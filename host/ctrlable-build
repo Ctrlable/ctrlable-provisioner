@@ -143,20 +143,20 @@ def list_ct_vmids() -> set[int]:
 
 
 def detect_pve_storages() -> tuple[str, str]:
-    out = subprocess.run(["pvesm", "status"], capture_output=True, text=True).stdout
-    container_st = "local-lvm"
-    template_st  = "local"
-    for line in out.strip().splitlines()[1:]:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        name, kind, status = parts[0], parts[1], parts[2]
-        if status != "active":
-            continue
-        if kind in ("lvmthin", "lvm", "zfspool") and container_st == "local-lvm":
-            container_st = name
-        if kind == "dir" and template_st == "local":
-            template_st = name
+    """(container storage, template storage), picked by what each storage is
+    configured to hold rather than by name: "local-lvm" only exists on ext4/xfs
+    ISO installs, so ZFS hosts and Proxmox-on-Debian hosts had no valid default."""
+    def active(content: str) -> list[tuple[str, str]]:
+        out = subprocess.run(["pvesm", "status", "--content", content],
+                             capture_output=True, text=True).stdout
+        rows = [line.split() for line in out.strip().splitlines()[1:]]
+        return [(r[0], r[1]) for r in rows if len(r) >= 3 and r[2] == "active"]
+
+    rootdir = active("rootdir")
+    container_st = next((n for n, k in rootdir if k in ("lvmthin", "zfspool", "lvm", "rbd")),
+                        rootdir[0][0] if rootdir else "local-lvm")
+    vztmpl = active("vztmpl")
+    template_st = vztmpl[0][0] if vztmpl else "local"
     return container_st, template_st
 
 
@@ -603,7 +603,7 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
 def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) -> int:
     phase(2, "allocating vmid")
     vmid = next_vmid()
-    container_st, _ = detect_pve_storages()
+    container_st = conf.get("container_storage") or detect_pve_storages()[0]
 
     haos_image_path = resolve_haos_image(conf)
     if not haos_image_path or not os.path.exists(haos_image_path):

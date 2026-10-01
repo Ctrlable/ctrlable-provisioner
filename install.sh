@@ -24,7 +24,7 @@ MEMORY=2048
 CORES=2
 DISK_SIZE=8
 BRIDGE=vmbr0
-STORAGE=local-lvm
+STORAGE=""              # auto-detected unless --storage is given (see pick_storage)
 REPO_URL=https://github.com/ctrlable/ctrlable-provisioner
 REPO_REF=main
 LOCAL_SRC=""            # path to local repo checkout (--local <path>)
@@ -92,6 +92,19 @@ pct_exec() { pct exec "$VMID" -- "$@"; }
 pct_push() { pct push "$VMID" "$1" "$2"; }
 pct_pull() { pct pull "$VMID" "$1" "$2"; }
 
+# Every network step gets retried. The first install on ctrlable-pve-1
+# (2026-10-01) died halfway through "npm install" on a transient fetch error,
+# and the half-built container it left behind then broke the re-run too.
+# Everything wrapped in this is safe to repeat.
+retry() {
+    local n=1 max=5
+    until "$@"; do
+        (( n >= max )) && { warn "failed after $max attempts: $*"; return 1; }
+        warn "attempt $n failed — retrying in $((n * 5)) s"
+        sleep $((n * 5)); n=$((n + 1))
+    done
+}
+
 # Secure temp dir — cleaned up on exit even if the script fails
 TMPDIR_PRIV=$(mktemp -d)
 chmod 700 "$TMPDIR_PRIV"
@@ -107,6 +120,8 @@ preflight() {
     command -v pveam  >/dev/null 2>&1 || die "pveam not found"
     [[ $(id -u) -eq 0 ]] || die "must run as root"
 
+    pick_storage
+
     PVE_NODE=$(hostname -s)
     PVE_HOST=$(hostname -I | awk '{print $1}')
     ok "PVE node: ${PVE_NODE} (${PVE_HOST})"
@@ -116,6 +131,38 @@ preflight() {
         LOCAL_SRC=$(realpath "$LOCAL_SRC")
         ok "local source: $LOCAL_SRC"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Container storage
+# ---------------------------------------------------------------------------
+# "local-lvm" only exists on hosts installed from the Proxmox ISO with ext4/xfs.
+# A ZFS install has "local-zfs" instead, and Proxmox installed on top of plain
+# Debian has only "local" -- which does not accept containers until rootdir is
+# enabled on it. Hard-coding local-lvm made pct create fail on both.
+pick_storage() {
+    if [[ -n "$STORAGE" ]]; then
+        pvesm status --storage "$STORAGE" >/dev/null 2>&1 || die "storage '$STORAGE' not found (pvesm status)"
+        ok "storage: $STORAGE (from --storage)"
+        return 0
+    fi
+    local list
+    list=$(pvesm status --content rootdir 2>/dev/null | awk 'NR>1 && $3=="active"{print $1, $2}')
+    # Prefer block/thin storage, which is what an ISO install sets up.
+    STORAGE=$(awk '$2 ~ /^(lvmthin|zfspool|lvm|rbd)$/{print $1; exit}' <<< "$list")
+    [[ -n "$STORAGE" ]] || STORAGE=$(awk '{print $1; exit}' <<< "$list")
+    if [[ -z "$STORAGE" ]]; then
+        # Debian-based install: only the "local" dir storage, without rootdir.
+        local content
+        content=$(pvesh get /storage/local --output-format json 2>/dev/null \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('content',''))" 2>/dev/null) \
+            || die "no storage accepts containers, and 'local' could not be read — pass --storage"
+        log "no storage accepts containers — enabling rootdir,images on 'local'"
+        pvesm set local --content "${content:+$content,}rootdir,images" \
+            || die "could not enable container storage on 'local' — pass --storage"
+        STORAGE=local
+    fi
+    ok "storage: $STORAGE"
 }
 
 # ---------------------------------------------------------------------------
@@ -282,10 +329,18 @@ ensure_dhcp_management() {
     fi
 
     # A lease, or nothing: anything else is not worth keeping.
+    #
+    # A lease is the address dhclient installed, which the kernel marks
+    # "dynamic" (finite lifetime); the kept factory address is "forever". This
+    # used to look for "any address other than the kept one" -- but the Proxmox
+    # ISO installer writes its own DHCP lease as the static address, so the
+    # router's offer is usually that SAME address, and every such host was
+    # declared to have no DHCP server and rolled back (ctrlable-pve-1 and a
+    # fresh 9.2 test install, 2026-10-01).
     local i lease=""
     for i in $(seq 1 20); do
-        lease=$(ip -4 -br addr show vmbr0 2>/dev/null | tr ' ' '\n' \
-                | grep -E '^[0-9.]+/[0-9]+$' | grep -v "^${keep}$" | head -1) || true
+        lease=$(ip -4 -o addr show dev vmbr0 dynamic 2>/dev/null \
+                | awk '{print $4}' | head -1) || true
         [[ -n "$lease" ]] && break
         sleep 3
     done
@@ -347,7 +402,7 @@ enable_lxc_ssh() {
 # ---------------------------------------------------------------------------
 setup_lxc() {
     log "installing packages inside LXC (this takes a few minutes)"
-    pct_exec bash -c "
+    retry pct_exec bash -c "
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
@@ -363,7 +418,7 @@ setup_lxc() {
     # before install_host_tools() and leaving the host without git -- which then
     # showed up as an unrelated-looking preflight failure.
     log "installing Node.js 20 LTS"
-    pct_exec bash -c "
+    retry pct_exec bash -c "
         set -euo pipefail
         curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
             | gpg --batch --yes --dearmor -o /usr/share/keyrings/nodesource.gpg
@@ -386,23 +441,38 @@ setup_lxc() {
         "
         rm /tmp/ctrlable-provisioner.tar.gz
     else
-        log "cloning provisioner repo (${REPO_REF})"
-        pct_exec git clone --branch "$REPO_REF" "$REPO_URL" /opt/ctrlable-provisioner
+        # A re-run after a partial install finds the checkout already there, and
+        # a bare "git clone" then aborted the whole installer. Update it in
+        # place instead; backend/.env and the database are gitignored, so
+        # reset --hard leaves them alone.
+        if pct_exec test -d /opt/ctrlable-provisioner/.git; then
+            log "updating existing provisioner checkout (${REPO_REF})"
+            retry pct_exec git -C /opt/ctrlable-provisioner fetch --quiet origin "$REPO_REF"
+            pct_exec git -C /opt/ctrlable-provisioner checkout --quiet -B "$REPO_REF" FETCH_HEAD
+        else
+            if pct_exec test -e /opt/ctrlable-provisioner; then
+                local aside="/opt/ctrlable-provisioner.partial-$(date +%Y%m%d%H%M%S)"
+                warn "moving incomplete /opt/ctrlable-provisioner aside to $aside"
+                pct_exec mv /opt/ctrlable-provisioner "$aside"
+            fi
+            log "cloning provisioner repo (${REPO_REF})"
+            retry pct_exec git clone --quiet --branch "$REPO_REF" "$REPO_URL" /opt/ctrlable-provisioner
+        fi
     fi
 
     log "installing Python dependencies"
-    pct_exec bash -c "
+    retry pct_exec bash -c "
         cd /opt/ctrlable-provisioner
-        python3 -m venv .venv
+        [[ -x .venv/bin/pip ]] || python3 -m venv .venv
         .venv/bin/pip install --quiet -r backend/requirements.txt
     "
 
     log "building frontend"
-    pct_exec bash -c "
+    retry pct_exec bash -c "
         cd /opt/ctrlable-provisioner/frontend
-        npm install --silent
-        npm run build
+        npm install --silent --no-audit --no-fund
     "
+    pct_exec bash -c "cd /opt/ctrlable-provisioner/frontend && npm run build"
 
     log "installing orchestrator systemd service"
     pct_exec bash -c "
@@ -458,7 +528,8 @@ ENV
     {
       printf '{\n'
       printf '  "orchestrator_url": "http://%s:8000",\n' "${ORCHESTRATOR_IP}"
-      printf '  "build_token": "%s"' "${BUILD_TOKEN}"
+      printf '  "build_token": "%s",\n' "${BUILD_TOKEN}"
+      printf '  "container_storage": "%s"' "${STORAGE}"
       [[ -n "$HAOS_IMAGE" ]] && printf ',\n  "haos_image_path": "%s"' "$HAOS_IMAGE"
       [[ -n "$DALI_TOKEN" ]] && printf ',\n  "dali_bridge_token": "%s"' "$DALI_TOKEN"
       printf '\n}\n'
@@ -568,7 +639,11 @@ install_host_tools() {
         command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
     done
     if [[ -n "$missing" ]]; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing >/dev/null 2>&1 \
+        # A fresh ISO install has never run apt-get update, and its enterprise
+        # repo answers 401 without a subscription -- which fails the update as a
+        # whole even though the Debian lists it needs did refresh. Hence || true.
+        apt-get update -qq >/dev/null 2>&1 || true
+        retry env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing >/dev/null 2>&1 \
             || warn "could not install:$missing — preflight may fail"
         ok "host dependencies installed:$missing"
     else
