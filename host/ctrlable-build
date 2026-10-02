@@ -514,6 +514,29 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
 
     log(f"[ctrlable-build] preflight release={release}")
 
+    # --- which orchestrator is this, and what is it running -----------------
+    #
+    # Reported rather than checked: there is no wrong answer, only an unknown
+    # one. It is here because this is the moment someone is asking "why did
+    # this build produce that", and the orchestrator's own version was until
+    # now unanswerable -- its tree is not reliably a git checkout, so there
+    # was nothing in the container to interrogate.
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+                conf["orchestrator_url"].rstrip("/") + "/api/version",
+                timeout=5) as r:
+            v = json.loads(r.read().decode())
+        log("[CHECK] ok   orchestrator %s (%s)%s"
+            % (v.get("version", "?"), v.get("revision", "?"),
+               (" — " + v["note"]) if v.get("note") else ""))
+    except Exception as exc:                      # noqa: BLE001
+        # Never a failure: an older orchestrator has no /api/version, and a
+        # preflight that fails for lack of a version string would block a
+        # perfectly good deploy.
+        log("[CHECK] ok   orchestrator version not reported (%s)"
+            % str(exc).split("\n")[0][:60])
+
     # --- host tooling ------------------------------------------------------
     # git is NOT part of a stock Proxmox install, and ctrlable-owned builders
     # clone their source at deploy time — a host without it fails mid-deploy.

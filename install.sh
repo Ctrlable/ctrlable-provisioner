@@ -477,6 +477,45 @@ setup_lxc() {
         fi
     fi
 
+    # RECORD WHAT WAS INSTALLED, on every path.
+    #
+    # "What is this orchestrator running?" had no answer. The CT's tree is not
+    # reliably a git checkout: the clone path leaves one, but --local-src tars
+    # the source in with `--exclude=.git`, which is how the live orchestrator
+    # was built -- so `git describe` in there returns nothing and the tree can
+    # drift from the repo with nothing recording that it has.
+    #
+    # Exactly the fault just fixed one layer down on the hardware manager,
+    # where an appliance reported 0.1.0 for six weeks while running code that
+    # revision never had, because the path the code actually arrived by
+    # (deploy.sh) did not write the record. Both paths write it here.
+    #
+    # -dirty is the load-bearing part for --local-src: it means the tree came
+    # off somebody's working copy and cannot be reproduced from a ref, which
+    # is the first thing to know about an orchestrator behaving oddly.
+    log "recording the install"
+    local _ver _rev _src _now
+    _now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [[ -n "$LOCAL_SRC" ]]; then
+        _ver=$(cat "$LOCAL_SRC/VERSION" 2>/dev/null || echo untagged)
+        _rev=$(git -C "$LOCAL_SRC" describe --tags --always --dirty 2>/dev/null \
+               || echo unknown)
+        _src="local-src from $(hostname -s 2>/dev/null || echo unknown)"
+    else
+        _ver=$(pct_exec cat /opt/ctrlable-provisioner/VERSION 2>/dev/null || echo untagged)
+        _rev=$(pct_exec git -C /opt/ctrlable-provisioner describe --tags --always --dirty 2>/dev/null \
+               || echo unknown)
+        _src="clone $REPO_URL @ $REPO_REF"
+    fi
+    pct_exec bash -c "cat > /opt/ctrlable-provisioner/install.json <<JSON
+{\"version\": \"${_ver}\",
+ \"revision\": \"${_rev}\",
+ \"installed_at\": \"${_now}\",
+ \"ref\": \"${REPO_REF}\",
+ \"source\": \"${_src}\"}
+JSON"
+    ok "recorded ${_ver} (${_rev})"
+
     log "installing Python dependencies"
     retry pct_exec bash -c "
         cd /opt/ctrlable-provisioner

@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -174,9 +176,54 @@ def change_password(
 # Health
 # ---------------------------------------------------------------------------
 
+INSTALL_RECORD = os.environ.get(
+    "CTRLABLE_INSTALL_RECORD", "/opt/ctrlable-provisioner/install.json")
+
+
+def _install_record() -> dict:
+    """What this orchestrator is running, as recorded at install time.
+
+    "What is this orchestrator running?" had no answer. The CT's tree is NOT
+    always a git checkout: install.sh clones when it is pointed at the repo,
+    but with --local-src it tars the source in with `--exclude=.git`, which is
+    how the live one was built -- so `git describe` inside the container
+    returns nothing and the directory can drift from the repo with no record
+    that it has.
+
+    The same fault was just found and fixed one layer down, on the hardware
+    manager: an appliance reported version 0.1.0 for six weeks while running
+    code that revision never had, because the path the code actually arrived
+    by did not record itself. So this reads the record install.sh now writes,
+    rather than trying to derive identity from a tree that may have none.
+    """
+    try:
+        with open(INSTALL_RECORD) as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        # Installed before the record existed. Say that, rather than inventing
+        # a version -- "unknown" is actionable (re-run install.sh) and a guess
+        # is not.
+        return {"version": "unknown", "revision": "unknown",
+                "note": "installed before install.json was written; "
+                        "re-run install.sh to record it"}
+    except Exception as exc:                      # noqa: BLE001
+        return {"version": "unknown", "revision": "unknown",
+                "note": "unreadable install record: %s" % exc}
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True}
+    # The install record rides on /health because that is the endpoint anything
+    # already calls to ask "are you there?", and "which version is there" is
+    # the next question every time.
+    return {"ok": True, "install": _install_record()}
+
+
+@app.get("/api/version")
+def version() -> dict:
+    """Unauthenticated on purpose: it reports a version, not a secret, and the
+    whole point is that it can be asked of a fleet without credentials."""
+    return _install_record()
 
 
 # ---------------------------------------------------------------------------
