@@ -93,7 +93,10 @@ templates:
     kind: lxc
     # ctrlable-owned builder (no community-script) — bundled at host/builders/.
     builder: ctrlable/hardware-manager.sh
-    app_version: "0.1.0"
+    # THE REF THE BUILDER CLONES, as tag v<app_version>. Not decorative: bump
+    # this to roll a release out, and two appliances built from this manifest
+    # are then the same software.
+    app_version: "0.3.0"
     os:
       distro: debian
       version: "12"

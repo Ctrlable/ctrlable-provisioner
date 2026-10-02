@@ -28,7 +28,27 @@ CT_HOSTNAME="${CT_HOSTNAME:-ctrlable-hardware-manager}"
 STORAGE="${var_container_storage:-local-lvm}"
 SRC="${HW_MANAGER_SRC:-/opt/ctrlable/hardware-manager-src}"
 REPO="${HW_MANAGER_REPO:-https://github.com/Ctrlable/ctrlable-hardware-manager-src.git}"
-REF="${HW_MANAGER_REF:-main}"
+# The REF is the manifest's app_version as a tag, so what gets built is what
+# the release says. HW_MANAGER_REF still wins when it is set explicitly, which
+# is how a test appliance is put on a branch without editing the manifest; main
+# is the last resort and means "no release was pinned", not "track latest".
+# Pinned release, in precedence order:
+#   HW_MANAGER_REF   explicit override, for putting a test box on a branch
+#   APP_VERSION      the manifest's app_version, passed by ctrlable-build
+#   PINNED_FALLBACK  the last release this builder shipped alongside
+#
+# The fallback exists because a HOST can be running an older ctrlable-build
+# that does not forward APP_VERSION -- beta's is from August -- and in that
+# case the previous default was `main`, which silently builds whatever is on
+# the branch today. An appliance provisioned months apart would be different
+# software with nothing recording it. A stale pin is wrong in a way someone
+# can see and fix; `main` is wrong in a way nobody notices.
+#
+# Bump this WITH the manifest's app_version. They say the same thing to two
+# different readers.
+PINNED_FALLBACK="v0.3.0"
+REF="${HW_MANAGER_REF:-${APP_VERSION:+v$APP_VERSION}}"
+REF="${REF:-$PINNED_FALLBACK}"
 KEY="${HW_MANAGER_SSH_KEY:-/etc/ctrlable/hardware-manager-deploy-key}"
 TOKEN="${HW_MANAGER_TOKEN:-}"
 
@@ -46,6 +66,20 @@ SNAPCAST_PORT="${HW_MANAGER_SNAPCAST_PORT:-1715}"
 # Fetch the source (pinned) if it isn't already staged. Private repo, so prefer
 # the read-only deploy key and fall back to an HTTPS token -- same pattern as
 # dali-bridge.sh.
+# A staged tree is reused only when it is the ref we were asked for.
+#
+# The old test was "does the provisioner script exist", so a cache left by an
+# earlier build satisfied it and the pinned ref was ignored -- the second
+# appliance quietly got the first one's software, which is the exact failure
+# pinning a version is meant to prevent. Checking the ref costs one git call.
+if [ -d "$SRC/.git" ] && [ -f "$SRC/deploy/provision-manager-lxc.sh" ]; then
+  staged=$(git -C "$SRC" describe --tags --exact-match 2>/dev/null \
+           || git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo "")
+  if [ "$staged" != "$REF" ] && [ "v${staged#v}" != "v${REF#v}" ]; then
+    echo "hardware-manager builder: staged tree is $staged, want $REF -- refetching"
+    rm -rf "$SRC"
+  fi
+fi
 if [ ! -x "$SRC/deploy/provision-manager-lxc.sh" ]; then
   rm -rf "$SRC"
   echo "hardware-manager builder: cloning $REPO @ $REF -> $SRC"

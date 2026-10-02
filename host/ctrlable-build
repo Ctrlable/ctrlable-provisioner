@@ -143,20 +143,20 @@ def list_ct_vmids() -> set[int]:
 
 
 def detect_pve_storages() -> tuple[str, str]:
-    out = subprocess.run(["pvesm", "status"], capture_output=True, text=True).stdout
-    container_st = "local-lvm"
-    template_st  = "local"
-    for line in out.strip().splitlines()[1:]:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        name, kind, status = parts[0], parts[1], parts[2]
-        if status != "active":
-            continue
-        if kind in ("lvmthin", "lvm", "zfspool") and container_st == "local-lvm":
-            container_st = name
-        if kind == "dir" and template_st == "local":
-            template_st = name
+    """(container storage, template storage), picked by what each storage is
+    configured to hold rather than by name: "local-lvm" only exists on ext4/xfs
+    ISO installs, so ZFS hosts and Proxmox-on-Debian hosts had no valid default."""
+    def active(content: str) -> list[tuple[str, str]]:
+        out = subprocess.run(["pvesm", "status", "--content", content],
+                             capture_output=True, text=True).stdout
+        rows = [line.split() for line in out.strip().splitlines()[1:]]
+        return [(r[0], r[1]) for r in rows if len(r) >= 3 and r[2] == "active"]
+
+    rootdir = active("rootdir")
+    container_st = next((n for n, k in rootdir if k in ("lvmthin", "zfspool", "lvm", "rbd")),
+                        rootdir[0][0] if rootdir else "local-lvm")
+    vztmpl = active("vztmpl")
+    template_st = vztmpl[0][0] if vztmpl else "local"
     return container_st, template_st
 
 
@@ -252,9 +252,23 @@ def build_env(tmpl: dict, conf: dict, vmid: int | None = None) -> dict:
     for key, cf in (("DALI_BRIDGE_REPO", "dali_bridge_repo"),
                     ("DALI_BRIDGE_REF",  "dali_bridge_ref"),
                     ("DALI_BRIDGE_SSH_KEY", "dali_bridge_ssh_key"),
-                    ("DALI_BRIDGE_TOKEN", "dali_bridge_token")):
+                    ("DALI_BRIDGE_TOKEN", "dali_bridge_token"),
+                    ("HW_MANAGER_REPO", "hw_manager_repo"),
+                    ("HW_MANAGER_REF",  "hw_manager_ref"),
+                    ("HW_MANAGER_SSH_KEY", "hw_manager_ssh_key"),
+                    ("HW_MANAGER_TOKEN", "hw_manager_token")):
         if conf.get(cf):
             env[key] = str(conf[cf])
+    # APP_VERSION is the manifest's own answer to "which release is this
+    # template?", handed to the builder so it can clone that TAG rather than
+    # whatever main happens to be.
+    #
+    # Without it the manifest's app_version was decorative: it said 0.1.0 while
+    # the builder cloned main, so two appliances provisioned a week apart were
+    # different software and the manifest documented neither. A release is a
+    # thing you can point at or it is not a release.
+    if tmpl.get("app_version"):
+        env["APP_VERSION"] = str(tmpl["app_version"])
     # Pre-allocate VMID so parallel deploys don't collide.
     # Community scripts read NEXTID / CT_ID / CTID to pick the container ID.
     if vmid is not None:
@@ -603,7 +617,7 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
 def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) -> int:
     phase(2, "allocating vmid")
     vmid = next_vmid()
-    container_st, _ = detect_pve_storages()
+    container_st = conf.get("container_storage") or detect_pve_storages()[0]
 
     haos_image_path = resolve_haos_image(conf)
     if not haos_image_path or not os.path.exists(haos_image_path):
