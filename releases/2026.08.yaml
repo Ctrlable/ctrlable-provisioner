@@ -96,7 +96,7 @@ templates:
     # THE REF THE BUILDER CLONES, as tag v<app_version>. Not decorative: bump
     # this to roll a release out, and two appliances built from this manifest
     # are then the same software.
-    app_version: "0.2.0"
+    app_version: "0.3.0"
     os:
       distro: debian
       version: "12"

@@ -32,8 +32,23 @@ REPO="${HW_MANAGER_REPO:-https://github.com/Ctrlable/ctrlable-hardware-manager-s
 # the release says. HW_MANAGER_REF still wins when it is set explicitly, which
 # is how a test appliance is put on a branch without editing the manifest; main
 # is the last resort and means "no release was pinned", not "track latest".
+# Pinned release, in precedence order:
+#   HW_MANAGER_REF   explicit override, for putting a test box on a branch
+#   APP_VERSION      the manifest's app_version, passed by ctrlable-build
+#   PINNED_FALLBACK  the last release this builder shipped alongside
+#
+# The fallback exists because a HOST can be running an older ctrlable-build
+# that does not forward APP_VERSION -- beta's is from August -- and in that
+# case the previous default was `main`, which silently builds whatever is on
+# the branch today. An appliance provisioned months apart would be different
+# software with nothing recording it. A stale pin is wrong in a way someone
+# can see and fix; `main` is wrong in a way nobody notices.
+#
+# Bump this WITH the manifest's app_version. They say the same thing to two
+# different readers.
+PINNED_FALLBACK="v0.3.0"
 REF="${HW_MANAGER_REF:-${APP_VERSION:+v$APP_VERSION}}"
-REF="${REF:-main}"
+REF="${REF:-$PINNED_FALLBACK}"
 KEY="${HW_MANAGER_SSH_KEY:-/etc/ctrlable/hardware-manager-deploy-key}"
 TOKEN="${HW_MANAGER_TOKEN:-}"
 
