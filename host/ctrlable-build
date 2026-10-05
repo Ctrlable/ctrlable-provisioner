@@ -241,6 +241,28 @@ def build_env(tmpl: dict, conf: dict, vmid: int | None = None) -> dict:
         "METHOD":                "default",
         "DEBIAN_FRONTEND":       "noninteractive",
         "TERM":                  "xterm",
+        # SAY WE ARE NON-INTERACTIVE, in the words upstream reads.
+        #
+        # build.func asks questions. It gained a new one -- "an update for the
+        # Proxmox LXC stack is available: [1] upgrade [2] ignore [3] cancel" --
+        # and reads the answer with `read -rp ... </dev/tty`. This runs over
+        # SSH with command=/no-pty and stdin at DEVNULL, so there is no
+        # /dev/tty: the read failed, `set -u` then hit the unset $_ans, and
+        # EVERY deploy died with "community script exited 1" on a host where
+        # nothing had changed.
+        #
+        # Both of these are build.func's own unattended switches, checked
+        # BEFORE that read (misc/build.func, the host-stack guard):
+        #     if [[ "${PHS_SILENT:-0}" == "1" || "${_disable_update,,}" == "yes" ]]
+        #         return 2      # "ignore, continue without upgrading"
+        # DISABLE_UPDATE answers this prompt specifically; PHS_SILENT is the
+        # general "do not ask me anything" flag, which is the only durable
+        # answer when the question set is upstream's to change.
+        #
+        # Deliberately NOT option 1: a provisioning run must not apt-upgrade
+        # someone's hypervisor as a side effect of creating a container.
+        "DISABLE_UPDATE":        "yes",
+        "PHS_SILENT":            "1",
         "mode":                  "1",
         "var_container_storage": container_st,
         "var_template_storage":  template_st,
