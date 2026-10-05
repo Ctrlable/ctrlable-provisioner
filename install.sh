@@ -465,7 +465,9 @@ setup_lxc() {
         if pct_exec test -d /opt/ctrlable-provisioner/.git; then
             log "updating existing provisioner checkout (${REPO_REF})"
             retry pct_exec git -C /opt/ctrlable-provisioner fetch --quiet origin "$REPO_REF"
-            pct_exec git -C /opt/ctrlable-provisioner checkout --quiet -B "$REPO_REF" FETCH_HEAD
+            # --force: the last run's npm install rewrote package-lock.json, and
+            # carrying that over made every re-run record itself as "-dirty".
+            pct_exec git -C /opt/ctrlable-provisioner checkout --quiet --force -B "$REPO_REF" FETCH_HEAD
         else
             if pct_exec test -e /opt/ctrlable-provisioner; then
                 local aside="/opt/ctrlable-provisioner.partial-$(date +%Y%m%d%H%M%S)"
