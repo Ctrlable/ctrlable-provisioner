@@ -361,7 +361,7 @@ import json,sys; print(sum(i['status']=='error' for i in json.load(sys.stdin).ge
 echo
 echo "  Orchestrator : http://${ORCH_IP}:8000  (admin / see $PWFILE)"
 echo "  Proxmox      : https://$(hostname -I | awk '{print $1}'):8006"
-[[ -z "$MQTT_HOST" ]] && warn "no MQTT broker given: Zigbee2MQTT / Frigate / DALI wait for one -- set it up in Ctrlable Pro (Mosquitto) and re-wire"
+[[ -z "$MQTT_HOST" ]] && WARNINGS+=("no MQTT broker given: Zigbee2MQTT / Frigate / DALI wait for one -- set it up in Ctrlable Pro (Mosquitto) and re-wire")
 for w in "${WARNINGS[@]}"; do echo -e "  ${YELLOW}!${NC} $w"; done
 (( failed > 0 )) && echo -e "  ${RED}${failed} service(s) failed${NC} -- details in the orchestrator UI (Projects), then re-run this command"
 
