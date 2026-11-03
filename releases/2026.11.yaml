@@ -7,8 +7,10 @@
 #     docker-portainer LXC are gone.
 #   - ctrlable-pro OS 18.1 -> 18.3, hardware-manager 0.3.0 -> 0.4.1,
 #     dali-bridge -> 0.5.8 (and its builder now honours app_version).
-#   - community_scripts_ref is unchanged: zwavejs, zigbee2mqtt and freepbx are
-#     the 2026.08 combination. (Note build.func itself is always fetched from
+#   - FreePBX uses a Ctrlable builder (Sangoma installer pinned, module
+#     refresh non-fatal) instead of ct/freepbx.sh.
+#   - community_scripts_ref is unchanged: zwavejs and zigbee2mqtt are the
+#     2026.08 combination. (Note build.func itself is always fetched from
 #     community-scripts main; see ctrlable-build build_env.)
 release: "2026.11"
 community_scripts_ref: "2026-06-01"
@@ -78,11 +80,19 @@ templates:
     unprivileged: false
   freepbx:
     kind: lxc
-    builder: ct/freepbx.sh
+    # Ctrlable-owned builder: Sangoma's installer pinned to a commit, with the
+    # bulk module refresh made non-fatal (it timed out on a Pentium N3700 and
+    # ct/freepbx.sh then deleted a working PBX). See host/builders/freepbx.sh.
+    builder: ctrlable/freepbx.sh
+    app_version: "17"
+    os:
+      distro: debian
+      version: "12"
     resources:
       cpu: 2
       ram: 2048
       disk: 16
+    unprivileged: true
   hardware-manager:
     kind: lxc
     # ctrlable-owned builder (no community-script) — bundled at host/builders/.
