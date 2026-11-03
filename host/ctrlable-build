@@ -328,10 +328,17 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
         if not os.path.isfile(local):
             die(f"[{name}] bundled builder missing: {local}")
         log(f"[{name}] running ctrlable builder {local} (vmid={vmid}, host={hostname})")
+        # Capture, don't discard: with stdout=DEVNULL a failed builder logged only
+        # its exit code, which is no help with a deploy that died on site.
         result = subprocess.run(
             ["bash", local],
             env={**env, "VMID": str(vmid), "CT_HOSTNAME": hostname},
-            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        for line in result.stdout.decode(errors="replace").splitlines():
+            clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line).strip()
+            if clean:
+                log(f"[{name}] {clean[:300]}")
         if result.returncode != 0:
             die(f"[{name}] ctrlable builder exited {result.returncode}")
     else:

@@ -22,7 +22,11 @@ CT_HOSTNAME="${CT_HOSTNAME:-dali-bridge}"
 STORAGE="${var_container_storage:-local-lvm}"
 SRC="${DALI_BRIDGE_SRC:-/opt/ctrlable/dali-bridge-src}"
 REPO="${DALI_BRIDGE_REPO:-https://github.com/Ctrlable/dali-bridge.git}"
-REF="${DALI_BRIDGE_REF:-v0.5.3}"                       # pinned to the release manifest
+# The release manifest's app_version decides the tag (as for hardware-manager);
+# DALI_BRIDGE_REF still wins when set explicitly. Before this, the manifest's
+# app_version was ignored and every appliance got this file's default.
+REF="${DALI_BRIDGE_REF:-${APP_VERSION:+v$APP_VERSION}}"
+REF="${REF:-v0.5.8}"
 KEY="${DALI_BRIDGE_SSH_KEY:-/etc/ctrlable/dali-bridge-deploy-key}"  # read-only deploy key
 TOKEN="${DALI_BRIDGE_TOKEN:-}"                         # HTTPS PAT fallback
 

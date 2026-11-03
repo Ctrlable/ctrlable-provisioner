@@ -182,36 +182,48 @@ wire_frigate() {
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
 
-    local cfg_dir=/etc/frigate
+    local cfg_dir="${FRIGATE_CONFIG_DIR:-/etc/frigate}"
     mkdir -p "$cfg_dir"
 
-    # Preserve any existing cameras config if present
-    local cameras_block="cameras: {}"
-    if [[ -f "$cfg_dir/config.yml" ]]; then
-        cameras_block=$(python3 -c "
-import sys
-try:
-    import yaml
-    cfg = yaml.safe_load(open('$cfg_dir/config.yml'))
-    if cfg and 'cameras' in cfg:
-        print('cameras:')
-        for k, v in cfg['cameras'].items():
-            print(f'  {k}: ...')
-except Exception:
-    pass
-print('cameras: {}')
-" 2>/dev/null || echo "cameras: {}")
-    fi
-
-    cat > "$cfg_dir/config.yml" <<YAML
+    # MERGE the site MQTT settings into the existing config; never replace it.
+    # This used to rewrite the whole file as mqtt + "cameras: {}", which threw
+    # away the builder's baseline (VAAPI args, go2rtc WebRTC candidates, ...)
+    # and turned any existing cameras into "name: ..." placeholders.
+    if python3 -c "import yaml" 2>/dev/null; then
+        MQTT_HOST="$mqtt_host" MQTT_PORT="$mqtt_port" MQTT_USER="$mqtt_user" MQTT_PASS="$mqtt_pass" \
+        python3 - "$cfg_dir/config.yml" <<'PY' || die "could not merge MQTT into frigate config"
+import os, sys, yaml
+path = sys.argv[1]
+cfg = {}
+if os.path.exists(path):
+    cfg = yaml.safe_load(open(path)) or {}
+mqtt = {"enabled": True, "host": os.environ["MQTT_HOST"], "port": int(os.environ["MQTT_PORT"] or 1883)}
+if os.environ["MQTT_USER"]:
+    mqtt["user"] = os.environ["MQTT_USER"]
+    mqtt["password"] = os.environ["MQTT_PASS"]
+cfg["mqtt"] = mqtt
+cfg.setdefault("cameras", {})
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    # block style only: flow-style re-emits have broken go2rtc restreams before
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+os.replace(tmp, path)
+PY
+    elif [[ ! -s "$cfg_dir/config.yml" ]]; then
+        # No YAML module (legacy native install) and nothing to preserve.
+        cat > "$cfg_dir/config.yml" <<YAML
 mqtt:
   enabled: true
   host: ${mqtt_host}
   port: ${mqtt_port}
   user: ${mqtt_user}
   password: ${mqtt_pass}
-${cameras_block}
+cameras: {}
 YAML
+    else
+        log "frigate: python3-yaml missing and a config exists -- leaving it untouched"
+        return 0
+    fi
 
     log "frigate config written to $cfg_dir/config.yml"
     systemctl restart frigate 2>/dev/null || true

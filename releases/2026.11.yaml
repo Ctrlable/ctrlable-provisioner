@@ -1,0 +1,122 @@
+# Ctrlable release manifest 2026.11
+#
+# Versus 2026.08:
+#   - Frigate runs as the Ctrlable image (ghcr.io/ctrlable/frigate, 0.18 +
+#     our fixes) in a Docker LXC, with the baseline config learned at Habitat,
+#     Pinecrest and Miami. The native 0.14 Frigate LXC and the separate
+#     docker-portainer LXC are gone.
+#   - ctrlable-pro OS 18.1 -> 18.3, hardware-manager 0.3.0 -> 0.4.1,
+#     dali-bridge -> 0.5.8 (and its builder now honours app_version).
+#   - community_scripts_ref is unchanged: zwavejs, zigbee2mqtt and freepbx are
+#     the 2026.08 combination. (Note build.func itself is always fetched from
+#     community-scripts main; see ctrlable-build build_env.)
+release: "2026.11"
+community_scripts_ref: "2026-06-01"
+proxmox_min_version: "8.2"
+templates:
+  ctrlable-pro:
+    kind: vm
+    builder: vm/haos-vm.sh
+    # Fetched automatically from the PUBLIC release Ctrlable/haos-base @
+    # haos-18.1, asset ctrlable-pro-os-generic-x86-64-18.1.img.xz. The URL is
+    # derived rather than configured: the template name IS the brand, and
+    # haos_version is the tag. Override with haos_image_repo / haos_image_tag /
+    # haos_image_asset if a release ever publishes elsewhere.
+    #
+    # A file already staged in /opt/ctrlable/images (or haos_image_path in
+    # build.conf) still wins, so an air-gapped site can pre-seed it. What
+    # changed is that a connected host no longer needs a 551MB manual copy
+    # before it can build anything.
+    haos_version: "18.3"
+    rebrand: true
+    base_backup: "ctrlable-base-2026.11.tar"
+    vmid_base: 9000
+    resources:
+      cpu: 2
+      ram: 4096
+      disk: 32
+  zwavejs:
+    kind: lxc
+    builder: ct/zwave-js-ui.sh
+    app_version: "9.x"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 8
+    unprivileged: true
+  zigbee2mqtt:
+    kind: lxc
+    builder: ct/zigbee2mqtt.sh
+    app_version: "1.x"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 8
+    unprivileged: true
+  frigate:
+    kind: lxc
+    # Ctrlable-owned builder: Docker LXC running ghcr.io/ctrlable/frigate (our
+    # 0.18 fork) with the Ctrlable baseline config. Replaces BOTH the native
+    # community-script Frigate (ct/frigate.sh, built from source, 0.14) and the
+    # separate docker-portainer LXC that 2026.08 shipped alongside it.
+    builder: ctrlable/frigate-docker.sh
+    app_version: "0.18.0-ctrlable.1"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 4
+      ram: 4096
+      disk: 32
+    # Docker inside LXC + iGPU render node for VAAPI.
+    unprivileged: false
+  freepbx:
+    kind: lxc
+    builder: ct/freepbx.sh
+    resources:
+      cpu: 2
+      ram: 2048
+      disk: 16
+  hardware-manager:
+    kind: lxc
+    # ctrlable-owned builder (no community-script) — bundled at host/builders/.
+    builder: ctrlable/hardware-manager.sh
+    # THE REF THE BUILDER CLONES, as tag v<app_version>. Not decorative: bump
+    # this to roll a release out, and two appliances built from this manifest
+    # are then the same software.
+    app_version: "0.4.1"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 1024
+      disk: 8
+    # Nothing inside the CT touches hardware, so it can be unprivileged. The
+    # agent does touch hardware and runs on the HOST — which is the one way this
+    # template differs from every other one here: provisioning it installs a
+    # systemd unit on the hypervisor as well as creating a container. Additive
+    # and read-only, but not confined to the CT.
+    unprivileged: true
+
+  dali-bridge:
+    kind: lxc
+    # ctrlable-owned builder (no community-script) — bundled at host/builders/.
+    builder: ctrlable/dali-bridge.sh
+    # The tag the builder clones (v<app_version>).
+    app_version: "0.5.8"
+    os:
+      distro: debian
+      version: "12"
+    resources:
+      cpu: 2
+      ram: 1024
+      disk: 8
+    # USB HID (hasseb) pass-through needs a privileged CT + nesting.
+    unprivileged: false
