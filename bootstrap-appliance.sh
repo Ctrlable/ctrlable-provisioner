@@ -28,6 +28,12 @@
 #   --skip-upgrade          leave packages alone
 #   --skip-deploy           stop after the orchestrator is installed
 #   --reboot                reboot at the end if a new kernel was installed
+#
+# A kernel upgrade is followed by an IMMEDIATE reboot, before anything is
+# installed, and the run resumes by itself afterwards (systemd unit
+# ctrlable-bootstrap-resume; log /var/log/ctrlable-bootstrap.log). Creating
+# unprivileged containers fails on the old running kernel once the new
+# Proxmox userspace is in ("tar: .../rootfs: Cannot open: Permission denied").
 # Env:
 #   CTRLABLE_ADMIN_PASSWORD  orchestrator admin password to set (default: generated,
 #                            saved to /root/ctrlable-admin-password)
@@ -39,7 +45,8 @@ PORTAL_EMAIL=""
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 REF="main"
 MQTT_HOST="" MQTT_PORT=1883 MQTT_USER="" MQTT_PASS=""
-SKIP_UPGRADE=0 SKIP_DEPLOY=0 DO_REBOOT=0
+SKIP_UPGRADE=0 SKIP_DEPLOY=0 DO_REBOOT=0 RESUMED=0
+ORIG_ARGS=("$@")
 RAW="https://raw.githubusercontent.com/ctrlable/ctrlable-provisioner"
 
 while [[ $# -gt 0 ]]; do
@@ -56,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --skip-upgrade) SKIP_UPGRADE=1; shift ;;
         --skip-deploy)  SKIP_DEPLOY=1; shift ;;
         --reboot)       DO_REBOOT=1; shift ;;
+        --resumed)      RESUMED=1; shift ;;
         -h|--help)      sed -n '2,40p' "$0" 2>/dev/null || true; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
@@ -124,8 +132,61 @@ NEWEST_KERNEL=$(ls -1 /boot/vmlinuz-*-pve 2>/dev/null | sed 's|/boot/vmlinuz-||'
 REBOOT_NEEDED=0
 if [[ -n "$NEWEST_KERNEL" && "$NEWEST_KERNEL" != "$(uname -r)" ]]; then
     REBOOT_NEEDED=1
-    log "kernel ${NEWEST_KERNEL} installed, running $(uname -r) -- reboot at the end"
 fi
+
+# Reboot into the new kernel NOW and resume afterwards. (Observed 2026-11-03 on
+# a fresh 9.1 -> 9.2.25 upgrade: the orchestrator CT failed to extract until
+# the host was running the new kernel.)
+if [[ ( "$REBOOT_NEEDED" == 1 || -n "${BOOTSTRAP_FORCE_RESUME_TEST:-}" ) && "$RESUMED" == 0 ]]; then
+    step "Rebooting into ${NEWEST_KERNEL} -- the bootstrap continues by itself afterwards"
+    install -d -m 700 /var/lib/ctrlable-bootstrap
+    # The script itself: a file when run as one, else the "bash -c" string.
+    if [[ -f "$0" && "$0" == *.sh ]]; then
+        cp "$0" /var/lib/ctrlable-bootstrap/bootstrap-appliance.sh
+    elif [[ -n "${BASH_EXECUTION_STRING:-}" ]]; then
+        printf '%s\n' "$BASH_EXECUTION_STRING" > /var/lib/ctrlable-bootstrap/bootstrap-appliance.sh
+    else
+        curl -fsSL "${RAW}/${REF}/bootstrap-appliance.sh" -o /var/lib/ctrlable-bootstrap/bootstrap-appliance.sh \
+            || die "cannot save the bootstrap for resuming"
+    fi
+    # Arguments and secrets for the resumed run (root-only; deleted on resume).
+    ( umask 077
+      {
+        printf 'ARGS=('; printf '%q ' "${ORIG_ARGS[@]}"; printf ')\n'
+        [[ -n "${CTRLABLE_PORTAL_PASSWORD:-}" ]] && printf 'export CTRLABLE_PORTAL_PASSWORD=%q\n' "$CTRLABLE_PORTAL_PASSWORD"
+        [[ -n "$GITHUB_TOKEN" ]] && printf 'export GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+        [[ -n "${CTRLABLE_ADMIN_PASSWORD:-}" ]] && printf 'export CTRLABLE_ADMIN_PASSWORD=%q\n' "$CTRLABLE_ADMIN_PASSWORD"
+      } > /var/lib/ctrlable-bootstrap/resume.env )
+    cat > /var/lib/ctrlable-bootstrap/resume.sh <<'EOF'
+#!/bin/bash
+systemctl disable ctrlable-bootstrap-resume.service >/dev/null 2>&1
+. /var/lib/ctrlable-bootstrap/resume.env
+rm -f /var/lib/ctrlable-bootstrap/resume.env
+exec bash /var/lib/ctrlable-bootstrap/bootstrap-appliance.sh "${ARGS[@]}" --resumed
+EOF
+    cat > /etc/systemd/system/ctrlable-bootstrap-resume.service <<'EOF'
+[Unit]
+Description=Ctrlable appliance bootstrap (resume after kernel reboot)
+Wants=network-online.target
+After=network-online.target pve-cluster.service pvedaemon.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'bash /var/lib/ctrlable-bootstrap/resume.sh >> /var/log/ctrlable-bootstrap.log 2>&1'
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable ctrlable-bootstrap-resume.service >/dev/null 2>&1
+    echo "  Follow it after the reboot with:  tail -f /var/log/ctrlable-bootstrap.log"
+    sleep 5
+    systemctl reboot
+    exit 0
+fi
+[[ "$RESUMED" == 1 ]] && ok "resumed after reboot, running $(uname -r)"
+[[ "$REBOOT_NEEDED" == 1 ]] && warn "still running $(uname -r) although ${NEWEST_KERNEL} is installed -- reboot when convenient"
 
 # ---------------------------------------------------------------------------
 step "2/4 Firmware settings"
