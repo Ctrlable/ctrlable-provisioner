@@ -213,6 +213,11 @@ def inject_firstboot(vmid: int, name: str, manifest: dict, conf: dict,
     finally:
         os.unlink(conf_tmp)
 
+    # Run it NOW (after firstboot.conf exists). Guests are deployed directly --
+    # no template + clone -- so the container's first boot has already
+    # happened; enabled-only, the wiring waited for an unrelated reboot.
+    pct_exec(vmid, "systemctl", "start", "--no-block", "ctrlable-firstboot.service")
+
 
 def set_lxc_hostname(vmid: int, hostname: str) -> None:
     """Override hostname set by the community script to our naming convention."""

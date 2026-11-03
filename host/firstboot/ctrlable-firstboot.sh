@@ -11,7 +11,9 @@ LOG_TAG=ctrlable-firstboot
 # Helpers
 # ---------------------------------------------------------------------------
 
-log()  { echo "[ctrlable-firstboot] $*" | systemd-cat -t "$LOG_TAG" 2>/dev/null; echo "[ctrlable-firstboot] $*"; }
+# stderr, not stdout: helpers like http_get are called in $(...), and a log line
+# on stdout became part of the "response" they returned.
+log()  { echo "[ctrlable-firstboot] $*" | systemd-cat -t "$LOG_TAG" 2>/dev/null; echo "[ctrlable-firstboot] $*" >&2; }
 die()  { log "FATAL: $*"; exit 1; }
 
 jget() {
@@ -24,14 +26,16 @@ print(d.get(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ''))
 }
 
 http_get() {
-    # Retry GET with exponential back-off. Prints response body; returns 0 on success.
+    # Retry GET with back-off, ~8 min in all: after a power cut every guest
+    # boots at once and the orchestrator can take minutes to answer on a small
+    # host. Prints response body; returns 0 on success.
     local url="$1" attempt delay=5
-    for attempt in 1 2 3 4 5; do
+    for attempt in $(seq 1 12); do
         local body
         body=$(curl -sf --max-time 20 "$url" 2>/dev/null) && { printf '%s' "$body"; return 0; }
-        log "GET $url failed (attempt $attempt/5), retrying in ${delay}s"
+        log "GET ${url%%secret=*} failed (attempt $attempt/12), retrying in ${delay}s"
         sleep "$delay"
-        delay=$(( delay * 2 ))
+        delay=$(( delay * 2 > 60 ? 60 : delay * 2 ))
     done
     return 1
 }
@@ -39,12 +43,12 @@ http_get() {
 http_post() {
     # POST JSON body; returns 0 on success.
     local url="$1" body="$2" attempt delay=5
-    for attempt in 1 2 3 4 5; do
+    for attempt in $(seq 1 12); do
         curl -sf --max-time 20 -X POST -H "Content-Type: application/json" -d "$body" "$url" \
             >/dev/null 2>&1 && return 0
-        log "POST $url failed (attempt $attempt/5), retrying in ${delay}s"
+        log "POST $url failed (attempt $attempt/12), retrying in ${delay}s"
         sleep "$delay"
-        delay=$(( delay * 2 ))
+        delay=$(( delay * 2 > 60 ? 60 : delay * 2 ))
     done
     return 1
 }

@@ -180,7 +180,13 @@ async def deploy_instance(
         await asyncio.to_thread(db.set_instance_status, hostname, "error")
         raise
 
-    await asyncio.to_thread(db.finish_instance, hostname, vmid, kind, "active")
+    # An LXC is "pending" until its firstboot has fetched its wiring and called
+    # back; only then is it "active". Settling LXCs as "active" here made every
+    # firstboot get 409 "already active", so no container was ever wired (MQTT,
+    # coordinators, provisioning key) -- latent since 2026-07-31. VMs have no
+    # firstboot, so they are done when built.
+    final = "pending" if kind == "lxc" else "active"
+    await asyncio.to_thread(db.finish_instance, hostname, vmid, kind, final)
     return dict(await asyncio.to_thread(db.get_instance_by_hostname, hostname))
 
 

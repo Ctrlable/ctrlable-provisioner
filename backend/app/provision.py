@@ -20,12 +20,13 @@ def get_assignment(db: StateDB, hostname: str, secret: str) -> dict:
     if not release or release["firstboot_secret"] != secret:
         raise PermissionError("invalid firstboot secret")
 
-    if inst["status"] == "active":
-        raise ValueError(f"instance {hostname!r} is already active")
     if inst["status"] == "error":
         raise ValueError(f"instance {hostname!r} is in error state")
 
-    db.set_instance_status(hostname, "provisioning")
+    # Re-running firstboot on an active instance re-applies its wiring (it is
+    # idempotent); only a not-yet-active one moves to "provisioning".
+    if inst["status"] != "active":
+        db.set_instance_status(hostname, "provisioning")
 
     wire_to = json.loads(inst["wire_to"]) if inst["wire_to"] else {}
     return {

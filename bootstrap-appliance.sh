@@ -337,10 +337,15 @@ for _ in $(seq 1 1080); do   # up to 3 h
     snap=$(api GET "/api/projects/$project" | python3 -c "
 import json,sys
 p=json.load(sys.stdin); ins=p.get('instances',[])
-print(len(ins), sum(i['status']=='provisioning' for i in ins), ' '.join(f\"{i['type']}={i['status']}\" for i in ins))")
-    read -r total busy states <<< "$snap"
+print(len(ins), sum(i['status']=='provisioning' for i in ins), sum(i['status']=='pending' for i in ins), ' '.join(f\"{i['type']}={i['status']}\" for i in ins))")
+    read -r total busy pending states <<< "$snap"
     [[ "$states" != "$last" ]] && { log "${states}"; last="$states"; }
-    (( total >= EXPECTED && busy == 0 )) && break
+    if (( total >= EXPECTED && busy == 0 )); then
+        # Built; give each container's firstboot (wiring + call-home) up to
+        # 10 min to finish before reporting.
+        (( pending == 0 || ${settle:=0} >= 60 )) && break
+        settle=$((settle + 1))
+    fi
     sleep 10
 done
 
