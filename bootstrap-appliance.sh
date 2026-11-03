@@ -156,6 +156,7 @@ if [[ ( "$REBOOT_NEEDED" == 1 || -n "${BOOTSTRAP_FORCE_RESUME_TEST:-}" ) && "$RE
         [[ -n "${CTRLABLE_PORTAL_PASSWORD:-}" ]] && printf 'export CTRLABLE_PORTAL_PASSWORD=%q\n' "$CTRLABLE_PORTAL_PASSWORD"
         [[ -n "$GITHUB_TOKEN" ]] && printf 'export GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
         [[ -n "${CTRLABLE_ADMIN_PASSWORD:-}" ]] && printf 'export CTRLABLE_ADMIN_PASSWORD=%q\n' "$CTRLABLE_ADMIN_PASSWORD"
+        true   # an unset last secret must not fail the block under set -e
       } > /var/lib/ctrlable-bootstrap/resume.env )
     cat > /var/lib/ctrlable-bootstrap/resume.sh <<'EOF'
 #!/bin/bash
