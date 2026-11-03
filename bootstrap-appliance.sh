@@ -312,7 +312,22 @@ print(json.dumps({'site_name':sys.argv[1],'release':sys.argv[2],'mqtt_host':sys.
     log "deploying project ${project} -- one service at a time, ~30-60 min"
 else
     project=$existing
-    log "release ${RELEASE} already has project ${project} -- not deploying again, reporting it"
+    # Re-run = converge: redeploy only what is not active, never what is.
+    body=$(python3 -c "
+import json,sys
+print(json.dumps({'site_name':sys.argv[1],'release':sys.argv[2],'mqtt_host':sys.argv[3],
+  'mqtt_port':int(sys.argv[4]),'mqtt_user':sys.argv[5],'mqtt_pass':sys.argv[6],
+  'zigbee_coordinator':'','zwave_coordinator':''}))" \
+        "$SITE_NAME" "$RELEASE" "$MQTT_HOST" "$MQTT_PORT" "$MQTT_USER" "$MQTT_PASS")
+    redo=$(api POST "/api/projects/$project/redeploy-missing" "$body" | python3 -c "
+import json,sys
+try: print(' '.join(json.load(sys.stdin).get('redeploying', [])))
+except Exception: print('?')")
+    if [[ -z "$redo" ]]; then
+        log "project ${project} already has every service of ${RELEASE} -- nothing to deploy"
+    else
+        log "project ${project}: redeploying ${redo}"
+    fi
 fi
 
 EXPECTED=$(pct exec 900 -- /opt/ctrlable-provisioner/.venv/bin/python -c "

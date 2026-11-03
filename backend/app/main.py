@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from .auth import auth_enabled, create_token, hash_password, require_auth, verify_password
 from .build import trigger_build
 from .config import get_settings
-from .deploy import deploy_instance, deploy_stack_async
+from .deploy import deploy_instance, deploy_stack_async, deploy_templates_async
 from .manifest import load_all_manifests
 from .lan import setup_lan_access
 from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
@@ -393,6 +393,35 @@ async def add_instance(project_id: int, req: AddInstanceRequest, _: str | None =
         deploy_instance(project_id, req.template_name, project["release"], req.wire_to, db, settings)
     )
     return {"status": "deploying", "template_name": req.template_name}
+
+
+@app.post("/api/projects/{project_id}/redeploy-missing", status_code=202)
+async def redeploy_missing(project_id: int, req: DeployStackRequest,
+                           _: str | None = Depends(require_auth)) -> dict:
+    """Redeploy every template of the project's release that has no active or
+    in-progress instance. Failed rows are removed first (and a half-created
+    guest destroyed), so re-running a deploy converges instead of duplicating."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(404)
+    manifest = load_all_manifests().get(project["release"])
+    if not manifest:
+        raise HTTPException(404, f"release {project['release']!r} not found")
+    instances = db.list_instances(project_id)
+    healthy = {i["type"] for i in instances if i["status"] in ("active", "provisioning", "pending")}
+    missing = [n for n in manifest.templates if n not in healthy]
+    for inst in instances:
+        if inst["type"] in missing and inst["status"] == "error":
+            if inst["vmid"] and settings.configured():
+                try:
+                    _provider().destroy(_ref(inst["vmid"], inst["kind"] or "lxc"))
+                except Exception:
+                    pass
+            db.delete_instance(inst["id"])
+    if missing:
+        asyncio.create_task(deploy_templates_async(
+            project_id, project["release"], missing, req.model_dump(), db, settings))
+    return {"redeploying": missing}
 
 
 @app.get("/api/projects")

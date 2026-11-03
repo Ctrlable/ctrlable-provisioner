@@ -23,6 +23,7 @@ Config file /etc/ctrlable/build.conf (JSON):
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -314,12 +315,74 @@ def script_url(ref: str, builder: str) -> str:
     return f"https://raw.githubusercontent.com/community-scripts/ProxmoxVE/{ref}/{builder}"
 
 
+CS_MAIN = "community-scripts/ProxmoxVE/main/"
+
+# PIN THE WHOLE CHAIN, not just the per-app wrapper.
+#
+# ct/<app>.sh at our ref sources build.func from ProxmoxVE/main/misc/, and
+# build.func, install.func and friends fetch every further piece from main/ as
+# literal URLs -- including install.func's own fetches INSIDE the container. On
+# 2026-10-31 upstream moved that engine to community-scripts/core and deleted
+# misc/ from main ("Drop the legacy engine copies from misc/"), so every pinned
+# script 404'd on its first line and then "succeeded" without creating anything.
+#
+# The wrappers below sit first on PATH for the community script. A request for
+# ProxmoxVE/main/... goes to ProxmoxVE/<ref>/... instead, and the same string is
+# rewritten inside what comes back -- so a file fetched from the ref points at
+# the ref for ITS fetches too, and install.func carries the ref into the
+# container in FUNCTIONS_FILE_PATH. Everything else passes through untouched.
+_CS_WRAPPER = r"""#!/bin/bash
+# ctrlable-build: pin community-scripts ProxmoxVE/main/ -> ProxmoxVE/@REF@/
+real=$(PATH="${PATH#*:}" command -v @TOOL@)
+pin=0; args=()
+for a in "$@"; do
+  if [[ "$a" == *community-scripts/ProxmoxVE/main/* ]]; then
+    a="${a//community-scripts\/ProxmoxVE\/main\//community-scripts/ProxmoxVE/@REF@/}"; pin=1
+  fi
+  args+=("$a")
+done
+[[ $pin == 1 ]] || exec "$real" "$@"
+out=""; prev=""
+for a in "${args[@]}"; do
+  case "$prev" in -o|-O|--output|--output-document) out="$a" ;; esac
+  case "$a" in --output=*|--output-document=*) out="${a#*=}" ;; esac
+  prev="$a"
+done
+rewrite() { sed 's#community-scripts/ProxmoxVE/main/#community-scripts/ProxmoxVE/@REF@/#g'; }
+if [[ -n "$out" && "$out" != "-" ]]; then
+  "$real" "${args[@]}" || exit $?
+  if [[ -f "$out" ]]; then  # portable in-place (no GNU/BSD sed -i difference)
+    t=$(mktemp); rewrite < "$out" > "$t" && cat "$t" > "$out"; rm -f "$t"
+  fi
+  exit 0
+fi
+set -o pipefail
+"$real" "${args[@]}" | rewrite
+"""
+
+
+def cs_pin_dir(ref: str) -> str:
+    """A temp dir holding curl/wget wrappers that pin ProxmoxVE/main/ to ref."""
+    d = tempfile.mkdtemp(prefix="ctrlable-cs-pin-")
+    for tool in ("curl", "wget"):
+        path = os.path.join(d, tool)
+        with open(path, "w") as fh:
+            fh.write(_CS_WRAPPER.replace("@REF@", ref).replace("@TOOL@", tool))
+        os.chmod(path, 0o755)
+    return d
+
+
+def pin_text(text: str, ref: str) -> str:
+    return text.replace(CS_MAIN, f"community-scripts/ProxmoxVE/{ref}/")
+
+
 def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
                firstboot_svc: str, firstboot_sh: str, conf: dict) -> int:
     ref     = manifest["community_scripts_ref"]
     builder = tmpl["builder"]
     vmid    = next_vmid()
     env     = build_env(tmpl, conf, vmid=vmid)
+    cts_before = list_ct_vmids()
 
     if builder.startswith("ctrlable/"):
         # Ctrlable-owned builder (no community-script) — bundled on the build host.
@@ -349,7 +412,9 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
         log(f"[{name}] pre-allocated vmid={vmid}")
         phase(4, "running community script")
         log(f"[{name}] running community script (METHOD=default)")
-        script = fetch_text(url)
+        script = pin_text(fetch_text(url), ref)
+        pin_dir = cs_pin_dir(ref)
+        env = {**env, "PATH": f"{pin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}"}
         # RUN FROM A FILE, NOT PIPED INTO `bash -s`.
         #
         # Piping puts the script text on stdin, so any `read` inside
@@ -376,6 +441,7 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         finally:
             os.unlink(script_path)
+            shutil.rmtree(pin_dir, ignore_errors=True)
         out = result.stdout.decode(errors="replace")
         # Spinner frames are one line each and drown the real messages; keep the
         # lines that carry information.
@@ -393,11 +459,17 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
         # taking max() across both adopted a freshly created VM during a full
         # stack deploy: the appliance VM had just taken vmid 100, so zwavejs ran
         # `pct start 100` against a QEMU guest and died with exit 255.
+        # ONLY a container that appeared during THIS run. Taking "the newest
+        # container" adopted whatever was built before: on 2026-11-03 freepbx's
+        # script 404'd, created nothing, and freepbx then claimed the Frigate CT
+        # built minutes earlier -- renamed it and overwrote its firstboot config.
         log(f"[{name}] WARNING: vmid={vmid} not found after script — detecting fallback")
-        candidates = list_ct_vmids() - {900}  # orchestrator excluded
+        candidates = list_ct_vmids() - cts_before - {900}  # orchestrator excluded
         if not candidates:
-            die(f"[{name}] community script created no container, and none exist to adopt")
-        vmid = max(candidates)
+            die(f"[{name}] community script created no container")
+        if len(candidates) > 1:
+            die(f"[{name}] community script created several containers {sorted(candidates)}; not guessing")
+        vmid = candidates.pop()
     log(f"[{name}] container vmid={vmid}")
 
     # Ensure running so we can exec/push into it

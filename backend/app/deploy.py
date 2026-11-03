@@ -184,6 +184,25 @@ async def deploy_instance(
     return dict(await asyncio.to_thread(db.get_instance_by_hostname, hostname))
 
 
+async def deploy_templates_async(
+    project_id: int,
+    release: str,
+    names: list[str],
+    shared_wire_to: dict,
+    db: "StateDB",
+    settings: "Settings",
+) -> None:
+    """Deploy just these templates of a release, with the same wiring a full
+    stack deploy gives them (incl. the provisioning key). Used to redeploy what
+    failed without touching what is running."""
+    shared = {**shared_wire_to, "provisioning_key": settings.provisioning_key}
+    for name in names:
+        try:
+            await deploy_instance(project_id, name, release, _wire_to_for(name, shared), db, settings)
+        except Exception as exc:
+            print(f"[deploy] {name} failed: {exc}", flush=True)
+
+
 async def deploy_stack_async(
     project_id: int,
     release: str,
