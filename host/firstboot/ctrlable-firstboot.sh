@@ -130,8 +130,6 @@ wire_zigbee2mqtt() {
     local wire_to="$1"
     local mqtt_host mqtt_port mqtt_user mqtt_pass coord_url
     mqtt_host=$(jget "$wire_to" "mqtt_host" "")
-    # No broker assigned: keep the builder's config. Writing an empty (or
-    # "localhost": there is no broker in this CT) host broke the service.
     # Zigbee2MQTT cannot start without a broker: left enabled it restart-looped
     # (290 restarts, a full core on a Pentium N3700). Park it until wired.
     if [[ -z "$mqtt_host" ]]; then
@@ -142,28 +140,37 @@ wire_zigbee2mqtt() {
     mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
-    coord_url=$(jget "$wire_to" "coordinator_url" "tcp://localhost:6638")
+    coord_url=$(jget "$wire_to" "coordinator_url" "")
 
-    local cfg_dir=/opt/zigbee2mqtt/data
-    mkdir -p "$cfg_dir"
+    local z2m=/opt/zigbee2mqtt
+    local cfg="${Z2M_CONFIG:-$z2m/data/configuration.yaml}"
+    [[ -f "$cfg" ]] || { log "z2m: $cfg missing (zigbee2mqtt not installed?)"; return 0; }
 
-    cat > "$cfg_dir/configuration.yaml" <<YAML
-homeassistant: false
-permit_join: false
-mqtt:
-  base_topic: zigbee2mqtt
-  server: 'mqtt://${mqtt_host}:${mqtt_port}'
-  user: '${mqtt_user}'
-  password: '${mqtt_pass}'
-serial:
-  port: '${coord_url}'
-advanced:
-  log_level: info
-frontend:
-  port: 8080
-YAML
+    # MERGE into the installed config. This used to rewrite the whole file:
+    # it replaced the serial port with a made-up tcp://localhost:6638, moved the
+    # frontend 9442 -> 8080, dropped the network-key settings, and wrote
+    # homeassistant: false -- so nothing appeared in Ctrlable Pro.
+    # Stop first: Zigbee2MQTT writes its config back on exit.
+    systemctl stop zigbee2mqtt 2>/dev/null || true
+    cp -a "$cfg" "$cfg.pre-wire" 2>/dev/null || true
+    CFG="$cfg" MQTT_HOST="$mqtt_host" MQTT_PORT="$mqtt_port" MQTT_USER="$mqtt_user" \
+    MQTT_PASS="$mqtt_pass" COORD="$coord_url" Z2M="$z2m" node <<'JS' || die "z2m: could not merge configuration"
+const fs = require("fs");
+const yaml = require(process.env.Z2M + "/node_modules/js-yaml");
+const p = process.env.CFG;
+const c = yaml.load(fs.readFileSync(p, "utf8")) || {};
+c.mqtt = Object.assign({}, c.mqtt, { server: `mqtt://${process.env.MQTT_HOST}:${process.env.MQTT_PORT}` });
+if (process.env.MQTT_USER) { c.mqtt.user = process.env.MQTT_USER; c.mqtt.password = process.env.MQTT_PASS; }
+else { delete c.mqtt.user; delete c.mqtt.password; }
+// MQTT discovery: devices AND groups appear as Ctrlable Pro entities.
+c.homeassistant = Object.assign({}, typeof c.homeassistant === "object" ? c.homeassistant : {}, { enabled: true });
+if (process.env.COORD) c.serial = Object.assign({}, c.serial, { port: process.env.COORD });
+const tmp = p + ".tmp";
+fs.writeFileSync(tmp, yaml.dump(c, { lineWidth: -1 }));
+fs.renameSync(tmp, p);
+JS
 
-    log "z2m config written to $cfg_dir/configuration.yaml"
+    log "z2m config merged into $cfg (broker ${mqtt_host}:${mqtt_port}, discovery on)"
     systemctl enable zigbee2mqtt 2>/dev/null || true
     systemctl restart zigbee2mqtt 2>/dev/null || true
 }
