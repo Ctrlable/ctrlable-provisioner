@@ -360,7 +360,9 @@ for id in $(qm list | awk 'NR>1{print $1}'); do
     qm config "$id" | grep -q '^onboot:' || qm set "$id" --onboot 1 >/dev/null 2>&1 || true
 done
 off=$( { pct list | awk 'NR>1{print $1}' | while read -r id; do pct config "$id" | grep -q '^onboot: 0' && echo "CT $id"; done
-         qm list | awk 'NR>1{print $1}' | while read -r id; do qm config "$id" | grep -q '^onboot: 0' && echo "VM $id"; done; } | paste -sd' ')
+         qm list | awk 'NR>1{print $1}' | while read -r id; do qm config "$id" | grep -q '^onboot: 0' && echo "VM $id"; done; } | paste -sd' ' -) || true
+# (^ the last grep not matching fails the pipeline; under pipefail + set -e
+#  that silently ended the run before its summary)
 ok "guests start on boot${off:+ (left off on purpose: $off)}"
 
 echo -e "\n${BOLD}=== Ctrlable appliance: ${SITE_NAME} (release ${RELEASE}) ===${NC}"
