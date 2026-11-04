@@ -132,7 +132,13 @@ wire_zigbee2mqtt() {
     mqtt_host=$(jget "$wire_to" "mqtt_host" "")
     # No broker assigned: keep the builder's config. Writing an empty (or
     # "localhost": there is no broker in this CT) host broke the service.
-    [[ -n "$mqtt_host" ]] || { log "no MQTT broker assigned -- leaving zigbee2mqtt as installed"; return 0; }
+    # Zigbee2MQTT cannot start without a broker: left enabled it restart-looped
+    # (290 restarts, a full core on a Pentium N3700). Park it until wired.
+    if [[ -z "$mqtt_host" ]]; then
+        log "no MQTT broker assigned -- zigbee2mqtt disabled until one is wired"
+        systemctl disable --now zigbee2mqtt 2>/dev/null || true
+        return 0
+    fi
     mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
@@ -158,6 +164,7 @@ frontend:
 YAML
 
     log "z2m config written to $cfg_dir/configuration.yaml"
+    systemctl enable zigbee2mqtt 2>/dev/null || true
     systemctl restart zigbee2mqtt 2>/dev/null || true
 }
 
