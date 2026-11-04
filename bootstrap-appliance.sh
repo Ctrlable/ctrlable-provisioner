@@ -350,10 +350,18 @@ print(len(ins), sum(i['status']=='provisioning' for i in ins), sum(i['status']==
 done
 
 # Everything must come back by itself after a power cut: the orchestrator is
-# created without onboot by install.sh, and community scripts differ.
-for id in $(pct list | awk 'NR>1{print $1}'); do pct set "$id" --onboot 1 >/dev/null 2>&1 || true; done
-for id in $(qm list | awk 'NR>1{print $1}'); do qm set "$id" --onboot 1 >/dev/null 2>&1 || true; done
-ok "every guest set to start on boot"
+# created without onboot by install.sh, and community scripts differ. Only
+# guests with NO onboot setting are changed -- an explicit "onboot: 0" is a
+# decision (e.g. Frigate parked on a small host) that a re-run must respect.
+for id in $(pct list | awk 'NR>1{print $1}'); do
+    pct config "$id" | grep -q '^onboot:' || pct set "$id" --onboot 1 >/dev/null 2>&1 || true
+done
+for id in $(qm list | awk 'NR>1{print $1}'); do
+    qm config "$id" | grep -q '^onboot:' || qm set "$id" --onboot 1 >/dev/null 2>&1 || true
+done
+off=$( { pct list | awk 'NR>1{print $1}' | while read -r id; do pct config "$id" | grep -q '^onboot: 0' && echo "CT $id"; done
+         qm list | awk 'NR>1{print $1}' | while read -r id; do qm config "$id" | grep -q '^onboot: 0' && echo "VM $id"; done; } | paste -sd' ')
+ok "guests start on boot${off:+ (left off on purpose: $off)}"
 
 echo -e "\n${BOLD}=== Ctrlable appliance: ${SITE_NAME} (release ${RELEASE}) ===${NC}"
 api GET "/api/projects/$project" | python3 -c "
