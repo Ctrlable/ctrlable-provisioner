@@ -25,6 +25,35 @@ print(d.get(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ''))
 " "$1" "$2" "${3:-}"
 }
 
+# fetch [--post JSON] URL [TIMEOUT] -- curl when present, else python3.
+# Not every container has curl (the dali-bridge and hardware-manager images
+# don't), and python3 is required here anyway; without this, firstboot in those
+# CTs failed every request and reported "could not reach orchestrator".
+fetch() {
+    local data=""
+    if [[ "${1:-}" == "--post" ]]; then data="$2"; shift 2; fi
+    local url="$1" timeout="${2:-20}"
+    if command -v curl >/dev/null 2>&1; then
+        if [[ -n "$data" ]]; then
+            curl -sf --max-time "$timeout" -X POST -H "Content-Type: application/json" -d "$data" "$url"
+        else
+            curl -sf --max-time "$timeout" "$url"
+        fi
+    else
+        python3 - "$url" "$timeout" "$data" <<'PY'
+import sys, urllib.request
+url, timeout, data = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+req = urllib.request.Request(url, data=data.encode() if data else None,
+                             headers={"Content-Type": "application/json"} if data else {})
+try:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        sys.stdout.write(r.read().decode())
+except Exception:
+    sys.exit(22)
+PY
+    fi
+}
+
 http_get() {
     # Retry GET with back-off, ~8 min in all: after a power cut every guest
     # boots at once and the orchestrator can take minutes to answer on a small
@@ -32,7 +61,7 @@ http_get() {
     local url="$1" attempt delay=5
     for attempt in $(seq 1 12); do
         local body
-        body=$(curl -sf --max-time 20 "$url" 2>/dev/null) && { printf '%s' "$body"; return 0; }
+        body=$(fetch "$url" 20 2>/dev/null) && { printf '%s' "$body"; return 0; }
         log "GET ${url%%secret=*} failed (attempt $attempt/12), retrying in ${delay}s"
         sleep "$delay"
         delay=$(( delay * 2 > 60 ? 60 : delay * 2 ))
@@ -44,8 +73,7 @@ http_post() {
     # POST JSON body; returns 0 on success.
     local url="$1" body="$2" attempt delay=5
     for attempt in $(seq 1 12); do
-        curl -sf --max-time 20 -X POST -H "Content-Type: application/json" -d "$body" "$url" \
-            >/dev/null 2>&1 && return 0
+        fetch --post "$body" "$url" 20 >/dev/null 2>&1 && return 0
         log "POST $url failed (attempt $attempt/12), retrying in ${delay}s"
         sleep "$delay"
         delay=$(( delay * 2 > 60 ? 60 : delay * 2 ))
@@ -57,8 +85,8 @@ wait_network() {
     log "waiting for network"
     local i
     for i in $(seq 1 30); do
-        if curl -sf --max-time 3 https://1.1.1.1 >/dev/null 2>&1 \
-            || curl -sf --max-time 3 http://1.1.1.1 >/dev/null 2>&1; then
+        if fetch https://1.1.1.1 3 >/dev/null 2>&1 \
+            || fetch http://1.1.1.1 3 >/dev/null 2>&1; then
             log "network up"
             return 0
         fi
@@ -79,6 +107,10 @@ reset_machine_id() {
     systemd-machine-id-setup
     # Symlink dbus machine-id to systemd's
     ln -sf /etc/machine-id /var/lib/dbus/machine-id
+    # journald files logs under the machine-id; without a restart it kept
+    # writing to the old id's directory and `journalctl` showed nothing at all
+    # for this unit -- every firstboot failure was invisible.
+    systemctl restart systemd-journald 2>/dev/null || true
 }
 
 regen_ssh_keys() {
@@ -301,11 +333,13 @@ main() {
     # Step 1: wait for LAN reachability
     wait_network
 
-    # Step 2: reset machine identity
-    reset_machine_id
-
-    # Step 3: regenerate SSH host keys
-    regen_ssh_keys
+    # Steps 2+3: give the guest its own identity -- ONCE. A re-run (re-applying
+    # wiring) must not hand the container a new machine-id and host keys.
+    if [[ ! -f /etc/ctrlable/.identity-reset ]]; then
+        reset_machine_id
+        regen_ssh_keys
+        touch /etc/ctrlable/.identity-reset
+    fi
 
     # Step 4: call home for service-wiring assignment
     local hostname
