@@ -82,18 +82,19 @@ http_post() {
 }
 
 wait_network() {
-    log "waiting for network"
+    # What firstboot needs is the ORCHESTRATOR, not the internet: checking
+    # 1.1.1.1 failed on LAN-only sites, and without curl (python urllib rejects
+    # https://1.1.1.1 on the certificate name) it always waited out the timeout.
+    log "waiting for the orchestrator"
     local i
-    for i in $(seq 1 30); do
-        if fetch https://1.1.1.1 3 >/dev/null 2>&1 \
-            || fetch http://1.1.1.1 3 >/dev/null 2>&1; then
-            log "network up"
+    for i in $(seq 1 60); do
+        if fetch "${orchestrator_url}/health" 3 >/dev/null 2>&1; then
+            log "orchestrator reachable"
             return 0
         fi
         sleep 2
     done
-    # Not a fatal error — orchestrator may be LAN-only
-    log "external network check timed out; continuing (orchestrator may be LAN-only)"
+    log "orchestrator not answering yet; continuing (requests below retry)"
 }
 
 # ---------------------------------------------------------------------------
@@ -282,7 +283,10 @@ wire_dali() {
     prov_key=$(jget "$wire_to" "provisioning_key" "")
 
     [[ -f "$cfg" ]] || { log "dali: $cfg missing (bridge not installed?)"; return 0; }
-    python3 - "$cfg" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_pass" "$prov_key" <<'PY'
+    # The bridge's own venv has PyYAML; the container's system python3 does not.
+    local py=/opt/dali-bridge/.venv/bin/python
+    [[ -x "$py" ]] || py=python3
+    "$py" - "$cfg" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_pass" "$prov_key" <<'PY'
 import sys, yaml
 path, host, port, user, pw, prov = sys.argv[1:7]
 d = yaml.safe_load(open(path)) or {}
