@@ -53,8 +53,12 @@ def _wire_to_for(template_name: str, shared: dict) -> dict:
     base = {
         k: shared[k]
         for k in ("mqtt_host", "mqtt_port", "mqtt_user", "mqtt_pass")
-        if shared.get(k) is not None
+        # "" means "not given": passed through, it was written into configs as
+        # an empty broker host (mqtt://:1883).
+        if shared.get(k) not in (None, "")
     }
+    if "mqtt_host" not in base:
+        base.pop("mqtt_port", None)
     if template_name == "zigbee2mqtt" and shared.get("zigbee_coordinator"):
         base["coordinator_url"] = shared["zigbee_coordinator"]
     if template_name == "zwavejs" and shared.get("zwave_coordinator"):

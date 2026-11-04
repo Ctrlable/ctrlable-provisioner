@@ -129,7 +129,10 @@ regen_ssh_keys() {
 wire_zigbee2mqtt() {
     local wire_to="$1"
     local mqtt_host mqtt_port mqtt_user mqtt_pass coord_url
-    mqtt_host=$(jget "$wire_to" "mqtt_host" "localhost")
+    mqtt_host=$(jget "$wire_to" "mqtt_host" "")
+    # No broker assigned: keep the builder's config. Writing an empty (or
+    # "localhost": there is no broker in this CT) host broke the service.
+    [[ -n "$mqtt_host" ]] || { log "no MQTT broker assigned -- leaving zigbee2mqtt as installed"; return 0; }
     mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
@@ -161,7 +164,10 @@ YAML
 wire_zwavejs() {
     local wire_to="$1"
     local mqtt_host mqtt_port mqtt_user mqtt_pass coord_url
-    mqtt_host=$(jget "$wire_to" "mqtt_host" "localhost")
+    mqtt_host=$(jget "$wire_to" "mqtt_host" "")
+    # No broker assigned: keep the builder's config. Writing an empty (or
+    # "localhost": there is no broker in this CT) host broke the service.
+    [[ -n "$mqtt_host" ]] || { log "no MQTT broker assigned -- leaving zwavejs as installed"; return 0; }
     mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
@@ -214,10 +220,14 @@ JSON
 wire_frigate() {
     local wire_to="$1"
     local mqtt_host mqtt_port mqtt_user mqtt_pass
-    mqtt_host=$(jget "$wire_to" "mqtt_host" "localhost")
+    mqtt_host=$(jget "$wire_to" "mqtt_host" "")
     mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
+
+    # No broker assigned: keep MQTT disabled (an empty host made Frigate log
+    # "Unable to connect to MQTT server: Invalid host" forever).
+    [[ -n "$mqtt_host" ]] || { log "no MQTT broker assigned -- frigate MQTT stays disabled"; return 0; }
 
     local cfg_dir="${FRIGATE_CONFIG_DIR:-/etc/frigate}"
     mkdir -p "$cfg_dir"
@@ -272,7 +282,7 @@ wire_dali() {
     # time (privileged CT + bind mounts); the base topic stays 'dali'.
     local wire_to="$1"
     local mqtt_host mqtt_port mqtt_user mqtt_pass prov_key cfg=/opt/dali-bridge/config.yaml
-    mqtt_host=$(jget "$wire_to" "mqtt_host" "localhost")
+    mqtt_host=$(jget "$wire_to" "mqtt_host" "")
     mqtt_port=$(jget "$wire_to" "mqtt_port" "1883")
     mqtt_user=$(jget "$wire_to" "mqtt_user" "")
     mqtt_pass=$(jget "$wire_to" "mqtt_pass" "")
@@ -290,15 +300,19 @@ wire_dali() {
 import sys, yaml
 path, host, port, user, pw, prov = sys.argv[1:7]
 d = yaml.safe_load(open(path)) or {}
-d.update({"mqtt_host": host, "mqtt_port": int(port),
-          "mqtt_username": user or None, "mqtt_password": pw or None,
-          "updates_enabled": True})
+d["updates_enabled"] = True
+# MQTT only when a broker is assigned; otherwise keep the builder's placeholder
+# (an empty host replaced it with ":1883").
+if host:
+    d.update({"mqtt_host": host, "mqtt_port": int(port),
+              "mqtt_username": user or None, "mqtt_password": pw or None})
 if prov:
     d["provisioning_key"] = prov
 yaml.safe_dump(d, open(path, "w"), default_flow_style=False, sort_keys=False)
 PY
     chmod 600 "$cfg" 2>/dev/null || true
-    log "dali: config.yaml pointed at ${mqtt_host}:${mqtt_port}"
+    if [[ -n "$mqtt_host" ]]; then log "dali: config.yaml pointed at ${mqtt_host}:${mqtt_port}"
+    else log "dali: no MQTT broker assigned -- placeholder kept; provisioning key applied"; fi
     systemctl restart dali-bridge 2>/dev/null || true
 }
 

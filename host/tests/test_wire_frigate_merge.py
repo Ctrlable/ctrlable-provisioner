@@ -84,6 +84,17 @@ def test_no_credentials_omits_user():
     assert "user" not in load(d)["mqtt"]
 
 
+def test_no_broker_leaves_config_untouched():
+    # The deploy used to pass mqtt_host "" when no broker was given; Frigate
+    # then logged "Invalid host" forever. No broker = keep MQTT disabled.
+    for wire in ({"mqtt_host": ""}, {}):
+        d = setup()
+        before = open(os.path.join(d, "config.yml")).read()
+        r = run_wire(d, wire)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert open(os.path.join(d, "config.yml")).read() == before, load(d).get("mqtt")
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in list(globals().items()):
