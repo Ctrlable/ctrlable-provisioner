@@ -10,9 +10,11 @@
 #     0.5.9 adds DT8 fixture colour ranges (config/tc_limits/set).
 #   - FreePBX uses a Ctrlable builder (Sangoma installer pinned, module
 #     refresh non-fatal) instead of ct/freepbx.sh.
-#   - community_scripts_ref is unchanged: zwavejs and zigbee2mqtt are the
-#     2026.08 combination. (Note build.func itself is always fetched from
-#     community-scripts main; see ctrlable-build build_env.)
+#   - community_scripts_ref is unchanged, but zwavejs and zigbee2mqtt are no
+#     longer the 2026.08 "9.x"/"1.x" wildcards: both are pinned exactly and
+#     zwavejs now DECLARES the Z-Wave JS schema Core needs (see its comment).
+#     (Note build.func itself is always fetched from community-scripts main;
+#     see ctrlable-build build_env.)
 release: "2026.11"
 community_scripts_ref: "2026-06-01"
 proxmox_min_version: "8.2"
@@ -41,7 +43,30 @@ templates:
   zwavejs:
     kind: lxc
     builder: ct/zwave-js-ui.sh
-    app_version: "9.x"
+    # EXACT, and verified against the Core THIS release ships. 2026.11's
+    # zwave_js_server client pins MIN == MAX == schema 51, so the server version
+    # is not a "upgrade when convenient" matter: off that number zwave_js does
+    # not load at all and every Z-Wave entity vanishes. Seen at Pinecrest
+    # 2026-11-06 — server 3.10.0 (maxSchemaVersion 50) -> zwave_js unloaded,
+    # which took the keymaster service-entrance lock down with it.
+    #
+    #   zwave-js-ui 11.25.2 -> @zwave-js/server ^3.11.0 -> maxSchemaVersion 51
+    #   (3.10.0 -> 50, rejected)
+    #
+    # The old value was "9.x": both floating AND two majors stale, because
+    # nothing reads app_version for this template (see below) so nobody ever
+    # bumped it.
+    #
+    # NOTE app_version is DOCUMENTATION here. ct/zwave-js-ui.sh is a community
+    # script and ctrlable-build passes it no version, so a fresh build installs
+    # whatever is latest. Pinning it lets the manifest answer "what SHOULD be
+    # installed" — which is what the compat monitor compares against — but it
+    # does not yet make provisioning deterministic. Enforcing it means passing a
+    # version into the script or owning the builder, as frigate and freepbx do.
+    app_version: "11.25.2"
+    requires:
+      zwave_js_server: ">=3.11.0"
+      zwave_js_api_schema: 51
     os:
       distro: debian
       version: "12"
@@ -53,7 +78,18 @@ templates:
   zigbee2mqtt:
     kind: lxc
     builder: ct/zigbee2mqtt.sh
-    app_version: "1.x"
+    # EXACT. The old "1.x" was not merely vague, it was WRONG about what this
+    # manifest produces: nothing passes app_version to the community script, so
+    # a fresh build today already installs 2.x. The manifest claimed a major
+    # version that has not been installed for some time.
+    #
+    # z2m 2.0 changed configuration.yaml (options removed and renamed, migration
+    # required). That boundary is why an in-place update must stay gated: the
+    # monitor may flag 1.x -> 2.x, but applying it rewrites a working site's
+    # config and that is a human's call, not a timer's.
+    app_version: "2.14.3"
+    requires:
+      gated_across: "2.0.0"
     os:
       distro: debian
       version: "12"
