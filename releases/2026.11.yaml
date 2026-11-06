@@ -6,7 +6,8 @@
 #     Pinecrest and Miami. The native 0.14 Frigate LXC and the separate
 #     docker-portainer LXC are gone.
 #   - ctrlable-pro OS 18.1 -> 18.3, hardware-manager 0.3.0 -> 0.4.1,
-#     dali-bridge -> 0.5.8 (and its builder now honours app_version).
+#     dali-bridge -> 0.5.9 (and its builder now honours app_version);
+#     0.5.9 adds DT8 fixture colour ranges (config/tc_limits/set).
 #   - FreePBX uses a Ctrlable builder (Sangoma installer pinned, module
 #     refresh non-fatal) instead of ct/freepbx.sh.
 #   - community_scripts_ref is unchanged: zwavejs and zigbee2mqtt are the
@@ -120,7 +121,7 @@ templates:
     # ctrlable-owned builder (no community-script) — bundled at host/builders/.
     builder: ctrlable/dali-bridge.sh
     # The tag the builder clones (v<app_version>).
-    app_version: "0.5.8"
+    app_version: "0.5.9"
     os:
       distro: debian
       version: "12"
