@@ -418,7 +418,149 @@ button belongs to the version endpoint, not here.
 
 ---
 
-## 17. Milestones
+## 17. Appliance reporter add-on
+
+### 17.1 Why — the compatibility fact is split across two machines
+
+Neither side currently holds both halves of the question § 16 exists to answer:
+
+| | knows | does not know |
+|---|---|---|
+| appliance | what Core DEMANDS | what is actually running on the radios |
+| provisioner | what is RUNNING | what this appliance's Core demands |
+| manifest | a hand-copied `51` | whether that is still true |
+
+`requires.zwave_js_api_schema: 51` was read off Core once, by a human, and
+written down. It is correct today and silently wrong the day Core moves to 52
+— the same "nobody noticed the number changed" failure as the outage itself,
+one level up.
+
+It does not have to be maintained, because **the appliance can report it**.
+The constant ships in the `zwave-js-server-python` library that
+`homeassistant/components/zwave_js/manifest.json` already requires, so it is
+installed on every appliance. Read live from Pinecrest, 2026-11-07:
+
+```
+MIN_SERVER_SCHEMA_VERSION: 51
+MAX_SERVER_SCHEMA_VERSION: 51      # equal — an equality, not a floor
+```
+
+An add-on turns `requires` from something we maintain into something we
+observe. That is the point of it; the UI is a bonus.
+
+### 17.2 Boundary: a reporter and a trigger, NEVER an actor
+
+The add-on has no Proxmox token, no host access and no ability to change a
+guest. It reports, it displays, and it ASKS. Every privileged action — the
+snapshot, the apply, the gate (§ 16.5) — stays in the provisioner.
+
+This is not only least-privilege hygiene. It is what makes the add-on
+acceptable in the Home Assistant UI at all. § 16.8 rules that infrastructure
+updates do not belong in the end-customer's interface, because a homeowner
+clicking "update Z-Wave" takes their own locks offline. An add-on that only
+REQUESTS does not put that button in the HA UI: the decision still happens in
+a dealer-facing surface that owns the gating. Visibility moves to where the
+dealer already is; authority does not move at all.
+
+### 17.3 What it reports
+
+A single document, pushed on change and on a slow heartbeat. The add-on is
+the only thing that can observe most of this:
+
+```jsonc
+{
+  "appliance_id":   "<machine id>",
+  "core_version":   "2026.11.0",
+  "requires": {                      // OBSERVED, not configured
+    "zwave_js_api_schema": {"min": 51, "max": 51}
+  },
+  "integrations": [                  // WHICH instance is actually live
+    {"domain": "zwave_js",       "endpoint": "ws://10.1.8.14:3000", "loaded": true},
+    {"domain": "ctrlable_zigbee", "transport": "mqtt", "loaded": true}
+  ],
+  "addons": [                        // including STOPPED ones, and said so
+    {"slug": "45df7312_zigbee2mqtt", "version": "2.12.1-1", "state": "stopped"}
+  ]
+}
+```
+
+`integrations[].endpoint` is the field that matters most and the one nothing
+else can supply. On 2026-11-07 this appliance ran a STOPPED Zigbee2MQTT
+add-on at 2.12.1-1 beside a live instance at 2.14.3, and a Z-Wave JS add-on
+that Core does not use at all — its `zwave_js` entry points at an LXC. A
+survey that trusted the add-on list would have reported drift that did not
+exist and missed the component that was actually broken. The appliance is the
+only party that knows which instance Core is talking to.
+
+`addons[]` is reported WITH state, never filtered. A stopped add-on is a fact
+about the site, not noise — see § 17.6.
+
+### 17.4 Direction, discovery and trust
+
+- **The appliance initiates.** It sits behind the site's NAT, it is the party
+  that knows when its own Core changed, and an outbound call needs no inbound
+  path. The provisioner never dials the appliance.
+- **Discovery is configured, with a fallback.** The provisioner's address is
+  set at deploy time, because the appliance is deployed BY the provisioner and
+  the value is known then. mDNS is a convenience for a re-homed appliance, not
+  the primary path — a monitoring channel that depends on multicast is a
+  monitoring channel that disappears on a VLAN boundary.
+- **Trust is per-appliance and issued, not shared.** The firstboot secret
+  (§ 7) is per-release and proves "you are one of this release's guests",
+  which is the wrong grain: a reporter speaks for ONE appliance for its whole
+  life. Issue a token when the instance is created.
+- **Reports are data, never instructions.** A report sets no versions and
+  starts no actions; the provisioner compares it against the manifest and
+  decides. A compromised appliance can lie about itself and nothing else.
+
+### 17.5 What the dealer sees
+
+The provisioner's drift row, rendered in the add-on's ingress panel, with the
+three columns that mean three different things:
+
+```
+zwavejs      live 11.25.2   pinned 11.25.2   upstream 11.25.2   schema 51   OK
+zigbee2mqtt  live  2.14.3   pinned  2.14.3   upstream  2.14.3               OK
+```
+
+*is it working* / *is it what we intended* / *has the world moved*. An
+"Update" button posts a request; the provisioner applies the § 16.5 rules and
+may refuse (gated crossing, build in flight, no snapshot).
+
+### 17.6 What this replaces
+
+Today the appliance carries Z-Wave JS UI and Zigbee2MQTT add-ons installed
+but STOPPED, as version beacons: Supervisor tracks `version` vs
+`version_latest` for any installed add-on, so a stopped one still surfaces
+"update available" in the HA UI. It is a reasonable hack and was the only
+signal available.
+
+It answers a different question from the one that matters. The beacon
+compares the ADD-ON's frozen version against upstream's latest; it never
+looks at the running instance. On 2026-11-07 it would have reported "Z-Wave
+JS: update available" — true, and equally true for months — while the actual
+fault was that the LIVE server's schema had become incompatible with Core.
+Updating the add-on would not have fixed it, and the fix did not change the
+beacon.
+
+So the beacon can be retired once this ships, and `addons[]` keeps reporting
+it in the meantime: a stopped add-on at 2.12.1-1 beside a live 2.14.3 is
+exactly the kind of thing a dealer should be able to see.
+
+### 17.7 Non-goals
+
+- **Not an actor.** § 17.2. No Proxmox access, no guest changes, no applying
+  its own updates.
+- **Not the gate.** The provisioner enforces `gated_across` and snapshots;
+  the add-on cannot override either, and a request is not an authorization.
+- **Not required.** Drift must still work for an appliance without it, using
+  the manifest's declared `requires`. The add-on makes the requirement
+  observed instead of maintained; it does not become a dependency for
+  monitoring to function at all.
+
+---
+
+## 18. Milestones
 
 0. **Bootstrap installer** — `install.sh` creates the orchestrator LXC on a bare PVE host one-shot.
 1. **Manifest + state DB** — schema, loader, validation. ✓
@@ -432,10 +574,11 @@ button belongs to the version endpoint, not here.
 9. **Drift monitor** (§ 16) — probe + compare against manifest pins, surfaced in the UI.
 10. **Apply + updater refresh** (§ 16.4–16.5) — gated, snapshot-first, verified by capability.
 11. **Provisioner self-update** (§ 16.6) — staged, rollback-capable, reported on the heartbeat.
+12. **Appliance reporter add-on** (§ 17) — observed `requires`, live endpoints, drift panel, apply requests.
 
 ---
 
-## 18. Open decisions
+## 19. Open decisions
 
 - **Frigate placement:** separate LXC vs. folded into `docker-portainer`
 - **FreePBX kind:** LXC (default) vs. VM for stronger isolation
@@ -444,3 +587,4 @@ button belongs to the version endpoint, not here.
 - **Update-time script freshness** (§ 16.4): always track upstream, or pin and accept that upstream's fixes never reach existing guests?
 - **Probe transport:** `pct exec` from the orchestrator (simple, needs host trigger for LXC) vs. an agent inside each guest (no trigger, one more thing to keep alive).
 - **Who owns `requires` assertions** that need a live protocol handshake, like the Z-Wave schema read — the orchestrator, or the component's own health endpoint?
+- **Reporter token lifecycle** (§ 17.4): issued at instance creation — but what re-issues it after a restore-from-backup, which brings back an appliance's identity along with a token that may have been revoked?
