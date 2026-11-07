@@ -259,7 +259,166 @@ ctrlable-provisioner/
 
 ---
 
-## 16. Milestones
+## 16. Component drift and self-update
+
+### 16.1 Why
+
+2026-11-07, Pinecrest. `zwave_js` had been unloaded for over a day, taking the
+keymaster service-entrance lock with it. Three separate things had to be true:
+
+1. Core 2026.11 pins `zwave_js_server` MIN == MAX == schema 51. Server 3.10.0
+   advertises 50, so the integration does not load at all — there is no
+   degraded mode. **Being behind is as breaking as being ahead.**
+2. This manifest already knew the answer. § 4 pinned `11.25.2` and declared
+   `requires.zwave_js_api_schema: 51`, naming Pinecrest and the keymaster lock
+   in the comment. **Nothing ever compared that to what was running.**
+3. The dealer's manual update failed, and would have failed forever: the
+   `ct/zwave-js-ui.sh` copy INSIDE the container was months old and built its
+   download URL by stripping the `v` off the tag. GitHub 404s, `wget &>
+   /dev/null` swallows it, and the trap prints `exit code 0`. Upstream had
+   already fixed this — current community scripts glob the asset via
+   `fetch_and_deploy_gh_release` instead of reconstructing the filename — but
+   **nothing refreshes the updater inside a container that already exists.**
+
+The outage was found by a human noticing dead locks. Every site is exposed to
+the same class of failure on every core release that moves a pinned schema.
+
+### 16.2 Three capabilities, deliberately separate
+
+| | What it answers | Where it runs | Failure if absent |
+|---|---|---|---|
+| **Probe** | what version is actually installed | orchestrator → `pct exec` | we only know intent, never reality |
+| **Drift** | installed vs manifest pin and `requires` | orchestrator, on a timer | a site is broken and nobody knows |
+| **Apply** | bring a guest to the pinned version | orchestrator → guest | we can see the problem and not fix it |
+
+Keep them separate. Probe is read-only and safe to run often; apply restarts a
+service a live site depends on and is never automatic (§ 16.5).
+
+### 16.3 Probe: declared, not coded
+
+Each template declares how to read its installed version, so adding a
+component is a manifest edit rather than a code change:
+
+```yaml
+  zwavejs:
+    app_version: "11.25.2"
+    version_probe:
+      kind: exec                       # exec | file | http
+      command: "/opt/zwave-js-ui/zwave-js-ui-linux --version"
+      parse: '([0-9]+\.[0-9]+\.[0-9]+)'
+    requires:
+      zwave_js_server: ">=3.11.0"
+      zwave_js_api_schema: 51
+```
+
+`requires` keys are **capability assertions, not version strings**, and are
+checked against the live service where one exposes them. For `zwavejs` the
+schema is authoritative and the version is a proxy: connect to the Z-Wave JS
+websocket and read `maxSchemaVersion` off the server's first frame. That is
+the number Core actually rejects on, so it is the number to assert. A site can
+be on the right version and still wrong (wrong binary, failed restart); the
+schema probe catches that, a version string does not.
+
+### 16.4 Refresh the updater — the part that actually bit us
+
+A container carries the update script it was born with, forever. Before any
+apply, re-fetch the component's current community script. This is also the
+answer to "do we own the builders?": **no.** Upstream fixed the URL bug
+structurally and maintains it for free (§ 16.7); what we were missing was
+freshness, not ownership.
+
+Two freshness questions, often confused, with different answers:
+
+- **Build time** — which ct script a NEW guest is built from. Governed by
+  `community_scripts_ref`. Pinned for reproducibility.
+- **Update time** — which update script an EXISTING guest still carries.
+  Governed by nothing today. Should track upstream, because that is where
+  upstream's fixes live.
+
+Note the standing hazard: pinned ct scripts fetch `build.func` from `main`
+(§ 4). That mismatch is what broke every pinned script on 2026-10-31 when
+`misc/` was deleted. Pinning is not free either.
+
+### 16.5 Apply: gated by default
+
+- **Dealer-initiated.** Surfaced as a row with a button, never a timer.
+- **Gated crossings stay gated.** `gated_across: "2.0.0"` on `zigbee2mqtt`
+  exists because crossing z2m 2.0 rewrites a working site's configuration.
+  The monitor may flag it; applying it is a human's decision.
+- **Snapshot first.** `POST .../snapshot` before apply, named for the drift
+  row, so rollback is one call.
+- **Verify after, by capability.** Re-run the probe AND the `requires`
+  assertion. "The service started" is not success; "the schema is 51" is.
+
+### 16.6 Provisioner self-update
+
+The orchestrator is the one component that can update itself, and the only one
+whose failure is silent — a stalled orchestrator keeps answering `/health`
+while reporting drift for nobody.
+
+- Poll a Ctrlable release channel for a provisioner version, not the fleet's
+  component manifest. **Separate cadence from the appliance release.**
+- Stage, verify, switch, and keep the previous version for one-command
+  rollback. Never update while a build or apply is in flight.
+- Report `provisioner_version` on the existing 60 s heartbeat (§ platform), so
+  the portal can see a host that has stopped updating. A host that never
+  checks in is the failure this is meant to catch; the heartbeat is the only
+  thing that can distinguish "no drift" from "nothing is looking".
+
+### 16.7 Three classes of component, three update paths
+
+The catalog is NOT uniform, and a single "update" button would be wrong for
+it. Of seven templates, only two run community `ct/` scripts:
+
+| Class | Templates | Who fixes a broken installer | Update path |
+|---|---|---|---|
+| **Community `ct/`** | `zwavejs`, `zigbee2mqtt` | upstream, for free | refresh the in-guest updater (§ 16.4), then run it |
+| **Ctrlable builder, third-party app** | `frigate`, `freepbx` | us — we already own these | re-run our builder at the pinned version |
+| **Ctrlable product** | `hardware-manager`, `dali-bridge` | us | our own release channel, same cadence as the Store |
+| **Appliance image** | `ctrlable-pro` | us | not a builder re-run at all — a new OS/Core image via rebrand-tools, offered through the version endpoint (§ 8) |
+
+This matters for drift in two ways:
+
+- **Only the community class has the stale-updater problem.** Our builders are
+  fetched fresh from this repo at apply time, so they cannot carry a
+  months-old bug the way a container-resident `ct/` script can. § 16.4 is
+  scoped to `zwavejs` and `zigbee2mqtt`.
+- **Only the community class floats at build time.** Our builders already take
+  an explicit version, so `app_version` is enforced for five of seven
+  templates today. The two that document rather than enforce it are exactly
+  the two running community scripts — which is why `zwavejs` drifted two
+  majors stale without anyone noticing.
+
+A Ctrlable product being behind is also a different severity from a
+third-party one: we control when it ships, so drift there means our own
+release never landed, not that upstream moved.
+
+`ctrlable-pro` is listed for completeness but is governed by § 8, not by this
+section: it updates by being offered a new image, and the appliance decides.
+Its drift row is still worth showing beside the others — "this site is three
+Core releases behind" is the same question a dealer is asking — but the apply
+button belongs to the version endpoint, not here.
+
+### 16.8 Non-goals
+
+- **Not in the Ctrlable Pro UI.** These guests are siblings of the HAOS VM,
+  not something Home Assistant owns. Infrastructure updates belong in a
+  dealer-facing surface; a homeowner clicking "update Z-Wave" takes their own
+  locks offline.
+- **Not owning the two remaining community builders.** `frigate`, `freepbx`,
+  `hardware-manager` and `dali-bridge` already have Ctrlable builders; this
+  says nothing about them. It says we should NOT take over
+  `ct/zwave-js-ui.sh` and `ct/zigbee2mqtt.sh`: upstream maintains them for
+  free and fixed this exact URL bug structurally (globbing the release asset
+  instead of reconstructing its filename). Taking them on means owning that
+  forever to buy nothing. If `app_version` must be enforced for those two, the
+  cheaper lever is rewriting the `"latest"` argument in the fetched script via
+  the existing `ctrlable-build` fetch wrappers — one token, not a builder.
+- **Not automatic for gated crossings.** § 16.5.
+
+---
+
+## 17. Milestones
 
 0. **Bootstrap installer** — `install.sh` creates the orchestrator LXC on a bare PVE host one-shot.
 1. **Manifest + state DB** — schema, loader, validation. ✓
@@ -270,12 +429,18 @@ ctrlable-provisioner/
 6. **HAOS flow** — clone + onboarding + base-backup restore + platform enrollment.
 7. **Full UI** — deploy wizard, add-instance, releases tab, lifecycle controls.
 8. **Platform report-up** — installed release + instances in central management platform.
+9. **Drift monitor** (§ 16) — probe + compare against manifest pins, surfaced in the UI.
+10. **Apply + updater refresh** (§ 16.4–16.5) — gated, snapshot-first, verified by capability.
+11. **Provisioner self-update** (§ 16.6) — staged, rollback-capable, reported on the heartbeat.
 
 ---
 
-## 17. Open decisions
+## 18. Open decisions
 
 - **Frigate placement:** separate LXC vs. folded into `docker-portainer`
 - **FreePBX kind:** LXC (default) vs. VM for stronger isolation
 - **HAOS instance UUID:** regenerate per site vs. accept restored base UUID
 - **Single host vs. cluster:** spec assumes single-node; cluster needs a pass on `{node}` resolution
+- **Update-time script freshness** (§ 16.4): always track upstream, or pin and accept that upstream's fixes never reach existing guests?
+- **Probe transport:** `pct exec` from the orchestrator (simple, needs host trigger for LXC) vs. an agent inside each guest (no trigger, one more thing to keep alive).
+- **Who owns `requires` assertions** that need a live protocol handshake, like the Z-Wave schema read — the orchestrator, or the component's own health endpoint?
