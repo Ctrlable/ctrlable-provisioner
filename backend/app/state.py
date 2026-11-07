@@ -94,6 +94,15 @@ class StateDB:
                 # show while it works — and a failed deploy leaves a visible row
                 # instead of vanishing.
                 "ALTER TABLE instances ADD COLUMN phase_index INTEGER NOT NULL DEFAULT 0",
+                # § 16 probes need to REACH the guest. The Proxmox config
+                # answers for a static address; under DHCP it only declares
+                # intent, so the guest reports what it actually bound at first
+                # boot. Provenance is stored beside it because a drift row
+                # that cannot say HOW it reached the guest is one you cannot
+                # trust — "probed OK" against a stale lease looks identical to
+                # a real pass.
+                "ALTER TABLE instances ADD COLUMN reported_ip TEXT",
+                "ALTER TABLE instances ADD COLUMN reported_ip_at TEXT",
                 "ALTER TABLE instances ADD COLUMN phase_total INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE instances ADD COLUMN phase_label TEXT",
                 "ALTER TABLE instances ADD COLUMN deploy_log TEXT",
@@ -235,6 +244,15 @@ class StateDB:
                  json.dumps(wire_to) if wire_to else None, kind, _now()),
             )
             return cur.lastrowid
+
+    def set_reported_ip(self, hostname: str, ip: str) -> None:
+        """Record the address a guest reported at first boot (§ 16 addressing)."""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE instances SET reported_ip = ?, reported_ip_at = ? "
+                "WHERE hostname = ?",
+                (ip, _now(), hostname),
+            )
 
     def set_instance_status(self, hostname: str, status: str) -> None:
         activated_at = _now() if status == "active" else None

@@ -37,7 +37,8 @@ def get_assignment(db: StateDB, hostname: str, secret: str) -> dict:
     }
 
 
-def complete_provisioning(db: StateDB, hostname: str, secret: str) -> None:
+def complete_provisioning(db: StateDB, hostname: str, secret: str,
+                          reported_ip: str | None = None) -> None:
     inst = db.get_instance_by_hostname(hostname)
     if not inst:
         raise LookupError(f"unknown hostname: {hostname!r}")
@@ -47,5 +48,17 @@ def complete_provisioning(db: StateDB, hostname: str, secret: str) -> None:
 
     if not release or release["firstboot_secret"] != secret:
         raise PermissionError("invalid firstboot secret")
+
+    # Optional, and deliberately not fatal: an older firstboot script sends
+    # no address, and refusing its completion over a field § 16 wants would
+    # break provisioning to improve monitoring. Validated rather than
+    # trusted — a guest that resolved its own hostname to loopback would
+    # otherwise have us probe the orchestrator and report its services as
+    # the guest's.
+    if reported_ip:
+        from .addressing import from_reported
+        addr = from_reported(reported_ip)
+        if addr:
+            db.set_reported_ip(hostname, addr.ip)
 
     db.set_instance_status(hostname, "active")
