@@ -42,10 +42,26 @@ class Requires(BaseModel):
     gated_across: str | None = None
 
 
+class VersionProbe(BaseModel):
+    """How to read a template's INSTALLED version, declared so adding a
+    component is a manifest edit, not a code change (SPEC § 16.3).
+
+    `kind: exec` runs `command` inside the guest and pulls the version out of
+    its output with `parse` (first capture group, or the whole match). The exec
+    transport is the open § 18 question and is injected into the scanner; until
+    it is wired, a declared-but-unreachable probe reports UNKNOWN, never a guess.
+    """
+
+    kind: Literal["exec", "file", "http"] = "exec"
+    command: str
+    parse: str = r"([0-9]+\.[0-9]+\.[0-9]+)"
+
+
 class TemplateSpec(BaseModel):
     kind: Literal["lxc", "vm"]
     builder: str
     app_version: str | None = None
+    version_probe: VersionProbe | None = None
     requires: Requires | None = None
     haos_version: str | None = None
     rebrand: bool = False

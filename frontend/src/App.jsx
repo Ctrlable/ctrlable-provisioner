@@ -567,6 +567,88 @@ function InstanceRow({ inst, onDelete }) {
   )
 }
 
+// Severity -> colour. OUTAGE: the site is broken now. DRIFT: wrong version,
+// still working. UNKNOWN: a dimension we could not reach (NOT healthy). OK: all
+// probed dimensions match the manifest.
+const SEV_COLOR = { OUTAGE: '#ef4444', DRIFT: '#f59e0b', UNKNOWN: '#64748b', OK: '#22c55e' }
+
+function SevBadge({ sev }) {
+  return (
+    <span className="tag" style={{
+      background: (SEV_COLOR[sev] ?? '#64748b') + '22',
+      color: SEV_COLOR[sev] ?? '#64748b',
+      border: `1px solid ${(SEV_COLOR[sev] ?? '#64748b')}66`,
+    }}>{sev}</span>
+  )
+}
+
+// SPEC § 17.5: three columns that mean three different things —
+// live (is it working) / pinned (is it what we intended) / schema (the number
+// Core actually rejects on). A capability we could not read shows "—", never OK.
+function DriftPanel({ projectId }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [open, setOpen] = useState(false)
+
+  const check = async () => {
+    setLoading(true); setOpen(true)
+    try {
+      const res = await apiFetch(`/api/projects/${projectId}/drift`)
+      setData(await res.json())
+    } catch { setData({ error: 'could not reach the orchestrator' }) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="drift-panel">
+      <div className="drift-panel-head">
+        <button className="btn-xs" onClick={check} disabled={loading}>
+          {loading ? 'Checking…' : (open ? 'Re-check drift' : 'Check drift')}
+        </button>
+        {data && !data.error && <SevBadge sev={data.severity} />}
+        {data && !data.manifest_present &&
+          <span className="small muted">no manifest for {data.release}</span>}
+      </div>
+      {open && data && (data.error
+        ? <p className="small" style={{ color: SEV_COLOR.OUTAGE }}>{data.error}</p>
+        : (
+          <table className="drift-table">
+            <thead>
+              <tr><th></th><th>component</th><th>live</th><th>pinned</th>
+                  <th>schema</th><th>where</th><th>detail</th></tr>
+            </thead>
+            <tbody>
+              {data.rows.map(r => (
+                <tr key={r.instance_id}>
+                  <td><SevBadge sev={r.severity} /></td>
+                  <td className="mono">{r.template}</td>
+                  <td className="mono">{r.live_version || '—'}</td>
+                  <td className="mono">{r.pinned_version || '—'}</td>
+                  <td className="mono">
+                    {r.schema_required == null ? '—'
+                      : `${r.schema_live == null ? '?' : r.schema_live}/${r.schema_required}`}
+                  </td>
+                  <td className="small muted">
+                    {r.address ? `${r.address}` : '—'}
+                    {r.address_source && r.address !== null
+                      ? <span className="muted"> ({r.address_source})</span> : null}
+                  </td>
+                  <td className="small">
+                    {r.findings.length === 0
+                      ? <span className="muted">matches manifest</span>
+                      : r.findings.map((f, i) => (
+                          <div key={i} style={{ color: SEV_COLOR[f.severity] }}>{f.detail}</div>
+                        ))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ))}
+    </div>
+  )
+}
+
 function DeployTab({ releases }) {
   const [form, setForm]           = useState({ ...EMPTY_FORM, release: releases[0]?.release ?? '' })
   const [deploying, setDeploying] = useState(false)
@@ -658,6 +740,7 @@ function DeployTab({ releases }) {
               {p.instances.length === 0
                 ? <p className="empty small muted">No instances yet — deploy is running or failed.</p>
                 : p.instances.map(i => <InstanceRow key={i.id} inst={i} onDelete={inst => deleteInstance(p.id, inst)} />)}
+              {p.instances.length > 0 && <DriftPanel projectId={p.id} />}
             </div>
           ))}
         </section>

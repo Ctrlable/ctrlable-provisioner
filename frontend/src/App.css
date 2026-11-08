@@ -171,3 +171,11 @@ body { background: var(--bg); color: var(--text); font-family: system-ui, -apple
   .host-health { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr; }
 }
+
+/* Drift panel (SPEC § 16/§17.5) — surfaced per project card */
+.drift-panel { margin-top: .6rem; border-top: 1px solid var(--border, #1f2937); padding-top: .5rem; }
+.drift-panel-head { display: flex; align-items: center; gap: .5rem; }
+.drift-table { width: 100%; border-collapse: collapse; margin-top: .5rem; font-size: .82rem; }
+.drift-table th { text-align: left; font-weight: 600; opacity: .6; padding: .2rem .5rem; }
+.drift-table td { padding: .3rem .5rem; vertical-align: top; border-top: 1px solid var(--border, #1f2937); }
+.drift-table .mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

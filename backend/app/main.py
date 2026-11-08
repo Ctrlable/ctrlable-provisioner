@@ -15,6 +15,8 @@ from .auth import auth_enabled, create_token, hash_password, require_auth, verif
 from .build import trigger_build
 from .config import get_settings
 from .deploy import deploy_instance, deploy_stack_async, deploy_templates_async
+from .drift import Severity
+from .drift_scan import scan_project
 from .manifest import load_all_manifests
 from .lan import setup_lan_access
 from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
@@ -440,6 +442,42 @@ def get_project_api(project_id: int, _: str | None = Depends(require_auth)) -> d
         raise HTTPException(404)
     instances = db.list_instances(project["id"])
     return {**dict(project), "instances": [dict(i) for i in instances]}
+
+
+@app.get("/api/projects/{project_id}/drift")
+def project_drift_api(project_id: int, _: str | None = Depends(require_auth)) -> dict:
+    """Compare every instance against its release manifest (SPEC § 16, M9).
+
+    Read-only: it resolves each guest's address, reads the Z-Wave JS schema off
+    the live websocket, compares against the manifest pins and `requires`, and
+    returns a row per instance. The version dimension needs an in-guest exec
+    transport that is not wired to the restricted host key yet (§ 18), so it is
+    left unconfigured here and reports UNKNOWN rather than a false OK."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(404)
+
+    manifests = load_all_manifests()
+    manifest = manifests.get(project["release"])
+    specs = manifest.templates if manifest else {}
+    instances = db.list_instances(project_id)
+
+    get_config = None
+    if settings.configured():
+        provider = _provider()
+
+        def get_config(vmid: int, kind: str) -> dict:  # noqa: F811
+            return provider.get_config(_ref(vmid, kind))
+
+    rows = scan_project(instances, specs, get_config=get_config)
+    worst = max((Severity[r.severity] for r in rows), default=Severity.OK)
+    return {
+        "project_id": project_id,
+        "release": project["release"],
+        "manifest_present": manifest is not None,
+        "severity": worst.name,
+        "rows": [r.to_dict() for r in rows],
+    }
 
 
 @app.delete("/api/projects/{project_id}/instances/{instance_id}", status_code=204)

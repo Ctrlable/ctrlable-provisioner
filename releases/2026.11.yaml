@@ -64,6 +64,10 @@ templates:
     # does not yet make provisioning deterministic. Enforcing it means passing a
     # version into the script or owning the builder, as frigate and freepbx do.
     app_version: "11.25.2"
+    version_probe:
+      kind: exec
+      command: "/opt/zwave-js-ui/zwave-js-ui-linux --version"
+      parse: '([0-9]+\.[0-9]+\.[0-9]+)'
     requires:
       zwave_js_server: ">=3.11.0"
       zwave_js_api_schema: 51
@@ -88,6 +92,10 @@ templates:
     # monitor may flag 1.x -> 2.x, but applying it rewrites a working site's
     # config and that is a human's call, not a timer's.
     app_version: "2.14.3"
+    version_probe:
+      kind: exec
+      command: "cat /opt/zigbee2mqtt/package.json"
+      parse: '"version"\s*:\s*"([0-9]+\.[0-9]+\.[0-9]+)"'
     requires:
       gated_across: "2.0.0"
     os:

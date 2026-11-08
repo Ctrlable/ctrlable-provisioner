@@ -571,7 +571,16 @@ exactly the kind of thing a dealer should be able to see.
 6. **HAOS flow** — clone + onboarding + base-backup restore + platform enrollment.
 7. **Full UI** — deploy wizard, add-instance, releases tab, lifecycle controls.
 8. **Platform report-up** — installed release + instances in central management platform.
-9. **Drift monitor** (§ 16) — probe + compare against manifest pins, surfaced in the UI.
+9. **Drift monitor** (§ 16) — probe + compare against manifest pins, surfaced in the UI. ✓
+   `drift_scan.scan_project` joins `drift.evaluate` + `addressing.resolve` across a
+   project's instances; `GET /api/projects/{id}/drift` returns a row each (severity,
+   live/pinned/schema, where), rendered as the § 17.5 panel per project card. The
+   **schema** capability — the one that unloaded `zwave_js` — is read live over TCP
+   and fully determinable. The **version** dimension needs an in-guest exec transport
+   (`version_probe`, kind: exec) that is NOT wired to the restricted host key yet
+   (§ 18), so it is injected into the scanner and reports UNKNOWN rather than a false
+   OK until M10 lands it. Transport is injected, so the scan is tested with no PVE
+   host and no live socket (`tests/test_drift_scan.py`).
 10. **Apply + updater refresh** (§ 16.4–16.5) — gated, snapshot-first, verified by capability.
 11. **Provisioner self-update** (§ 16.6) — staged, rollback-capable, reported on the heartbeat.
 12. **Appliance reporter add-on** (§ 17) — observed `requires`, live endpoints, drift panel, apply requests.
