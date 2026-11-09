@@ -841,15 +841,26 @@ def _add_internal_vm_nic(vmid: int, template: str, manifest: dict) -> None:
     log(f"[{template}] internal LAN: VM net1 on {cfg['bridge']}; dnsmasq reserves {ip} for {mac}")
 
 
-def _dnsmasq_reserve(vmid: int, mac: str, ip: str) -> None:
-    d = Path("/etc/dnsmasq.d")
-    if not d.is_dir():
-        log(f"[vmid {vmid}] /etc/dnsmasq.d absent; internal reservation not written "
-            f"(run the appliance bootstrap to install dnsmasq)")
+def _dnsmasq_reserve(vmid: int, mac: str, ip: str,
+                     resv: Path = Path("/var/lib/misc/ctrlable-reservations")) -> None:
+    """Reserve <ip> for <mac> in the dhcp-hostsfile the bootstrap configured.
+
+    A dhcp-hostsfile (not a config drop-in) because dnsmasq re-reads it on
+    `reload` — `dhcp-host=` in a config file is read ONLY at startup, so a
+    reloaded reservation silently never takes effect (the guest gets a dynamic
+    lease instead, caught in validation 2026-11-09). Upsert by internal IP (the
+    slot) so a redeploy — which gives the VM a fresh MAC for the same address —
+    replaces the owner instead of leaving two MACs reserved for one IP.
+    """
+    if not resv.parent.is_dir():
+        log(f"[vmid {vmid}] {resv.parent} absent; internal reservation not written "
+            f"(run the appliance bootstrap to set up dnsmasq)")
         return
-    (d / f"ctrlable-internal-vm-{vmid}.conf").write_text(
-        f"# ctrlable internal-LAN reservation for VM {vmid}\n"
-        f"dhcp-host={mac},{ip}\n")
+    lines = [ln for ln in (resv.read_text().splitlines() if resv.exists() else [])
+             if ln.strip() and ln.split(",")[-1].strip() != ip]
+    lines.append(f"{mac},{ip}")
+    resv.write_text("\n".join(lines) + "\n")
+    resv.chmod(0o644)
     subprocess.run(["systemctl", "reload", "dnsmasq"], capture_output=True)
 
 

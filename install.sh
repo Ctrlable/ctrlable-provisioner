@@ -443,13 +443,22 @@ EOF
         DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq >/dev/null 2>&1 \
             || { warn "internal LAN: dnsmasq install failed — LXCs still get a static net1, the VM lease won't be served"; return 0; }
     fi
+    # Per-guest reservations go in a dhcp-hostsfile, NOT a config drop-in:
+    # dnsmasq reads `dhcp-host=` from config files only at startup, but re-reads
+    # a dhcp-hostsfile on reload. It lives in /var/lib/misc (where dnsmasq
+    # already reads its lease file) so the unprivileged dnsmasq can read it —
+    # /etc/ctrlable is 700 for build.conf. Created, never truncated, on re-run.
+    local resv=/var/lib/misc/ctrlable-reservations
+    [[ -f "$resv" ]] || : > "$resv"
+    chmod 644 "$resv"
     cat > /etc/dnsmasq.d/ctrlable-internal.conf <<EOF
 # Ctrlable internal LAN — DHCP only, bound to $bridge (SPEC § 20).
 port=0
 interface=$bridge
-bind-interfaces
+bind-dynamic
 dhcp-range=${base}.100,${base}.200,255.255.255.0,12h
 dhcp-authoritative
+dhcp-hostsfile=$resv
 EOF
     systemctl enable dnsmasq >/dev/null 2>&1 || true
     systemctl restart dnsmasq 2>/dev/null || true

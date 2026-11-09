@@ -107,6 +107,26 @@ check("VM dnsmasq reservation: .10 for its net1 MAC",
 cb._dnsmasq_reserve = _real_reserve
 
 
+# ---- _dnsmasq_reserve: dhcp-hostsfile upsert by IP (the real fn) ------------
+import pathlib, tempfile
+rf = pathlib.Path(tempfile.mkdtemp()) / "reservations"
+rec4 = Recorder(); cb.subprocess.run = rec4          # stub systemctl reload
+cb._dnsmasq_reserve(100, "BC:24:11:AA:BB:CC", "198.18.0.10", resv=rf)
+cb._dnsmasq_reserve(101, "BC:24:11:DD:EE:FF", "198.18.0.20", resv=rf)
+cb._dnsmasq_reserve(100, "BC:24:11:99:88:77", "198.18.0.10", resv=rf)   # redeploy: new MAC, same slot
+body = rf.read_text()
+check("other slot (.20) kept", "BC:24:11:DD:EE:FF,198.18.0.20" in body, body)
+check("redeploy replaced the .10 owner",
+      "BC:24:11:AA:BB:CC" not in body and "BC:24:11:99:88:77,198.18.0.10" in body, body)
+check("exactly one reservation for .10",
+      sum(1 for l in body.splitlines() if l.strip().endswith(",198.18.0.10")) == 1, body)
+check("reload dnsmasq was called", any(c[:2] == ["systemctl", "reload"] for c in rec4.calls))
+# .10 and .100 must not be confused by the IP match
+cb._dnsmasq_reserve(102, "BC:24:11:00:00:01", "198.18.0.100", resv=rf)
+body2 = rf.read_text()
+check(".10 survives adding .100 (no suffix confusion)",
+      "BC:24:11:99:88:77,198.18.0.10" in body2 and "BC:24:11:00:00:01,198.18.0.100" in body2, body2)
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + ", ".join(failures)); sys.exit(1)
