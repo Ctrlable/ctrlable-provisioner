@@ -20,6 +20,7 @@ Config file /etc/ctrlable/build.conf (JSON):
   }
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -493,6 +494,8 @@ def deploy_lxc(name: str, hostname: str, tmpl: dict, manifest: dict,
     log(f"[{name}] setting hostname to {hostname}")
     set_lxc_hostname(vmid, hostname)
 
+    _add_internal_lxc_nic(vmid, name, manifest)
+
     inject_firstboot(vmid, name, manifest, conf, firstboot_svc, firstboot_sh)
 
     log(f"[RESULT] name={name} vmid={vmid} kind=lxc")
@@ -743,6 +746,113 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
     log(f"[ctrlable-build] preflight passed — release {release} is deployable on this host")
 
 
+# ---------------------------------------------------------------------------
+# Internal management LAN (SPEC § 20) — a second NIC on vmbr1 with a fixed
+# address, so inter-service wiring survives a site-LAN change. The manifest
+# carries the plan (network.internal); here we attach each guest to it.
+# ---------------------------------------------------------------------------
+
+def _internal_net_cfg(manifest: dict) -> dict | None:
+    """The resolved internal-LAN config for this release, or None when absent/
+    disabled. Mirrors backend/app/internal_net.py (ctrlable-build is standalone
+    on the host and cannot import the backend)."""
+    block = (manifest.get("network") or {}).get("internal")
+    if not block or not block.get("enabled", True):
+        return None
+    subnet = str(block.get("subnet", "198.18.0.0/24"))
+    # Honour a host-chosen subnet: the bootstrap writes this if the manifest
+    # default collided with something already on the host.
+    ov = Path("/etc/ctrlable/internal-net.conf")
+    if ov.exists():
+        for line in ov.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("subnet="):
+                subnet = line.split("=", 1)[1].strip() or subnet
+    try:
+        assignments = {k: int(v) for k, v in (block.get("assignments") or {}).items()}
+    except (TypeError, ValueError):
+        assignments = {}
+    return {"bridge": str(block.get("bridge", "vmbr1")), "subnet": subnet,
+            "assignments": assignments}
+
+
+def _internal_ip(cfg: dict, template: str) -> str | None:
+    """`<ip>/<prefix>` for a template within the internal subnet, or None."""
+    octet = cfg["assignments"].get(template)
+    if octet is None:
+        return None
+    net = ipaddress.ip_network(cfg["subnet"], strict=False)
+    addr = net.network_address + int(octet)
+    if addr not in net or addr == net.network_address:
+        die(f"internal-net assignment {template}={octet} is outside {cfg['subnet']}")
+    return f"{addr}/{net.prefixlen}"
+
+
+def _bridge_exists(bridge: str) -> bool:
+    return subprocess.run(["ip", "link", "show", bridge],
+                          capture_output=True).returncode == 0
+
+
+def _add_internal_lxc_nic(vmid: int, template: str, manifest: dict) -> None:
+    """Give an LXC a STATIC net1 on the internal bridge (addressing.resolve reads
+    it). No-op, with a clear log, when the release has no internal net or the
+    bridge is not on this host yet."""
+    cfg = _internal_net_cfg(manifest)
+    if not cfg:
+        return
+    ipcidr = _internal_ip(cfg, template)
+    if not ipcidr:
+        log(f"[{template}] no internal-LAN assignment; skipping net1")
+        return
+    if not _bridge_exists(cfg["bridge"]):
+        log(f"[{template}] {cfg['bridge']} absent on host; skipping internal net1 "
+            f"(run the appliance bootstrap to create it)")
+        return
+    log(f"[{template}] internal LAN: net1 {ipcidr} on {cfg['bridge']}")
+    subprocess.run(["pct", "set", str(vmid),
+                    "-net1", f"name=eth1,bridge={cfg['bridge']},ip={ipcidr}"], check=True)
+
+
+def _add_internal_vm_nic(vmid: int, template: str, manifest: dict) -> None:
+    """Give the HAOS VM a net1 on the internal bridge and reserve its DHCP lease
+    by MAC (HAOS cannot take a static IP from Proxmox, so it DHCPs here)."""
+    cfg = _internal_net_cfg(manifest)
+    if not cfg:
+        return
+    ipcidr = _internal_ip(cfg, template)
+    if not ipcidr:
+        return
+    if not _bridge_exists(cfg["bridge"]):
+        log(f"[{template}] {cfg['bridge']} absent on host; skipping internal net1")
+        return
+    ip = ipcidr.split("/")[0]
+    subprocess.run(["qm", "set", str(vmid), "-net1", f"virtio,bridge={cfg['bridge']}"], check=True)
+    cfgtxt = subprocess.run(["qm", "config", str(vmid)], capture_output=True, text=True).stdout
+    mac = None
+    for line in cfgtxt.splitlines():
+        if line.startswith("net1:"):
+            m = re.search(r"(?:virtio|macaddr)=([0-9A-Fa-f:]{17})", line)
+            if m:
+                mac = m.group(1)
+    if not mac:
+        log(f"[{template}] WARN: could not read net1 MAC; dnsmasq reservation skipped")
+        return
+    _dnsmasq_reserve(vmid, mac, ip)
+    log(f"[{template}] internal LAN: VM net1 on {cfg['bridge']}; dnsmasq reserves {ip} for {mac}")
+
+
+def _dnsmasq_reserve(vmid: int, mac: str, ip: str) -> None:
+    d = Path("/etc/dnsmasq.d")
+    if not d.is_dir():
+        log(f"[vmid {vmid}] /etc/dnsmasq.d absent; internal reservation not written "
+            f"(run the appliance bootstrap to install dnsmasq)")
+        return
+    (d / f"ctrlable-internal-vm-{vmid}.conf").write_text(
+        f"# ctrlable internal-LAN reservation for VM {vmid}\n"
+        f"dhcp-host={mac},{ip}\n")
+    subprocess.run(["systemctl", "reload", "dnsmasq"], capture_output=True)
+
+
 def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) -> int:
     phase(2, "allocating vmid")
     vmid = next_vmid()
@@ -801,6 +911,8 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
             "--tablet",   "0",
             "--balloon",  "0",
         ], check=True)
+
+        _add_internal_vm_nic(vmid, name, manifest)
 
         phase(5, "importing disk")
         log(f"[{name}] importing disk")
