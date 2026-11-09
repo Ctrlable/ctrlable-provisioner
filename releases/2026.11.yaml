@@ -18,6 +18,34 @@
 release: "2026.11"
 community_scripts_ref: "2026-06-01"
 proxmox_min_version: "8.2"
+
+# ── Internal management LAN (SPEC § 20) ──
+# A private per-appliance bridge every guest also joins on a FIXED address, so
+# inter-service wiring (zigbee2mqtt -> MQTT, HA -> zwave-js / frigate) survives
+# the site LAN changing its DHCP range or the whole box moving to a new site.
+# host .1 = the bridge gateway; LXCs get a static net1, the HAOS VM DHCP-reserves
+# its address off a host dnsmasq (it cannot take a static IP from Proxmox).
+# `assignments` are HOST OCTETS within `subnet`, so if the collision check has to
+# fall back to another /24 every address re-maps automatically.
+#
+# 198.18.0.0/24 is RFC 2544 benchmarking space on purpose: an isolated L2 bridge
+# that will never collide with a site LAN (10/172.16/192.168), Tailscale
+# (100.64/10) or the WireGuard fabric (10.10.16.x / 10.20.x). The bootstrap still
+# collision-checks it against what is actually on the host (app/internal_net.py).
+network:
+  internal:
+    enabled: true
+    bridge: vmbr1
+    subnet: "198.18.0.0/24"
+    assignments:
+      ctrlable-pro: 10        # the MQTT broker + HA live here
+      zwavejs: 20
+      zigbee2mqtt: 21
+      frigate: 30
+      freepbx: 40
+      hardware-manager: 50
+      dali-bridge: 60
+
 templates:
   ctrlable-pro:
     kind: vm

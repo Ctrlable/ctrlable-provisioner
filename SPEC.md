@@ -597,3 +597,40 @@ exactly the kind of thing a dealer should be able to see.
 - **Probe transport:** `pct exec` from the orchestrator (simple, needs host trigger for LXC) vs. an agent inside each guest (no trigger, one more thing to keep alive).
 - **Who owns `requires` assertions** that need a live protocol handshake, like the Z-Wave schema read — the orchestrator, or the component's own health endpoint?
 - **Reporter token lifecycle** (§ 17.4): issued at instance creation — but what re-issues it after a restore-from-backup, which brings back an appliance's identity along with a token that may have been revoked?
+
+---
+
+## 20. Internal management LAN (`vmbr1`)
+
+Inter-service wiring must survive the site LAN changing its DHCP range, or the
+whole appliance being moved to a different site. Not hypothetical: the
+174.48.139.185 appliance was built on a 172.16.x LAN and shipped to a 10.0.0.x
+one, and zigbee2mqtt had been pointed at the HA broker by its then-current DHCP
+address.
+
+Every guest joins a private bridge `vmbr1` on a **fixed** address, and the
+inter-service wiring uses those, never DHCP ones. The manifest's
+`network.internal` block is the single source of truth (`subnet`, `bridge`,
+`assignments` = host octets within `subnet`, so a collision fallback to another
+/24 re-maps every address for free). `app/internal_net.py` resolves a template
+to its address (`ip_for`), gives the broker host (`mqtt_host`, the HA VM), and
+checks a subnet against what is already on the host (`overlaps` / `choose_subnet`).
+
+**Subnet choice.** `vmbr1` is isolated L2, so the only collision that matters is
+with another network on the SAME host. `198.18.0.0/24` is RFC 2544 benchmarking
+space: never a site LAN (10/172.16/192.168), never Tailscale (100.64/10), never
+the WireGuard fabric (10.10.16.x / 10.20.x). The bootstrap still checks it
+against the host's live interfaces/routes and refuses (or falls back) on overlap,
+so a surprise overlay cannot make it collide silently.
+
+**Address mechanism.** LXCs take a static `net1` (`ip_for(template)/24`), which
+`addressing.resolve` already reads (§ 16). The HAOS VM cannot take a static IP
+from Proxmox (no cloud-init), so it gets `net1` on `vmbr1` and DHCP-reserves its
+address off a host **dnsmasq** keyed by the MAC ctrlable-build assigns.
+
+**Phasing.** Phase 1 (done): the manifest block, `internal_net.py`, and the
+orchestrator deriving `mqtt_host` from the internal map in `deploy.py`
+(`_with_internal_net`; an explicitly-supplied `mqtt_host` still wins), with
+`tests/test_internal_net.py`. Phase 2 (host side): `install.sh` creates `vmbr1` +
+dnsmasq with the collision check, and `ctrlable-build` adds each guest's `net1` +
+the VM's dnsmasq reservation.

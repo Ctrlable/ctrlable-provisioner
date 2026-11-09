@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Resources(BaseModel):
@@ -73,11 +73,27 @@ class TemplateSpec(BaseModel):
     portainer: bool = False
 
 
+class InternalNetSpec(BaseModel):
+    """The internal management LAN (SPEC § 20). See app/internal_net.py for the
+    resolution + collision logic; this is just the manifest shape."""
+
+    enabled: bool = True
+    bridge: str = "vmbr1"
+    subnet: str = "198.18.0.0/24"
+    # template name -> host octet within `subnet` (ctrlable-pro: 10 -> .10).
+    assignments: dict[str, int] = Field(default_factory=dict)
+
+
+class NetworkSpec(BaseModel):
+    internal: InternalNetSpec | None = None
+
+
 class ReleaseManifest(BaseModel):
     release: str
     community_scripts_ref: str
     proxmox_min_version: str
     templates: dict[str, TemplateSpec]
+    network: NetworkSpec | None = None
 
 
 def load_manifest(path: Path) -> ReleaseManifest:

@@ -49,6 +49,28 @@ def _next_hostname(site: str, template: str, existing: set[str]) -> str:
     return f"{base}-{n}"
 
 
+def _with_internal_net(shared: dict, manifest) -> dict:
+    """If the release declares an internal management LAN, point the shared
+    wiring at the stable internal addresses instead of whatever DHCP hands out.
+
+    The MQTT broker runs on the Home Assistant VM, so `mqtt_host` becomes its
+    fixed internal address (198.18.0.10 by default) — which is the whole point:
+    z2m then keeps reaching the broker after a site-LAN change. An mqtt_host the
+    caller supplied explicitly always wins, so an operator can still override.
+    """
+    from .internal_net import from_manifest
+    net = from_manifest(manifest)
+    if net is None:
+        return shared
+    out = dict(shared)
+    if not out.get("mqtt_host"):
+        host = net.mqtt_host()
+        if host:
+            out["mqtt_host"] = host
+            out.setdefault("mqtt_port", 1883)
+    return out
+
+
 def _wire_to_for(template_name: str, shared: dict) -> dict:
     base = {
         k: shared[k]
@@ -205,7 +227,10 @@ async def deploy_templates_async(
     """Deploy just these templates of a release, with the same wiring a full
     stack deploy gives them (incl. the provisioning key). Used to redeploy what
     failed without touching what is running."""
-    shared = {**shared_wire_to, "provisioning_key": settings.provisioning_key}
+    from .manifest import load_all_manifests
+    manifest = load_all_manifests().get(release)
+    shared = _with_internal_net(
+        {**shared_wire_to, "provisioning_key": settings.provisioning_key}, manifest)
     for name in names:
         try:
             await deploy_instance(project_id, name, release, _wire_to_for(name, shared), db, settings)
@@ -224,8 +249,11 @@ async def deploy_stack_async(
     manifests = load_all_manifests()
     manifest = manifests[release]
 
-    # Make the shared provisioning key available to the self-updating templates.
-    shared = {**shared_wire_to, "provisioning_key": settings.provisioning_key}
+    # Make the shared provisioning key available to the self-updating templates,
+    # and point MQTT/coordinator wiring at the internal LAN when the release has
+    # one (so it survives a site-LAN change).
+    shared = _with_internal_net(
+        {**shared_wire_to, "provisioning_key": settings.provisioning_key}, manifest)
     for name in manifest.templates:
         wire_to = _wire_to_for(name, shared)
         try:
