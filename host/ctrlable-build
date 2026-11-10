@@ -765,7 +765,8 @@ def preflight(release: str, manifest: dict, conf: dict) -> None:
 # carries the plan (network.internal); here we attach each guest to it.
 # ---------------------------------------------------------------------------
 
-def _internal_net_cfg(manifest: dict) -> dict | None:
+def _internal_net_cfg(manifest: dict,
+                      conf_path: Path = Path("/etc/ctrlable/internal-net.conf")) -> dict | None:
     """The resolved internal-LAN config for this release, or None when absent/
     disabled. Mirrors backend/app/internal_net.py (ctrlable-build is standalone
     on the host and cannot import the backend)."""
@@ -773,20 +774,23 @@ def _internal_net_cfg(manifest: dict) -> dict | None:
     if not block or not block.get("enabled", True):
         return None
     subnet = str(block.get("subnet", "198.18.0.0/24"))
-    # Honour a host-chosen subnet: the bootstrap writes this if the manifest
-    # default collided with something already on the host.
-    ov = Path("/etc/ctrlable/internal-net.conf")
-    if ov.exists():
-        for line in ov.read_text().splitlines():
+    bridge = str(block.get("bridge", "vmbr1"))
+    # Honour host-chosen values: the bootstrap / enable writes these if the
+    # manifest defaults collided with something already on the host — a used
+    # subnet, or a vmbr1 that belongs to another network (then setup relocates
+    # the internal LAN to the next free vmbrN and records it here).
+    if conf_path.exists():
+        for line in conf_path.read_text().splitlines():
             line = line.strip()
             if line.startswith("subnet="):
                 subnet = line.split("=", 1)[1].strip() or subnet
+            elif line.startswith("bridge="):
+                bridge = line.split("=", 1)[1].strip() or bridge
     try:
         assignments = {k: int(v) for k, v in (block.get("assignments") or {}).items()}
     except (TypeError, ValueError):
         assignments = {}
-    return {"bridge": str(block.get("bridge", "vmbr1")), "subnet": subnet,
-            "assignments": assignments}
+    return {"bridge": bridge, "subnet": subnet, "assignments": assignments}
 
 
 def _internal_ip(cfg: dict, template: str) -> str | None:
@@ -804,6 +808,39 @@ def _internal_ip(cfg: dict, template: str) -> str | None:
 def _bridge_exists(bridge: str) -> bool:
     return subprocess.run(["ip", "link", "show", bridge],
                           capture_output=True).returncode == 0
+
+
+def _bridge_has_phys_member(bridge: str) -> bool:
+    """True if <bridge> bridges a physical NIC (not a guest tap/veth or a PVE
+    firewall iface). Mirrors _bridge_has_phys in setup-internal-net.sh."""
+    brif = Path(f"/sys/class/net/{bridge}/brif")
+    if not brif.is_dir():
+        return False
+    for m in brif.iterdir():
+        if not m.name.startswith(("tap", "veth", "fwln", "fwpr", "fwbr")):
+            return True
+    return False
+
+
+def _bridge_is_ours(bridge: str) -> bool:
+    """True if <bridge> is the internal-LAN bridge (ours), not a foreign bridge
+    such as a Wi-Fi uplink. Mirrors _bridge_usable in setup-internal-net.sh: the
+    bridge must have no physical member and no non-internal (non-198.18/19) IPv4.
+    A foreign bridge must never be used — we would otherwise attach guests to, or
+    run DHCP onto, the customer's own network. SPEC § 20."""
+    if not _bridge_exists(bridge):
+        return False
+    if _bridge_has_phys_member(bridge):
+        return False
+    out = subprocess.run(["ip", "-o", "-4", "addr", "show", "dev", bridge],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "inet":
+            a = parts[3]
+            if not (a.startswith("198.18.") or a.startswith("198.19.")):
+                return False
+    return True
 
 
 def _add_internal_lxc_nic(vmid: int, template: str, manifest: dict) -> None:
@@ -902,12 +939,19 @@ def enable_internal_net(manifest: dict, conf: dict, ha_vmid: int | None) -> None
     if not cfg_m:
         die("this release declares no internal management LAN (network.internal)")
 
-    # 1) fabric: vmbr1 + dnsmasq, via the one validated implementation.
+    # 1) fabric: the internal bridge + dnsmasq, via the one validated impl.
     script = _setup_script()
     if not script:
         die("setup-internal-net.sh not found on host; reinstall host tools "
             "(install_host_tools) then retry")
-    log("[enable-internal-net] creating bridge + dnsmasq (vmbr1)")
+    # Pre-flight (read-only): note any vmbrN that already belongs to another
+    # network, so the build log explains an upcoming relocation or skip up front.
+    for b in ("vmbr1", "vmbr2", "vmbr3"):
+        if _bridge_exists(b) and not _bridge_is_ours(b):
+            log(f"[enable-internal-net] note: {b} already exists and is NOT the "
+                f"internal LAN (physical port / non-internal address) — leaving "
+                f"it alone")
+    log("[enable-internal-net] creating bridge + dnsmasq")
     env = dict(os.environ)
     env["INTERNAL_SUBNET"] = cfg_m["subnet"]
     r = subprocess.run(["bash", script], env=env)
@@ -921,6 +965,12 @@ def enable_internal_net(manifest: dict, conf: dict, ha_vmid: int | None) -> None
     if not _bridge_exists(bridge):
         die(f"{bridge} is not up after setup; see 'journalctl -u dnsmasq' and "
             f"'/etc/network/interfaces.d/ctrlable-internal'")
+    if not _bridge_is_ours(bridge):
+        die(f"refusing to use {bridge}: it exists but belongs to another network "
+            f"(it has a physical port or a non-internal address — e.g. a Wi-Fi "
+            f"uplink). setup-internal-net.sh relocates to a free vmbrN; if every "
+            f"vmbr1..3 is taken, free one (or set INTERNAL_SUBNET) and retry. No "
+            f"guest was attached.")
     log(f"[enable-internal-net] fabric up: {bridge} on {cfg['subnet']}")
 
     # 2) attach the HAOS VM so the broker is reachable at its reserved address.

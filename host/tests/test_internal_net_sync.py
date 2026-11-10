@@ -46,7 +46,7 @@ def extract_func(text: str, name: str) -> str | None:
 install_sh = open(os.path.join(ROOT, "install.sh")).read()
 script = open(os.path.join(ROOT, "host", "setup-internal-net.sh")).read()
 
-for fn in ("_subnet_in_use", "setup_internal_net"):
+for fn in ("_subnet_in_use", "_bridge_has_phys", "_bridge_usable", "setup_internal_net"):
     a = extract_func(install_sh, fn)
     b = extract_func(script, fn)
     check(f"install.sh defines {fn}", a is not None)

@@ -24,6 +24,10 @@ _spec = importlib.util.spec_from_loader("ctrlable_build", _loader)
 cb = importlib.util.module_from_spec(_spec)
 _loader.exec_module(cb)
 
+# Originals captured before any test stubs them, so later blocks can restore.
+_ORIG_is_ours = cb._bridge_is_ours
+_ORIG_phys = cb._bridge_has_phys_member
+
 failures: list[str] = []
 
 
@@ -152,6 +156,7 @@ rec5.outputs["qm config"] = "net1: virtio=BC:24:11:AA:BB:CC,bridge=vmbr1\n"
 cb.subprocess.run = rec5
 cb._setup_script = lambda: "/usr/local/lib/ctrlable/setup-internal-net.sh"
 cb._bridge_exists = lambda b: True
+cb._bridge_is_ours = lambda b: True          # fabric check: the bridge is ours
 cb._wait_reachable = lambda ip, secs: True
 resv2 = {}
 _real = cb._dnsmasq_reserve
@@ -192,6 +197,70 @@ cb.enable_internal_net(BROKER_MANIFEST, {}, 100)
 check("INTERNAL_SUBNET env set for the setup script",
       (captured.get("env") or {}).get("INTERNAL_SUBNET") == "198.18.0.0/24",
       str((captured.get("env") or {}).get("INTERNAL_SUBNET")))
+
+
+# ---- bridge relocation: the host conf overrides the manifest bridge ---------
+# setup-internal-net.sh relocates the internal LAN off a vmbr1 that belongs to
+# another network (e.g. a Wi-Fi uplink) and records the chosen bridge here; the
+# deploy path must then attach guests to THAT bridge, not the manifest default.
+import tempfile as _tf
+_confdir = pathlib.Path(_tf.mkdtemp())
+_conf = _confdir / "internal-net.conf"
+_conf.write_text("subnet=198.18.0.0/24\nbridge=vmbr2\ngateway=198.18.0.1\n")
+cfg_ov = cb._internal_net_cfg(MANIFEST, conf_path=_conf)
+check("conf overrides manifest bridge (vmbr1 -> vmbr2)", cfg_ov["bridge"] == "vmbr2", str(cfg_ov))
+check("default (no conf) keeps manifest bridge",
+      cb._internal_net_cfg(MANIFEST, conf_path=_confdir / "nope")["bridge"] == "vmbr1")
+
+# a deploy with the relocated cfg attaches the LXC net1 to vmbr2
+_real_cfg = cb._internal_net_cfg
+cb._internal_net_cfg = lambda m: {"bridge": "vmbr2", "subnet": "198.18.0.0/24",
+                                  "assignments": {"zigbee2mqtt": 21}}
+cb._bridge_exists = lambda b: True
+recR = Recorder(); cb.subprocess.run = recR
+cb._add_internal_lxc_nic(105, "zigbee2mqtt", MANIFEST)
+check("relocated: LXC net1 lands on vmbr2",
+      "pct set 105 -net1 name=eth1,bridge=vmbr2,ip=198.18.0.21/24" in recR.argvs(), str(recR.argvs()))
+cb._internal_net_cfg = _real_cfg
+
+
+# ---- _bridge_is_ours: foreign bridges (Wi-Fi uplink) are rejected -----------
+cb._bridge_is_ours = _ORIG_is_ours          # undo the stub the enable tests set
+_real_exists = cb._bridge_exists
+cb._bridge_exists = lambda b: b != "absent"
+
+def _ours_with(phys: bool, addr_out: str) -> bool:
+    cb._bridge_has_phys_member = lambda b: phys
+    r = Recorder(); r.outputs["ip -o"] = addr_out; cb.subprocess.run = r
+    return cb._bridge_is_ours("vmbr1")
+
+check("absent bridge is not 'ours' (nothing to attach to)",
+      cb._bridge_is_ours("absent") is False)
+check("portless + internal addr -> ours",
+      _ours_with(False, "13: vmbr1    inet 198.18.0.1/24 scope global vmbr1") is True)
+check("portless + NO addr -> ours (freshly created)", _ours_with(False, "") is True)
+check("has a physical port -> NOT ours (e.g. Wi-Fi bridge)",
+      _ours_with(True, "13: vmbr1    inet 198.18.0.1/24 scope global vmbr1") is False)
+check("foreign IPv4 -> NOT ours",
+      _ours_with(False, "13: vmbr1    inet 192.168.1.1/24 scope global vmbr1") is False)
+cb._bridge_has_phys_member, cb._bridge_exists = _ORIG_phys, _real_exists
+
+
+# ---- enable REFUSES to attach guests to a foreign bridge --------------------
+recF = Recorder()
+recF.outputs["qm config"] = "net1: virtio=BC:24:11:AA:BB:CC,bridge=vmbr1\n"
+cb.subprocess.run = recF
+cb._setup_script = lambda: "/usr/local/lib/ctrlable/setup-internal-net.sh"
+cb._bridge_exists = lambda b: True          # a bridge is there ...
+cb._bridge_is_ours = lambda b: False        # ... but it is NOT ours (foreign)
+cb._wait_reachable = lambda ip, secs: True
+try:
+    cb.enable_internal_net(BROKER_MANIFEST, {}, 100)
+    check("enable aborts on a foreign bridge", False, "no SystemExit")
+except SystemExit:
+    check("enable aborts on a foreign bridge", True)
+check("enable attached NO guest to the foreign bridge",
+      not any(c[:2] == ["qm", "set"] for c in recF.calls), str(recF.argvs()))
 
 
 print()

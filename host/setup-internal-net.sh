@@ -35,11 +35,39 @@ _subnet_in_use() {
     return 1
 }
 
+# True if <bridge> bridges a physical NIC — a real port, not a guest tap/veth or
+# a PVE firewall iface. Such a bridge is another network's (e.g. a Wi-Fi uplink).
+_bridge_has_phys() {
+    local b="$1" m
+    for m in "/sys/class/net/$b/brif/"*; do
+        [ -e "$m" ] || continue
+        case "${m##*/}" in
+            tap*|veth*|fwln*|fwpr*|fwbr*) ;;                # virtual guest/fw ports
+            *) return 0 ;;                                  # a real NIC -> foreign
+        esac
+    done
+    return 1
+}
+
+# True if <bridge> is free for the internal LAN: absent (we create it), or
+# already ours (no physical port and no non-internal address). A bridge with a
+# physical port or a foreign IPv4 — e.g. a future Wi-Fi uplink bridge — is left
+# ALONE: reusing it would run a DHCP server onto, or attach guests to, the
+# customer's own network. SPEC § 20.
+_bridge_usable() {
+    local b="$1"
+    ip link show "$b" >/dev/null 2>&1 || return 0          # absent -> we create it
+    _bridge_has_phys "$b" && return 1                       # real port -> foreign
+    ip -o -4 addr show dev "$b" 2>/dev/null | awk '{print $4}' \
+        | grep -qvE '^198\.1[89]\.' && return 1             # non-internal addr -> foreign
+    return 0
+}
+
 setup_internal_net() {
     if [[ "${NO_INTERNAL_NET:-0}" == "1" ]]; then
         log "internal management LAN disabled (NO_INTERNAL_NET=1)"; return 0
     fi
-    local bridge=vmbr1 chosen="" c
+    local bridge="" b chosen="" c
     for c in "${INTERNAL_SUBNET:-198.18.0.0/24}" 198.19.0.0/24 198.18.1.0/24; do
         _subnet_in_use "$c" || { chosen="$c"; break; }
     done
@@ -50,6 +78,21 @@ setup_internal_net() {
     fi
     [[ "$chosen" == "${INTERNAL_SUBNET:-198.18.0.0/24}" ]] \
         || warn "internal LAN: preferred subnet was in use; using $chosen"
+
+    # Pick a bridge that is ours or free. A pre-existing vmbr1 that belongs to
+    # another network (e.g. a Wi-Fi uplink) is NOT reused — we relocate to the
+    # next free vmbrN, or skip entirely rather than disturb it. SPEC § 20.
+    for b in vmbr1 vmbr2 vmbr3; do
+        _bridge_usable "$b" && { bridge="$b"; break; }
+    done
+    if [[ -z "$bridge" ]]; then
+        warn "internal LAN: vmbr1..vmbr3 are all in use by other networks —"
+        warn "  refusing to reuse one. Free a vmbrN (or set one up by hand on an"
+        warn "  internal 198.18/198.19 subnet) and re-run. Existing bridges untouched."
+        return 0
+    fi
+    [[ "$bridge" == vmbr1 ]] \
+        || warn "internal LAN: vmbr1 is in use by another network; using $bridge"
 
     local base="${chosen%%/*}"; base="${base%.*}"   # 198.18.0
     local gw="${base}.1" prefix="${chosen##*/}"
@@ -79,8 +122,8 @@ EOF
         || { warn "internal LAN: $bridge did not come up — skipping dnsmasq"; return 0; }
     ok "internal bridge $bridge up at $gw"
 
-    # 2) dnsmasq, DHCP-only (port=0) bound to vmbr1 only, for the HAOS VM's
-    #    reserved lease (ctrlable-build drops per-VM dhcp-host files here).
+    # 2) dnsmasq, DHCP-only (port=0) bound to the internal bridge only, for the
+    #    HAOS VM's reserved lease (ctrlable-build drops per-VM dhcp-host files here).
     if ! command -v dnsmasq >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y dnsmasq >/dev/null 2>&1 \
             || { warn "internal LAN: dnsmasq install failed — LXCs still get a static net1, the VM lease won't be served"; return 0; }
