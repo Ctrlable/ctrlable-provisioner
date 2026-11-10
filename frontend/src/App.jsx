@@ -437,10 +437,13 @@ const svcIcon = (type) => SVC_ICON[type] ?? '●'
 
 // internal-LAN address for a template, from the plan's per-template octets
 function internalIp(lan, type) {
-  const octet = lan?.assignments?.[type]
-  if (octet == null || !lan?.subnet) return null
+  const v = lan?.assignments?.[type]
+  if (v == null || !lan?.subnet) return null
+  // assignments may arrive as full IPs ("198.18.0.20") or bare octets ("20")
+  const s = String(v)
+  if (s.includes('.')) return s
   const base = lan.subnet.split('/')[0].split('.').slice(0, 3).join('.')
-  return `${base}.${octet}`
+  return `${base}.${s}`
 }
 
 function Dot({ status }) { return <span className={`dot ${variantFor(status)}`} /> }
