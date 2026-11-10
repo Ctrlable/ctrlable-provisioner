@@ -1023,6 +1023,161 @@ function PlatformTab() {
 }
 
 // ---------------------------------------------------------------------------
+// System tab — provisioner self-update + internal management LAN
+// ---------------------------------------------------------------------------
+
+function SystemTab() {
+  const [version, setVersion] = useState(null)
+  const [lan, setLan]         = useState(null)
+  const [updating, setUpdating] = useState(false)
+  const [updateResult, setUpdateResult] = useState(null)
+  const [enabling, setEnabling] = useState(false)
+  const [enableResult, setEnableResult] = useState(null)
+  const [error, setError]     = useState(null)
+
+  const loadVersion = useCallback(() =>
+    apiFetch('/api/version').then(r => r.json()).then(setVersion).catch(() => {}), [])
+  const loadLan = useCallback(() =>
+    apiFetch('/api/lan/internal').then(r => r.json()).then(setLan).catch(() => {}), [])
+
+  useEffect(() => { loadVersion(); loadLan() }, [loadVersion, loadLan])
+
+  const selfUpdate = async () => {
+    setUpdating(true); setError(null); setUpdateResult(null)
+    try {
+      const res = await apiFetch('/api/system/self-update', { method: 'POST', body: JSON.stringify({}) })
+      const data = await res.json()
+      if (res.status === 409) { setError(data.detail ?? 'Busy'); return }
+      setUpdateResult(data)
+      if (data.ok && data.restarting) {
+        // The service is restarting onto the new build; poll the version back.
+        let tries = 0
+        const poll = setInterval(async () => {
+          tries += 1
+          try {
+            const v = await (await fetch('/api/version')).json()
+            setVersion(v)
+            if (v.revision && data.to && v.revision !== (version?.revision)) { clearInterval(poll) }
+          } catch { /* restart window — keep polling */ }
+          if (tries > 20) clearInterval(poll)
+        }, 3000)
+      }
+    } catch (e) { setError(e.message) }
+    finally { setUpdating(false) }
+  }
+
+  const enableLan = async () => {
+    setEnabling(true); setError(null); setEnableResult(null)
+    try {
+      const res = await apiFetch('/api/lan/internal/enable', { method: 'POST', body: JSON.stringify({}) })
+      const data = await res.json()
+      if (!res.ok) { setError(data.detail ?? 'Enable failed'); return }
+      setEnableResult(data)
+      loadLan()
+    } catch (e) { setError(e.message) }
+    finally { setEnabling(false) }
+  }
+
+  return (
+    <div className="platform-tab">
+      {error && <div className="banner error">{error}</div>}
+
+      {/* Provisioner self-update */}
+      <div className="card">
+        <div style={{display:'flex',alignItems:'center',gap:'.6rem',marginBottom:'1rem'}}>
+          <span className="status-dot" style={{background:'#22c55e',display:'inline-block'}} />
+          <strong>Provisioner</strong>
+        </div>
+        <div className="platform-details">
+          <div className="platform-row"><span className="muted">Version</span><code>{version?.version ?? '…'}</code></div>
+          <div className="platform-row"><span className="muted">Revision</span><code>{version?.revision ?? '…'}</code></div>
+          {version?.ref && <div className="platform-row"><span className="muted">Ref</span><code>{version.ref}</code></div>}
+        </div>
+        <p className="form-note" style={{marginTop:'.75rem'}}>
+          Updates the orchestrator to the latest build, refreshes the host tools, verifies, then
+          restarts. Refused while a build or deploy is running; the checkout is rolled back if a
+          step fails.
+        </p>
+        <button className="btn-primary" style={{marginTop:'.5rem'}} onClick={selfUpdate} disabled={updating}>
+          {updating ? 'Updating…' : 'Update now'}
+        </button>
+        {updateResult && (
+          <div style={{marginTop:'1rem'}}>
+            {updateResult.ok
+              ? <div className="banner" style={{background:'#064e3b',color:'#d1fae5'}}>
+                  {updateResult.unchanged ? 'Already up to date.' : `Updated ${String(updateResult.from).slice(0,7)} → ${String(updateResult.to).slice(0,7)}.`}
+                  {updateResult.restarting && ' Restarting — version will refresh shortly.'}
+                  {updateResult.host_tools?.attempted && !updateResult.host_tools?.ok &&
+                    ' (Host tools not refreshed — the host may need a manual reinstall on this first update.)'}
+                </div>
+              : <div className="banner error">Update failed at “{updateResult.stage}”.{updateResult.rolled_back ? ' Rolled back.' : ''}</div>}
+            {updateResult.steps && (
+              <pre className="build-log" style={{marginTop:'.5rem'}}>
+                {updateResult.steps.map(s => `[${s.rc === 0 ? 'ok' : 'FAIL'}] ${s.step}\n${s.output || ''}`).join('\n')}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Internal management LAN */}
+      <div className="card" style={{marginTop:'1rem'}}>
+        <div style={{display:'flex',alignItems:'center',gap:'.6rem',marginBottom:'1rem'}}>
+          <span className="status-dot" style={{
+            background: lan?.configured ? '#22c55e' : '#f59e0b', display:'inline-block' }} />
+          <strong>Internal Management LAN</strong>
+        </div>
+        {lan?.configured ? (
+          <>
+            <div className="platform-details">
+              <div className="platform-row"><span className="muted">Bridge</span><code>{lan.bridge}</code></div>
+              <div className="platform-row"><span className="muted">Subnet</span><code>{lan.subnet}</code></div>
+              <div className="platform-row"><span className="muted">Broker (HA VM)</span><code>{lan.broker_ip}</code></div>
+              <div className="platform-row"><span className="muted">Broker VM</span>
+                {lan.broker_known ? <code>#{lan.broker_vmid}</code>
+                  : <span className="tag" style={{background:'#f59e0b',color:'#fff'}}>not found</span>}
+              </div>
+            </div>
+            <p className="form-note" style={{marginTop:'.75rem'}}>
+              Each service gets a fixed address on an isolated bridge, so inter-service wiring
+              survives a site-LAN change. Enabling brings up the fabric and attaches the HA VM
+              (hot-plug, no reboot); existing services keep running and are re-wired on their
+              next deploy.
+            </p>
+            <button className="btn-primary" style={{marginTop:'.5rem'}}
+              onClick={enableLan} disabled={enabling || !lan.broker_known}>
+              {enabling ? 'Enabling…' : 'Enable internal LAN'}
+            </button>
+            {!lan.broker_known &&
+              <p className="form-note" style={{marginTop:'.4rem'}}>No deployed HA VM found to attach.</p>}
+            {enableResult && (
+              <div style={{marginTop:'1rem'}}>
+                {enableResult.ok
+                  ? (enableResult.broker_reachable
+                      ? <div className="banner" style={{background:'#064e3b',color:'#d1fae5'}}>
+                          Enabled — broker reachable at {lan.broker_ip}.
+                        </div>
+                      : <div className="banner" style={{background:'#78350f',color:'#fed7aa'}}>
+                          Fabric up and NIC attached, but the broker isn’t answering yet.
+                          {enableResult.reboot_suggested && ` Reboot VM #${enableResult.broker_vmid} to pick up the NIC.`}
+                        </div>)
+                  : <div className="banner error">Enable failed — see the log.</div>}
+                {enableResult.output &&
+                  <pre className="build-log" style={{marginTop:'.5rem'}}>{enableResult.output}</pre>}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="form-note">
+            This release does not declare an internal management LAN{lan && !lan.broker_known ? ', and no HA VM is deployed yet' : ''}.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Root app
 // ---------------------------------------------------------------------------
 export default function App() {
@@ -1090,7 +1245,7 @@ export default function App() {
       </header>
 
       <nav className="tabs">
-        {['dashboard','deploy','releases','platform'].map(t => (
+        {['dashboard','deploy','releases','platform','system'].map(t => (
           <button key={t} className={`tab ${tab===t?'active':''}`} onClick={() => setTab(t)}>
             {t.charAt(0).toUpperCase()+t.slice(1)}
           </button>
@@ -1102,6 +1257,7 @@ export default function App() {
         {tab==='deploy'    && <DeployTab releases={releases} />}
         {tab==='releases'  && <ReleasesTab releases={releases} />}
         {tab==='platform'  && <PlatformTab />}
+        {tab==='system'    && <SystemTab />}
       </main>
 
       {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}

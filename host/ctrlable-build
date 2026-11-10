@@ -78,11 +78,14 @@ def parse_args() -> tuple[str, str, str | None, str | None]:
     if len(parts) in (3, 4) and parts[0] == "ctrlable-build" \
             and parts[1] == "enable-internal-net":
         return "enable-internal-net", parts[2], (parts[3] if len(parts) == 4 else None), None
+    if len(parts) == 2 and parts[0] == "ctrlable-build" and parts[1] == "update-host-tools":
+        return "update-host-tools", None, None, None
     die(
         f"Unexpected SSH_ORIGINAL_COMMAND: {original!r}\n"
         f"Expected: ctrlable-build deploy <release> <template_name> <hostname>\n"
         f"      or: ctrlable-build preflight <release>\n"
-        f"      or: ctrlable-build enable-internal-net <release> [ha_vmid]"
+        f"      or: ctrlable-build enable-internal-net <release> [ha_vmid]\n"
+        f"      or: ctrlable-build update-host-tools"
     )
 
 
@@ -945,6 +948,73 @@ def enable_internal_net(manifest: dict, conf: dict, ha_vmid: int | None) -> None
             f"a minute; if it does not, reboot VM {ha_vmid} to pick it up.")
 
 
+def _orchestrator_ctid(conf: dict) -> int:
+    """The LXC id of the orchestrator (where the repo lives), to pull host tools
+    from. From build.conf, else discovered by finding the CT that has the repo."""
+    cid = conf.get("orchestrator_ctid")
+    if cid:
+        return int(cid)
+    # Fallback for hosts whose build.conf predates orchestrator_ctid: find the CT
+    # carrying the provisioner checkout.
+    out = subprocess.run(["pct", "list"], capture_output=True, text=True).stdout
+    for line in out.splitlines()[1:]:
+        ctid = line.split()[0] if line.split() else ""
+        if ctid.isdigit() and subprocess.run(
+                ["pct", "exec", ctid, "--", "test", "-f",
+                 "/opt/ctrlable-provisioner/host/ctrlable-build"]).returncode == 0:
+            return int(ctid)
+    die("could not find the orchestrator LXC (set orchestrator_ctid in build.conf)")
+
+
+# What `update-host-tools` syncs from the orchestrator's repo onto the host.
+# (src inside the CT, dst on the host, mode). Keep in step with install.sh's
+# install_host_tools.
+_HOST_TOOL_FILES = [
+    ("/opt/ctrlable-provisioner/host/ctrlable-build", "/usr/local/bin/ctrlable-build", 0o755),
+    ("/opt/ctrlable-provisioner/host/setup-internal-net.sh",
+     "/usr/local/lib/ctrlable/setup-internal-net.sh", 0o755),
+]
+_HOST_BUILDERS_SRC = "/opt/ctrlable-provisioner/host/builders"
+_HOST_BUILDERS_DST = "/opt/ctrlable/builders"
+
+
+def _pct_pull_atomic(ctid: int, src: str, dst: str, mode: int) -> None:
+    """Pull one file out of the CT and move it into place atomically — never
+    write over a live file in place (an in-flight run would see a mix)."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = f"{dst}.new-{os.getpid()}"
+    r = subprocess.run(["pct", "pull", str(ctid), src, tmp], capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+        # pct pull exits 0 on a missing file and leaves an empty one (known trap).
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        die(f"could not pull {src} from CT {ctid}: {r.stderr.strip() or 'empty/missing'}")
+    os.chmod(tmp, mode)
+    os.replace(tmp, dst)   # atomic within the same filesystem
+    log(f"[update-host-tools] {dst}")
+
+
+def update_host_tools(conf: dict) -> None:
+    """Refresh the host-side tools (this script + the internal-net setup +
+    builders) from the orchestrator's freshly-updated checkout. Runs as part of
+    a provisioner self-update so the host never lags the orchestrator."""
+    ctid = _orchestrator_ctid(conf)
+    log(f"[update-host-tools] syncing host tools from CT {ctid}")
+    for src, dst, mode in _HOST_TOOL_FILES:
+        _pct_pull_atomic(ctid, src, dst, mode)
+    # Builders: pull each file the CT lists (names only; a path would let the CT
+    # choose the host destination).
+    listing = subprocess.run(
+        ["pct", "exec", str(ctid), "--", "ls", "-1", _HOST_BUILDERS_SRC],
+        capture_output=True, text=True).stdout
+    for name in listing.split():
+        name = os.path.basename(name.strip())
+        if name:
+            _pct_pull_atomic(ctid, f"{_HOST_BUILDERS_SRC}/{name}",
+                             f"{_HOST_BUILDERS_DST}/{name}", 0o755)
+    log("[update-host-tools] done")
+
+
 def _vm_net1_mac_on(vmid: int, bridge: str) -> str | None:
     """MAC of an existing net1 already on <bridge>, or None (so enable is idempotent)."""
     out = subprocess.run(["qm", "config", str(vmid)], capture_output=True, text=True).stdout
@@ -1082,6 +1152,10 @@ def main() -> None:
     conf     = load_conf()
     base_url = conf["orchestrator_url"].rstrip("/")
     token    = conf["build_token"]
+
+    if action == "update-host-tools":
+        update_host_tools(conf)
+        return
 
     if action == "deploy":
         log(f"[ctrlable-build] deploy release={release} name={template_name} hostname={hostname}")

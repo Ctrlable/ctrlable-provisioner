@@ -101,6 +101,51 @@ check("broker_reachable False", j.get("broker_reachable") is False)
 check("reboot suggested when not reachable", j.get("reboot_suggested") is True)
 
 
+# ---- self-update endpoint: guarded, and passes the resolved ref ------------
+import app.build as _build  # noqa: E402
+
+
+def _run_update(ref=None):
+    return asyncio.run(M.system_self_update(M.SelfUpdateRequest(ref=ref), "admin"))
+
+
+# refused while a build runs
+_build._running.add("2026.11")
+try:
+    _run_update()
+    check("self-update refused during build -> 409", False, "no raise")
+except HTTPException as e:
+    check("self-update refused during build -> 409", e.status_code == 409, str(e.status_code))
+_build._running.discard("2026.11")
+
+# refused while a deploy is in flight
+M.db.list_all_instances = lambda: [{"hostname": "z2m-1", "status": "provisioning"}]
+try:
+    _run_update()
+    check("self-update refused during deploy -> 409", False, "no raise")
+except HTTPException as e:
+    check("self-update refused during deploy -> 409", e.status_code == 409, str(e.status_code))
+
+# clear path: resolves the ref from the install record and calls run_self_update
+M.db.list_all_instances = lambda: []
+M._install_record = lambda: {"ref": "2026.11"}
+seen = {}
+
+
+def _fake_update(ref, settings, **kw):
+    seen["ref"] = ref
+    return {"ok": True, "from": "A", "to": "B", "restarting": True}
+
+
+M.selfupdate.run_self_update = _fake_update
+j = _run_update()
+check("self-update runs with the installed ref when none given", seen.get("ref") == "2026.11", str(seen))
+check("self-update ok passthrough", j.get("ok") is True and j.get("restarting") is True, str(j))
+# explicit ref wins
+j = _run_update(ref="main")
+check("explicit ref overrides", seen.get("ref") == "main", str(seen))
+
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + ", ".join(failures))

@@ -365,6 +365,26 @@ while reporting drift for nobody.
   checks in is the failure this is meant to catch; the heartbeat is the only
   thing that can distinguish "no drift" from "nothing is looking".
 
+**Implemented (2026-11-09):** `app/selfupdate.py` + `POST /api/system/self-update`
+(System tab button). Triggered, not yet auto-polled. It runs inside the
+orchestrator LXC and acts on its own checkout: `git fetch`+`checkout --force` to
+the ref → `pip install` → `npm run build` → **verify the new code imports** →
+write `install.json` → refresh the host tools → detached restart (the client
+re-polls `/api/version`). Any failure before the restart **rolls the checkout
+back** to the prior HEAD and does not restart. Refused (409) while a build or a
+deploy is in flight. `provisioner_version` now rides the heartbeat
+(`platform.py:_provisioner_version`). The host-tools refresh is the key piece:
+the orchestrator SSHes the build key to run **`ctrlable-build update-host-tools`**,
+which pulls the new `ctrlable-build` + `setup-internal-net.sh` + builders out of
+the CT and moves each into place atomically (temp + `os.replace`, never over a
+live file; the empty-file trap of `pct pull` is guarded). An OLD host tool
+(pre-dating that action) rejects the command — expected on a site's FIRST
+self-update, reported and non-fatal, so that initial bootstrap still needs one
+manual `install_host_tools`. `build.conf` now carries `orchestrator_ctid` so the
+host knows which CT to pull from (older hosts fall back to discovering the CT
+that holds the checkout). Still owed vs. the spec above: auto-polling a release
+channel, and multi-version rollback (only the immediately-prior HEAD is kept).
+
 ### 16.7 Three classes of component, three update paths
 
 The catalog is NOT uniform, and a single "update" button would be wrong for

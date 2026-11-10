@@ -313,6 +313,17 @@ async def _heartbeat_loop(device_id: str, device_token: str, db: "StateDB") -> N
                 log.warning("LAN scan failed: %s", e)
 
 
+def _provisioner_version() -> str:
+    """The running provisioner version, so the portal can spot a host that has
+    stopped updating (§ 16.6). Cheap and failure-tolerant — the heartbeat must
+    never break over this."""
+    try:
+        from .selfupdate import installed_version
+        return installed_version()
+    except Exception:                              # noqa: BLE001
+        return "unknown"
+
+
 def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str]) -> dict:
     rx, tx = _wg_stats()
     return _portal_post(
@@ -321,6 +332,7 @@ def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str]
             "rx_bytes": rx,
             "tx_bytes": tx,
             "agent_version": "prov/1.0",
+            "provisioner_version": _provisioner_version(),
             "lan_candidates": lan_candidates,
         },
         token=device_token,

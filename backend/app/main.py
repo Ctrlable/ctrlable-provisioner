@@ -19,6 +19,7 @@ from .drift import Severity
 from .drift_scan import scan_project
 from .manifest import load_all_manifests
 from . import internal_net as inet
+from . import selfupdate
 from .lan import setup_lan_access
 from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
 from .provision import complete_provisioning, get_assignment
@@ -808,6 +809,40 @@ async def internal_lan_enable(_: str | None = Depends(require_auth)) -> dict:
         "reboot_suggested": ok and not reachable,
         "output": output,
     }
+
+
+# ---------------------------------------------------------------------------
+# Provisioner self-update (SPEC § 16.6)
+# ---------------------------------------------------------------------------
+
+class SelfUpdateRequest(BaseModel):
+    ref: str | None = None   # git ref to update to; defaults to the installed ref
+
+
+@app.post("/api/system/self-update")
+async def system_self_update(
+    req: SelfUpdateRequest,
+    _: str | None = Depends(require_auth),
+) -> dict:
+    """Update the orchestrator to a ref and refresh the host tools, then restart.
+    Refused while a build or deploy is in flight (§ 16.6)."""
+    from . import build as _build
+    if _build._running:
+        raise HTTPException(409, f"a build is in progress ({', '.join(sorted(_build._running))}); "
+                                 f"retry once it finishes")
+    inflight = [r["hostname"] for r in db.list_all_instances()
+                if r["status"] in ("pending", "provisioning")]
+    if inflight:
+        raise HTTPException(409, f"a deploy is in progress ({', '.join(inflight)}); "
+                                 f"retry once it finishes")
+    ref = req.ref or _install_record().get("ref") or "main"
+    # The subprocess work is blocking; keep the event loop free.
+    result = await asyncio.to_thread(selfupdate.run_self_update, ref, settings)
+    if not result.get("ok"):
+        # Report the failing stage but keep 200 so the client sees the step log;
+        # the orchestrator did NOT restart and was rolled back where possible.
+        return {"ok": False, **result}
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -697,6 +697,7 @@ ENV
       printf '{\n'
       printf '  "orchestrator_url": "http://%s:8000",\n' "${ORCHESTRATOR_IP}"
       printf '  "build_token": "%s",\n' "${BUILD_TOKEN}"
+      printf '  "orchestrator_ctid": %s,\n' "${VMID}"
       printf '  "container_storage": "%s"' "${STORAGE}"
       [[ -n "$HAOS_IMAGE" ]] && printf ',\n  "haos_image_path": "%s"' "$HAOS_IMAGE"
       [[ -n "$DALI_TOKEN" ]] && printf ',\n  "dali_bridge_token": "%s"' "$DALI_TOKEN"
