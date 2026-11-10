@@ -230,6 +230,18 @@ def version() -> dict:
     return _install_record()
 
 
+@app.get("/api/whoami")
+def whoami() -> dict:
+    """Unauthenticated discovery marker. The Ctrlable Pro orchestrator add-on
+    scans the site LAN for this exact signature to find the orchestrator without
+    anyone typing an IP — a plain version endpoint isn't distinctive enough, so
+    this names the service explicitly."""
+    rec = _install_record()
+    return {"service": "ctrlable-orchestrator",
+            "version": rec.get("version", "unknown"),
+            "revision": rec.get("revision", "unknown")}
+
+
 # ---------------------------------------------------------------------------
 # Releases
 # ---------------------------------------------------------------------------

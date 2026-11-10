@@ -9,12 +9,19 @@ function getToken() { return localStorage.getItem(TOKEN_KEY) }
 function setToken(t) { localStorage.setItem(TOKEN_KEY, t) }
 function clearToken() { localStorage.removeItem(TOKEN_KEY) }
 
+// Resolve an app path against the document base so the app works both at the
+// server root (direct, baseURI = "/") and under a dynamic prefix (HA ingress,
+// where the proxy injects <base href=".../">). A leading slash is absolute and
+// would escape the ingress prefix, so strip it and let the browser resolve it
+// relative to <base>.
+const rel = (p) => (typeof p === 'string' && p[0] === '/') ? p.slice(1) : p
+
 async function apiFetch(path, opts = {}) {
   const headers = { ...opts.headers }
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
   if (opts.body && typeof opts.body === 'string') headers['Content-Type'] = 'application/json'
-  const res = await fetch(path, { ...opts, headers })
+  const res = await fetch(rel(path), { ...opts, headers })
   if (res.status === 401) { clearToken(); window.location.reload() }
   return res
 }
@@ -31,7 +38,7 @@ function LoginScreen({ onLogin }) {
   const submit = async (e) => {
     e.preventDefault(); setLoading(true); setError(null)
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch(rel('/api/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
@@ -79,7 +86,7 @@ function SetupPasswordScreen({ onDone }) {
     if (pw.length < 8)  { setError('Minimum 8 characters'); return }
     setLoading(true); setError(null)
     try {
-      const res = await fetch('/api/auth/setup', {
+      const res = await fetch(rel('/api/auth/setup'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ new_password: pw }),
@@ -1055,7 +1062,7 @@ function SystemTab() {
         const poll = setInterval(async () => {
           tries += 1
           try {
-            const v = await (await fetch('/api/version')).json()
+            const v = await (await fetch(rel('/api/version'))).json()
             setVersion(v)
             if (v.revision && data.to && v.revision !== (version?.revision)) { clearInterval(poll) }
           } catch { /* restart window — keep polling */ }
@@ -1192,7 +1199,7 @@ export default function App() {
   const [configGuest, setConfigGuest]       = useState(null)
 
   useEffect(() => {
-    fetch('/api/auth/status').then(r => r.json())
+    fetch(rel('/api/auth/status')).then(r => r.json())
       .then(d => {
         setMustChange(d.must_change_password)
         setAuthReady(true)
