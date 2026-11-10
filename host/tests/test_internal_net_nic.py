@@ -263,6 +263,78 @@ check("enable attached NO guest to the foreign bridge",
       not any(c[:2] == ["qm", "set"] for c in recF.calls), str(recF.argvs()))
 
 
+# ---- migrate-internal: move a running service onto the internal LAN ---------
+check("parse migrate-internal", _parse("ctrlable-build migrate-internal 2026.11 zigbee2mqtt 105")
+      == ("migrate-internal", "2026.11", "zigbee2mqtt", "105"))
+
+import io, contextlib
+MIG_MANIFEST = {"network": {"internal": {
+        "enabled": True, "bridge": "vmbr1", "subnet": "198.18.0.0/24",
+        "assignments": {"ctrlable-pro": 10, "zwavejs": 20, "zigbee2mqtt": 21, "frigate": 30}}},
+    "templates": {"zigbee2mqtt": {"kind": "lxc"}, "zwavejs": {"kind": "lxc"}}}
+
+class MigRun:
+    """subprocess.run stub that answers each pct call migrate-internal makes."""
+    def __init__(self, expected_ip, net1_present=False):
+        self.calls = []; self.expected_ip = expected_ip; self.net1_present = net1_present
+    def __call__(self, argv, *a, **kw):
+        self.calls.append(list(argv))
+        class R: returncode = 0; stdout = ""; stderr = ""
+        two = argv[:2]
+        if two == ["pct", "config"]:
+            R.stdout = ("net1: name=eth1,bridge=vmbr1,ip=%s/24,type=veth\n" % self.expected_ip
+                        if self.net1_present else "net0: name=eth0,bridge=vmbr0\n")
+        elif two == ["pct", "exec"]:
+            script = argv[6] if len(argv) > 6 else ""
+            if "addr show eth1" in script:   R.stdout = "eth1@if18 UP %s/24" % self.expected_ip
+            elif "/dev/tcp/" in script:      R.stdout = "OPEN"
+            elif "configuration.yaml" in script or "systemctl restart" in script: R.stdout = "REWROTE"
+            elif "journalctl" in script:     R.stdout = "info: z2m: Connected to MQTT server"
+        return R
+    def argvs(self): return [" ".join(str(x) for x in c) for c in self.calls]
+
+def run_migrate(template, vmid, net1_present=False):
+    octet = MIG_MANIFEST["network"]["internal"]["assignments"][template]
+    rec = MigRun("198.18.0.%d" % octet, net1_present=net1_present)
+    cb.subprocess.run = rec
+    cb._bridge_is_ours = lambda b: True
+    cb.time.sleep = lambda *a, **k: None
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cb.migrate_internal(MIG_MANIFEST, {}, template, vmid)
+    return rec, buf.getvalue()
+
+# (a) broker client (z2m): attach net1, rewrite MQTT config, confirm reconnect
+rec, out = run_migrate("zigbee2mqtt", 105)
+check("migrate z2m: attaches net1 at .21",
+      "pct set 105 -net1 name=eth1,bridge=vmbr1,ip=198.18.0.21/24" in rec.argvs(), str(rec.argvs()))
+check("migrate z2m: rewrites its config (configuration.yaml touched)",
+      any("configuration.yaml" in (c[6] if len(c) > 6 else "") for c in rec.calls if c[:2] == ["pct","exec"]))
+check("migrate z2m: reports reconnect to the broker", "reconnected to the broker" in out, out[-200:])
+
+# (b) HA-served (zwavejs): NIC only, NO config rewrite, reports the HA-side step
+rec2, out2 = run_migrate("zwavejs", 104)
+check("migrate zwavejs: attaches net1 at .20",
+      "pct set 104 -net1 name=eth1,bridge=vmbr1,ip=198.18.0.20/24" in rec2.argvs(), str(rec2.argvs()))
+check("migrate zwavejs: does NOT rewrite a service config",
+      not any("configuration.yaml" in (c[6] if len(c) > 6 else "") for c in rec2.calls if c[:2] == ["pct","exec"]))
+check("migrate zwavejs: reports the HA-side URL change is pending",
+      "HA-side URL change pending" in out2, out2[-200:])
+
+# (c) idempotent: net1 already present -> no `pct set`, still re-homes
+rec3, out3 = run_migrate("zigbee2mqtt", 105, net1_present=True)
+check("migrate idempotent: no pct set when net1 already on the bridge",
+      not any(c[:2] == ["pct", "set"] for c in rec3.calls), str(rec3.argvs()))
+
+# (d) the broker VM itself is not a migratable service
+cb.subprocess.run = MigRun("198.18.0.10"); cb._bridge_is_ours = lambda b: True; cb.time.sleep = lambda *a, **k: None
+try:
+    cb.migrate_internal(MIG_MANIFEST, {}, "ctrlable-pro", 100)
+    check("migrate refuses the broker template", False, "no SystemExit")
+except SystemExit:
+    check("migrate refuses the broker template", True)
+
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + ", ".join(failures)); sys.exit(1)

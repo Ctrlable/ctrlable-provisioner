@@ -146,6 +146,39 @@ j = _run_update(ref="main")
 check("explicit ref overrides", seen.get("ref") == "main", str(seen))
 
 
+# ---- migrate: reject the broker, validate the template, run the exact cmd ---
+M._broker_instance = lambda: {"type": "ctrlable-pro", "vmid": 100, "release": "2026.11"}
+
+try:
+    asyncio.run(M.internal_lan_migrate(M.MigrateInternalRequest(vmid=100, template="ctrlable-pro"), "admin"))
+    check("migrate rejects the broker template -> 400", False, "no raise")
+except HTTPException as e:
+    check("migrate rejects the broker template -> 400", e.status_code == 400, str(e.status_code))
+
+try:
+    asyncio.run(M.internal_lan_migrate(M.MigrateInternalRequest(vmid=999, template="nope"), "admin"))
+    check("migrate unknown template (no assignment) -> 400", False, "no raise")
+except HTTPException as e:
+    check("migrate unknown template (no assignment) -> 400", e.status_code == 400, str(e.status_code))
+
+cap = _stub_ssh(b"[migrate-internal] attached net1 198.18.0.21/24 (eth1)\n"
+                b"[migrate-internal] OK: zigbee2mqtt reconnected to the broker at 198.18.0.10\n", 0)
+j = asyncio.run(M.internal_lan_migrate(M.MigrateInternalRequest(vmid=105, template="zigbee2mqtt"), "admin"))
+check("ran migrate-internal with release+template+vmid",
+      cap["argv"][-1] == "ctrlable-build migrate-internal 2026.11 zigbee2mqtt 105", str(cap.get("argv", [])[-1:]))
+check("migrate ok True", j.get("ok") is True, str(j))
+check("migrate internal_ip .21", j.get("internal_ip") == "198.18.0.21", str(j.get("internal_ip")))
+check("migrate done True (OK: in output)", j.get("done") is True)
+check("migrate reconnected True", j.get("reconnected") is True)
+
+M._broker_instance = lambda: None
+try:
+    asyncio.run(M.internal_lan_migrate(M.MigrateInternalRequest(vmid=105, template="zigbee2mqtt"), "admin"))
+    check("migrate without broker -> 409", False, "no raise")
+except HTTPException as e:
+    check("migrate without broker -> 409", e.status_code == 409, str(e.status_code))
+
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + ", ".join(failures))

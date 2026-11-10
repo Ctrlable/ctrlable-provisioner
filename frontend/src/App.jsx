@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import './App.css'
 
 // ---------------------------------------------------------------------------
@@ -664,10 +664,23 @@ function MapTab({ data, lan, onAction, onConfigure, goTo }) {
 // ---------------------------------------------------------------------------
 // Internal network tab
 // ---------------------------------------------------------------------------
-function InternalNetworkTab({ lan, reloadLan }) {
+function InternalNetworkTab({ lan, data, reloadLan }) {
   const [enabling, setEnabling] = useState(false)
   const [result, setResult]     = useState(null)
   const [error, setError]       = useState(null)
+  const [migrating, setMigrating]   = useState(null)
+  const [migResults, setMigResults] = useState({})
+
+  const migrate = async (vmid, template) => {
+    setMigrating(template)
+    try {
+      const res = await apiFetch('/api/lan/internal/migrate', { method: 'POST', body: JSON.stringify({ vmid, template }) })
+      const d = await res.json()
+      setMigResults(m => ({ ...m, [template]: res.ok ? d : { ok: false, output: d.detail || 'failed' } }))
+      if (res.ok) reloadLan()
+    } catch (e) { setMigResults(m => ({ ...m, [template]: { ok: false, output: e.message } })) }
+    finally { setMigrating(null) }
+  }
 
   const enable = async () => {
     setEnabling(true); setError(null); setResult(null)
@@ -738,17 +751,43 @@ function InternalNetworkTab({ lan, reloadLan }) {
       {configured && (
         <div className="netgrid">
           <div className="card" style={{margin:0}}>
-            <div className="hd"><h2>Address plan</h2><span className="sub">deterministic, per service</span></div>
+            <div className="hd"><h2>Address plan</h2><span className="sub">deterministic, per service — move one onto the backplane in place</span></div>
             <table>
-              <thead><tr><th>Service</th><th>Internal IP</th><th>Mode</th><th>Status</th></tr></thead>
+              <thead><tr><th>Service</th><th>Internal IP</th><th>Mode</th><th>Status</th><th></th></tr></thead>
               <tbody>
                 <tr><td>Ctrlable Pro</td><td className="mono" style={{color:'var(--brand)'}}>{lan.broker_ip || internalIp(lan,'ctrlable-pro')}</td>
                   <td className="muted small">DHCP-reserved</td>
-                  <td>{lan.broker_known ? <Pill status="running">reserved</Pill> : <Pill status="pending">pending</Pill>}</td></tr>
-                {plan.filter(p => p.type !== 'ctrlable-pro').map(p => (
-                  <tr key={p.type}><td>{p.type}</td><td className="mono">{p.ip}</td>
-                    <td className="muted small">static</td><td><Pill status="pending">pending</Pill></td></tr>
-                ))}
+                  <td>{lan.broker_known ? <Pill status="running">reserved</Pill> : <Pill status="pending">pending</Pill>}</td><td /></tr>
+                {plan.filter(p => p.type !== 'ctrlable-pro').map(p => {
+                  const guest = data?.guests?.find(g => g.type === p.type)
+                  const r = migResults[p.type]
+                  return (
+                    <Fragment key={p.type}>
+                      <tr>
+                        <td>{p.type}</td>
+                        <td className="mono">{p.ip}</td>
+                        <td className="muted small">static</td>
+                        <td>{guest ? <Pill status={guest.status} /> : <Pill status="pending">not deployed</Pill>}</td>
+                        <td className="row-actions">
+                          {guest && <button className="btn-xs" onClick={() => migrate(guest.vmid, p.type)} disabled={migrating === p.type}>
+                            {migrating === p.type ? 'Moving…' : 'Move to internal LAN'}</button>}
+                        </td>
+                      </tr>
+                      {r && (
+                        <tr><td colSpan={5} style={{background:'var(--surface-2)'}}>
+                          {r.ok
+                            ? <div className="banner success" style={{margin:0}}>
+                                {r.done
+                                  ? `${p.type} is on the internal LAN at ${r.internal_ip}.${r.reconnected ? ' Reconnected to the broker.' : ''}`
+                                  : `${p.type}: NIC attached at ${r.internal_ip} — see the log for the next step.`}
+                              </div>
+                            : <div className="banner error" style={{margin:0}}>Move failed — see the log.</div>}
+                          {r.output && <pre className="build-log">{r.output}</pre>}
+                        </td></tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -1461,7 +1500,7 @@ export default function App() {
 
         <main>
           {tab === 'map'      && <MapTab data={dashboard} lan={lan} onAction={handleAction} onConfigure={setConfigGuest} goTo={setTab} />}
-          {tab === 'network'  && <InternalNetworkTab lan={lan} reloadLan={loadLan} />}
+          {tab === 'network'  && <InternalNetworkTab lan={lan} data={dashboard} reloadLan={loadLan} />}
           {tab === 'deploy'   && <DeployTab releases={releases} />}
           {tab === 'releases' && <ReleasesTab releases={releases} />}
           {tab === 'platform' && <PlatformTab />}

@@ -823,6 +823,60 @@ async def internal_lan_enable(_: str | None = Depends(require_auth)) -> dict:
     }
 
 
+class MigrateInternalRequest(BaseModel):
+    vmid: int
+    template: str
+
+
+@app.post("/api/lan/internal/migrate")
+async def internal_lan_migrate(
+    req: MigrateInternalRequest,
+    _: str | None = Depends(require_auth),
+) -> dict:
+    """Move an already-deployed LXC service onto the internal LAN in place:
+    attach its net1 and re-home its app wiring (for a broker client like z2m,
+    rewrite its MQTT server to the internal broker and restart). Idempotent."""
+    if not settings.build_configured():
+        raise HTTPException(400, "host trigger not configured (build key/host)")
+    if req.template == inet.BROKER_TEMPLATE:
+        raise HTTPException(400, "the broker VM is the hub of the internal LAN, not a service to migrate")
+    broker = _broker_instance()
+    if not broker:
+        raise HTTPException(409, "no deployed ctrlable-pro VM found; cannot resolve the release")
+    release = broker["release"]
+    manifests = load_all_manifests()
+    net = inet.from_manifest(manifests[release]) if release in manifests else None
+    if not net or net.ip_for(req.template) is None:
+        raise HTTPException(400, f"{req.template} has no internal-LAN assignment in release {release}")
+    cmd = [
+        "ssh", "-i", settings.build_key_path,
+        "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=60",
+        f"root@{settings.pve_host}",
+        f"ctrlable-build migrate-internal {release} {req.template} {req.vmid}",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _err = await proc.communicate()
+    output = out.decode(errors="replace")
+    ok = proc.returncode == 0
+    return {
+        "ok": ok,
+        "template": req.template,
+        "vmid": req.vmid,
+        "internal_ip": net.ip_for(req.template),
+        # the host tool prints "OK:" once the move is complete (reconnected, or
+        # NIC-attached for an HA-served service); "reconnected" marks a live
+        # broker client that re-attached to MQTT.
+        "done": ok and "OK:" in output,
+        "reconnected": "reconnected to the broker" in output,
+        "output": output,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Provisioner self-update (SPEC § 16.6)
 # ---------------------------------------------------------------------------

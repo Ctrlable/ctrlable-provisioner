@@ -71,6 +71,11 @@ def parse_args() -> tuple[str, str, str | None, str | None]:
     parts = original.split()
     if len(parts) == 5 and parts[0] == "ctrlable-build" and parts[1] == "deploy":
         return "deploy", parts[2], parts[3], parts[4]
+    # migrate-internal <release> <template> <vmid> — move an already-deployed LXC
+    # service onto the internal LAN in place (attach net1, re-home its app). The
+    # vmid rides in the hostname slot.
+    if len(parts) == 5 and parts[0] == "ctrlable-build" and parts[1] == "migrate-internal":
+        return "migrate-internal", parts[2], parts[3], parts[4]
     if len(parts) == 3 and parts[0] == "ctrlable-build" and parts[1] == "preflight":
         return "preflight", parts[2], None, None
     # enable-internal-net <release> [ha_vmid] — bring the internal LAN up on an
@@ -85,6 +90,7 @@ def parse_args() -> tuple[str, str, str | None, str | None]:
         f"Expected: ctrlable-build deploy <release> <template_name> <hostname>\n"
         f"      or: ctrlable-build preflight <release>\n"
         f"      or: ctrlable-build enable-internal-net <release> [ha_vmid]\n"
+        f"      or: ctrlable-build migrate-internal <release> <template> <vmid>\n"
         f"      or: ctrlable-build update-host-tools"
     )
 
@@ -998,6 +1004,133 @@ def enable_internal_net(manifest: dict, conf: dict, ha_vmid: int | None) -> None
             f"a minute; if it does not, reboot VM {ha_vmid} to pick it up.")
 
 
+# ---------------------------------------------------------------------------
+# migrate-internal — move an ALREADY-DEPLOYED service onto the internal LAN in
+# place (no redeploy): attach its net1, then re-home its app wiring.
+#
+# The re-homing is NOT uniform. A service that CONNECTS OUT to the broker
+# (zigbee2mqtt -> MQTT) has its own config rewritten here and is restarted. A
+# service that Home Assistant CONNECTS IN TO (zwave-js, frigate) only needs the
+# NIC on this side — the integration URL is changed on the HA VM, so we attach
+# the NIC and report the endpoint rather than guess at HA's .storage.
+# ---------------------------------------------------------------------------
+_MIGRATORS = {
+    "zigbee2mqtt": {"kind": "broker_client", "unit": "zigbee2mqtt",
+                    "config": "/opt/zigbee2mqtt/data/configuration.yaml"},
+    "zwavejs":     {"kind": "ha_served", "port": 3000, "what": "Home Assistant's Z-Wave JS integration"},
+    "frigate":     {"kind": "ha_served", "port": 5000, "what": "Home Assistant's Frigate integration"},
+    "freepbx":     {"kind": "ha_served", "port": None,  "what": "the PBX / intercom configuration"},
+}
+
+
+def _lxc_net1_on(vmid: int, bridge: str) -> bool:
+    """True if the LXC already has a net1 on <bridge> (migrate is idempotent)."""
+    out = subprocess.run(["pct", "config", str(vmid)], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if line.startswith("net1:") and f"bridge={bridge}" in line:
+            return True
+    return False
+
+
+def _pct_exec(vmid: int, script: str, timeout: int = 90):
+    return subprocess.run(["pct", "exec", str(vmid), "--", "bash", "-lc", script],
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def migrate_internal(manifest: dict, conf: dict, template: str, vmid: int) -> None:
+    """Re-home a running LXC service onto the internal LAN. Idempotent."""
+    cfg = _internal_net_cfg(manifest)
+    if not cfg:
+        die("this release declares no internal management LAN (network.internal)")
+    if template == BROKER_TEMPLATE:
+        die(f"{template} is the broker (the hub of the internal LAN), not a service to migrate")
+    bridge = cfg["bridge"]
+    if not _bridge_exists(bridge):
+        die(f"{bridge} is not up on this host — run 'enable-internal-net' first")
+    if not _bridge_is_ours(bridge):
+        die(f"{bridge} exists but is not the internal LAN bridge; refusing to touch it")
+    ipcidr = _internal_ip(cfg, template)
+    if not ipcidr:
+        die(f"no internal-LAN assignment for template {template!r} in this release")
+    ip = ipcidr.split("/")[0]
+    broker_ipcidr = _internal_ip(cfg, BROKER_TEMPLATE)
+    broker_ip = broker_ipcidr.split("/")[0] if broker_ipcidr else None
+
+    tmpl = (manifest.get("templates") or {}).get(template, {})
+    if tmpl.get("kind", "lxc") == "vm":
+        die(f"{template} is a VM, not an LXC; migrate-internal handles LXC services")
+
+    log(f"[migrate-internal] {template} (vmid {vmid}) -> {ip} on {bridge}")
+
+    # 1) attach net1 (idempotent; never touches net0 / the site LAN)
+    if _lxc_net1_on(vmid, bridge):
+        log(f"[migrate-internal] net1 already on {bridge}; keeping it")
+    else:
+        subprocess.run(["pct", "set", str(vmid),
+                        "-net1", f"name=eth1,bridge={bridge},ip={ipcidr}"], check=True)
+        log(f"[migrate-internal] attached net1 {ipcidr} (eth1)")
+        time.sleep(2)
+
+    # 2) the container really has the internal address
+    probe = _pct_exec(vmid, "ip -br -4 addr show eth1 2>/dev/null")
+    if ip not in probe.stdout:
+        die(f"[migrate-internal] eth1 did not come up with {ip} inside vmid {vmid} "
+            f"(got: {probe.stdout.strip() or 'nothing'})")
+    log(f"[migrate-internal] eth1 up inside container: {probe.stdout.strip()}")
+
+    m = _MIGRATORS.get(template)
+    if not m:
+        log(f"[migrate-internal] no app migrator for {template!r}; NIC attached only")
+        log(f"[migrate-internal] OK: {template} is on the internal LAN at {ip} (NIC only)")
+        return
+
+    if m["kind"] == "ha_served":
+        where = f"{ip}:{m['port']}" if m.get("port") else ip
+        log(f"[migrate-internal] {template} is reached BY Home Assistant, not the other way")
+        log(f"[migrate-internal] point {m['what']} at {where}, then it survives a site move")
+        log(f"[migrate-internal] OK: {template} is on the internal LAN at {ip} (NIC attached; HA-side URL change pending)")
+        return
+
+    # broker_client: prove the broker is reachable, then re-home + restart
+    if broker_ip:
+        r = _pct_exec(vmid, f"timeout 3 bash -c 'echo > /dev/tcp/{broker_ip}/1883' 2>/dev/null && echo OPEN || echo CLOSED")
+        if "OPEN" not in r.stdout:
+            die(f"[migrate-internal] broker {broker_ip}:1883 not reachable from the container — "
+                f"is the internal LAN enabled and the broker VM up?")
+        log(f"[migrate-internal] broker {broker_ip}:1883 reachable from the container")
+
+    unit, cfgfile, target = m["unit"], m["config"], f"mqtt://{broker_ip}:1883"
+    script = (
+        f'set -e; f="{cfgfile}"; '
+        f'[ -f "$f" ] || {{ echo "NOCONFIG:$f"; exit 3; }}; '
+        f'if grep -q "server: {target}" "$f"; then echo ALREADY; exit 0; fi; '
+        f'cp -a "$f" "$f.bak-$(date +%Y%m%d-%H%M%S)"; '
+        f'sed -i -E "s#(server:[[:space:]]*mqtt://)[^[:space:]]+#\\1{broker_ip}:1883#" "$f"; '
+        f'systemctl restart {unit}; echo REWROTE'
+    )
+    rr = _pct_exec(vmid, script)
+    if rr.returncode != 0:
+        die(f"[migrate-internal] rewrite/restart of {unit} failed "
+            f"(exit {rr.returncode}): {rr.stdout.strip()} {rr.stderr.strip()}")
+    if "ALREADY" in rr.stdout:
+        log(f"[migrate-internal] {unit} already points at {broker_ip}; nothing to change")
+        log(f"[migrate-internal] OK: {template} already re-homed to the broker at {broker_ip}")
+        return
+    log(f"[migrate-internal] {unit}: mqtt.server -> {target}, service restarted")
+
+    # 3) confirm it reconnected to the broker over the internal LAN
+    time.sleep(8)
+    vlog = _pct_exec(vmid, f"journalctl -u {unit} -n 50 --no-pager 2>/dev/null | "
+                           f"grep -iE 'connected to mqtt|not authorized|econnrefused|error' | tail -4")
+    if vlog.stdout.strip():
+        log(f"[migrate-internal] {unit} log:\n{vlog.stdout.strip()}")
+    if "Connected to MQTT" in vlog.stdout:
+        log(f"[migrate-internal] OK: {template} reconnected to the broker at {broker_ip}")
+    else:
+        log(f"[migrate-internal] {template} re-homed and restarted; the MQTT reconnect is not "
+            f"confirmed in the log yet — check 'journalctl -u {unit}' shortly")
+
+
 def _orchestrator_ctid(conf: dict) -> int:
     """The LXC id of the orchestrator (where the repo lives), to pull host tools
     from. From build.conf, else discovered by finding the CT that has the repo."""
@@ -1227,6 +1360,11 @@ def main() -> None:
         # template_name slot carries the HA vmid (or None to only build the fabric).
         ha_vmid = int(template_name) if template_name else None
         enable_internal_net(manifest, conf, ha_vmid)
+        return
+
+    if action == "migrate-internal":
+        # template_name = template, hostname slot = vmid.
+        migrate_internal(manifest, conf, template_name, int(hostname))
         return
 
     templates = manifest.get("templates", {})
