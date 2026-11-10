@@ -52,6 +52,10 @@ def die(msg: str) -> None:
 # once, in order, and keep the total equal to the number a path really has.
 PHASE_TOTAL = 6
 
+# The template whose internal address the MQTT broker lives at — the HAOS VM.
+# Must match backend/app/internal_net.py:BROKER_TEMPLATE.
+BROKER_TEMPLATE = "ctrlable-pro"
+
 
 def phase(n: int, label: str) -> None:
     log(f"[PHASE] {n}/{PHASE_TOTAL} {label}")
@@ -69,10 +73,16 @@ def parse_args() -> tuple[str, str, str | None, str | None]:
         return "deploy", parts[2], parts[3], parts[4]
     if len(parts) == 3 and parts[0] == "ctrlable-build" and parts[1] == "preflight":
         return "preflight", parts[2], None, None
+    # enable-internal-net <release> [ha_vmid] — bring the internal LAN up on an
+    # already-deployed host (ha_vmid rides in the template_name slot).
+    if len(parts) in (3, 4) and parts[0] == "ctrlable-build" \
+            and parts[1] == "enable-internal-net":
+        return "enable-internal-net", parts[2], (parts[3] if len(parts) == 4 else None), None
     die(
         f"Unexpected SSH_ORIGINAL_COMMAND: {original!r}\n"
         f"Expected: ctrlable-build deploy <release> <template_name> <hostname>\n"
-        f"      or: ctrlable-build preflight <release>"
+        f"      or: ctrlable-build preflight <release>\n"
+        f"      or: ctrlable-build enable-internal-net <release> [ha_vmid]"
     )
 
 
@@ -864,6 +874,96 @@ def _dnsmasq_reserve(vmid: int, mac: str, ip: str,
     subprocess.run(["systemctl", "reload", "dnsmasq"], capture_output=True)
 
 
+def _setup_script() -> str | None:
+    """Locate the extracted host setup script (installed beside the host tools).
+    install.sh keeps its own inline copy — see host/setup-internal-net.sh."""
+    for p in ("/usr/local/lib/ctrlable/setup-internal-net.sh",
+              str(Path(__file__).resolve().parent / "setup-internal-net.sh")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def enable_internal_net(manifest: dict, conf: dict, ha_vmid: int | None) -> None:
+    """Bring the internal management LAN up on an ALREADY-DEPLOYED host.
+
+    New appliances get this at bootstrap (install.sh). This is the remote path
+    for existing sites: create vmbr1 + dnsmasq (same script), then attach the
+    HAOS VM so the broker lands on its reserved address. Idempotent. Existing
+    guests are NOT re-wired here — that is a redeploy (which now adds net1) or a
+    deliberate follow-up, so running this never disturbs a working service.
+    The HA VM is NOT rebooted: net1 is hot-plugged and we only REPORT whether it
+    came up, leaving the (brief, customer-visible) reboot an explicit decision.
+    """
+    cfg_m = _internal_net_cfg(manifest)
+    if not cfg_m:
+        die("this release declares no internal management LAN (network.internal)")
+
+    # 1) fabric: vmbr1 + dnsmasq, via the one validated implementation.
+    script = _setup_script()
+    if not script:
+        die("setup-internal-net.sh not found on host; reinstall host tools "
+            "(install_host_tools) then retry")
+    log("[enable-internal-net] creating bridge + dnsmasq (vmbr1)")
+    env = dict(os.environ)
+    env["INTERNAL_SUBNET"] = cfg_m["subnet"]
+    r = subprocess.run(["bash", script], env=env)
+    if r.returncode != 0:
+        die(f"setup-internal-net.sh failed (exit {r.returncode})")
+
+    # Re-read cfg: the script may have chosen a fallback subnet (collision) and
+    # written it to /etc/ctrlable/internal-net.conf, which _internal_net_cfg honours.
+    cfg = _internal_net_cfg(manifest)
+    bridge = cfg["bridge"]
+    if not _bridge_exists(bridge):
+        die(f"{bridge} is not up after setup; see 'journalctl -u dnsmasq' and "
+            f"'/etc/network/interfaces.d/ctrlable-internal'")
+    log(f"[enable-internal-net] fabric up: {bridge} on {cfg['subnet']}")
+
+    # 2) attach the HAOS VM so the broker is reachable at its reserved address.
+    broker_ipcidr = _internal_ip(cfg, BROKER_TEMPLATE)
+    broker_ip = broker_ipcidr.split("/")[0] if broker_ipcidr else None
+    if ha_vmid is None:
+        log("[enable-internal-net] no HA vmid supplied; fabric is up but the "
+            "broker VM was not attached — pass the ctrlable-pro vmid to finish")
+        return
+
+    existing_mac = _vm_net1_mac_on(ha_vmid, bridge)
+    if existing_mac:
+        log(f"[enable-internal-net] VM {ha_vmid} already has net1 on {bridge} "
+            f"({existing_mac}); ensuring reservation only")
+        _dnsmasq_reserve(ha_vmid, existing_mac, broker_ip)
+    else:
+        _add_internal_vm_nic(ha_vmid, BROKER_TEMPLATE, manifest)
+
+    # 3) report whether the hot-plugged NIC came up on the reserved address.
+    if broker_ip and _wait_reachable(broker_ip, 30):
+        log(f"[enable-internal-net] OK: broker reachable at {broker_ip} on {bridge}")
+    else:
+        log(f"[enable-internal-net] net1 attached + reserved for {broker_ip}, but "
+            f"it is not answering yet. HAOS usually DHCPs a hot-plugged NIC within "
+            f"a minute; if it does not, reboot VM {ha_vmid} to pick it up.")
+
+
+def _vm_net1_mac_on(vmid: int, bridge: str) -> str | None:
+    """MAC of an existing net1 already on <bridge>, or None (so enable is idempotent)."""
+    out = subprocess.run(["qm", "config", str(vmid)], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if line.startswith("net1:") and f"bridge={bridge}" in line:
+            m = re.search(r"(?:virtio|macaddr)=([0-9A-Fa-f:]{17})", line)
+            return m.group(1) if m else None
+    return None
+
+
+def _wait_reachable(ip: str, secs: int) -> bool:
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        if subprocess.run(["ping", "-c1", "-W1", ip], capture_output=True).returncode == 0:
+            return True
+        time.sleep(2)
+    return False
+
+
 def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) -> int:
     phase(2, "allocating vmid")
     vmid = next_vmid()
@@ -997,6 +1097,12 @@ def main() -> None:
 
     if action == "preflight":
         preflight(release, manifest, conf)
+        return
+
+    if action == "enable-internal-net":
+        # template_name slot carries the HA vmid (or None to only build the fabric).
+        ha_vmid = int(template_name) if template_name else None
+        enable_internal_net(manifest, conf, ha_vmid)
         return
 
     templates = manifest.get("templates", {})

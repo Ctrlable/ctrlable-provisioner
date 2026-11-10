@@ -823,6 +823,13 @@ install_host_tools() {
     chmod +x /usr/local/bin/ctrlable-build
     ok "ctrlable-build installed at /usr/local/bin/ctrlable-build"
 
+    # The extracted internal-LAN setup, so `ctrlable-build enable-internal-net`
+    # can bring the fabric up on an already-deployed host (SPEC § 20).
+    mkdir -p /usr/local/lib/ctrlable
+    pct_pull /opt/ctrlable-provisioner/host/setup-internal-net.sh /usr/local/lib/ctrlable/setup-internal-net.sh
+    chmod +x /usr/local/lib/ctrlable/setup-internal-net.sh
+    ok "setup-internal-net.sh installed at /usr/local/lib/ctrlable/"
+
     # Ctrlable-owned builders (e.g. dali-bridge.sh) — bundled, not community-scripts.
     log "installing ctrlable builders on host"
     mkdir -p /opt/ctrlable/builders

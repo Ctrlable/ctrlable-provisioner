@@ -628,9 +628,34 @@ so a surprise overlay cannot make it collide silently.
 from Proxmox (no cloud-init), so it gets `net1` on `vmbr1` and DHCP-reserves its
 address off a host **dnsmasq** keyed by the MAC ctrlable-build assigns.
 
+dnsmasq serves reservations from a **dhcp-hostsfile** (`/var/lib/misc/ctrlable-reservations`,
+0644), NOT a config drop-in: dnsmasq reads `dhcp-host=` in a config file only at
+startup but re-reads a hostsfile on `reload`, so a reloaded reservation silently
+never takes effect and the guest keeps a dynamic lease (caught in validation
+2026-11-09). `ctrlable-build` upserts that file by IP so a redeploy (fresh MAC,
+same address) replaces the owner instead of leaving two MACs on one IP.
+
 **Phasing.** Phase 1 (done): the manifest block, `internal_net.py`, and the
 orchestrator deriving `mqtt_host` from the internal map in `deploy.py`
 (`_with_internal_net`; an explicitly-supplied `mqtt_host` still wins), with
-`tests/test_internal_net.py`. Phase 2 (host side): `install.sh` creates `vmbr1` +
-dnsmasq with the collision check, and `ctrlable-build` adds each guest's `net1` +
-the VM's dnsmasq reservation.
+`tests/test_internal_net.py`. Phase 2 (host side, done): `install.sh` creates
+`vmbr1` + dnsmasq with the collision check, and `ctrlable-build` adds each
+guest's `net1` + the VM's dnsmasq reservation.
+
+**Enabling an existing appliance remotely.** New appliances get all of the above
+at bootstrap. An already-deployed appliance gains it without a reinstall:
+`POST /api/lan/internal/enable` resolves the site's release and HA-VM vmid from
+the instance table and runs `ctrlable-build enable-internal-net <release> <vmid>`
+over the same command-restricted key as a deploy. That action brings up the
+fabric (via `host/setup-internal-net.sh` — the one validated copy of the bootstrap
+logic; `install.sh` keeps an inline twin because it runs piped from curl with no
+repo on the host, and `host/tests/test_internal_net_sync.py` pins the two
+byte-for-byte) and hot-plugs the HA VM's `net1`, then **reports** whether the
+broker came up on its reserved address — it never reboots the customer's HA VM;
+a reboot, if the hot-plug didn't take, stays an explicit operator action.
+Existing non-HA guests are not re-wired by enable; that is a redeploy (which now
+adds `net1`) or a deliberate follow-up, so enabling never disturbs a running
+service. `GET /api/lan/internal` reports the plan; live host state is the enable
+run's own probe output (the orchestrator LXC cannot see the host bridge).
+Rollout is therefore per-site: self-update (ships the new orchestrator + host
+tool), one `enable`, verify — not a fleet blast.

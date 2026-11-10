@@ -127,6 +127,73 @@ body2 = rf.read_text()
 check(".10 survives adding .100 (no suffix confusion)",
       "BC:24:11:99:88:77,198.18.0.10" in body2 and "BC:24:11:00:00:01,198.18.0.100" in body2, body2)
 
+# ---- parse_args accepts the enable-internal-net command ---------------------
+def _parse(cmdline):
+    os.environ["SSH_ORIGINAL_COMMAND"] = cmdline
+    return cb.parse_args()
+
+check("parse enable w/ vmid", _parse("ctrlable-build enable-internal-net 2026.11 100")
+      == ("enable-internal-net", "2026.11", "100", None))
+check("parse enable w/o vmid", _parse("ctrlable-build enable-internal-net 2026.11")
+      == ("enable-internal-net", "2026.11", None, None))
+check("deploy still parses", _parse("ctrlable-build deploy 2026.11 zigbee2mqtt z2m-1")
+      == ("deploy", "2026.11", "zigbee2mqtt", "z2m-1"))
+
+
+# ---- enable_internal_net: fabric + attach the HA VM, idempotent, no reboot --
+BROKER_MANIFEST = {"network": {"internal": {
+    "enabled": True, "bridge": "vmbr1", "subnet": "198.18.0.0/24",
+    "assignments": {"ctrlable-pro": 10, "zigbee2mqtt": 21},
+}}}
+
+# (a) fresh host: runs the setup script with the manifest subnet, then attaches.
+rec5 = Recorder()
+rec5.outputs["qm config"] = "net1: virtio=BC:24:11:AA:BB:CC,bridge=vmbr1\n"
+cb.subprocess.run = rec5
+cb._setup_script = lambda: "/usr/local/lib/ctrlable/setup-internal-net.sh"
+cb._bridge_exists = lambda b: True
+cb._wait_reachable = lambda ip, secs: True
+resv2 = {}
+_real = cb._dnsmasq_reserve
+cb._dnsmasq_reserve = lambda vmid, mac, ip, **k: resv2.update(vmid=vmid, mac=mac, ip=ip)
+# fresh: no pre-existing net1 on the bridge
+cb._vm_net1_mac_on = lambda vmid, bridge: None
+cb.enable_internal_net(BROKER_MANIFEST, {}, 100)
+check("enable runs the setup script",
+      any(c[:1] == ["bash"] and c[1].endswith("setup-internal-net.sh") for c in rec5.calls),
+      str(rec5.argvs()))
+check("enable reserves the broker at .10", resv2.get("ip") == "198.18.0.10", str(resv2))
+
+# (b) idempotent: VM already has net1 on vmbr1 -> no `qm set`, reservation only.
+rec6 = Recorder(); cb.subprocess.run = rec6
+cb._vm_net1_mac_on = lambda vmid, bridge: "BC:24:11:99:88:77"
+resv3 = {}
+cb._dnsmasq_reserve = lambda vmid, mac, ip, **k: resv3.update(mac=mac, ip=ip)
+cb.enable_internal_net(BROKER_MANIFEST, {}, 100)
+check("idempotent: no new net1 when one already exists",
+      not any(c[:2] == ["qm", "set"] for c in rec6.calls), str(rec6.argvs()))
+check("idempotent: reservation refreshed for the existing MAC",
+      resv3 == {"mac": "BC:24:11:99:88:77", "ip": "198.18.0.10"}, str(resv3))
+check("enable NEVER reboots the HA VM",
+      not any("reboot" in " ".join(c) or (c[:2] == ["qm", "reboot"]) for c in rec6.calls),
+      str(rec6.argvs()))
+cb._dnsmasq_reserve = _real
+
+# (c) env really carries the subnet (checked by capturing the real call kwargs).
+captured = {}
+def _cap(argv, *a, **kw):
+    captured.setdefault("env", kw.get("env"))
+    class R: returncode = 0; stdout = ""
+    return R
+cb.subprocess.run = _cap
+cb._vm_net1_mac_on = lambda vmid, bridge: "AA:BB:CC:DD:EE:FF"
+cb._dnsmasq_reserve = lambda *a, **k: None
+cb.enable_internal_net(BROKER_MANIFEST, {}, 100)
+check("INTERNAL_SUBNET env set for the setup script",
+      (captured.get("env") or {}).get("INTERNAL_SUBNET") == "198.18.0.0/24",
+      str((captured.get("env") or {}).get("INTERNAL_SUBNET")))
+
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + ", ".join(failures)); sys.exit(1)

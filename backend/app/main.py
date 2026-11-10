@@ -18,6 +18,7 @@ from .deploy import deploy_instance, deploy_stack_async, deploy_templates_async
 from .drift import Severity
 from .drift_scan import scan_project
 from .manifest import load_all_manifests
+from . import internal_net as inet
 from .lan import setup_lan_access
 from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
 from .provision import complete_provisioning, get_assignment
@@ -727,6 +728,85 @@ def lan_status(_: str | None = Depends(require_auth)) -> dict:
         "lan_subnet":    pstate["lan_subnet"],
         "proxy_subnet":  pstate["proxy_subnet"],
         "nat_active":    True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal management LAN (SPEC § 20) — vmbr1 + dnsmasq + per-guest net1.
+# New appliances get this at bootstrap. These endpoints bring it up on an
+# ALREADY-DEPLOYED appliance remotely: the host work runs in ctrlable-build
+# over the same command-restricted key as a deploy.
+# ---------------------------------------------------------------------------
+
+def _broker_instance() -> dict | None:
+    """The deployed HAOS VM (template `ctrlable-pro`), or None."""
+    for row in db.list_all_instances():
+        if row["type"] == inet.BROKER_TEMPLATE:
+            return dict(row)
+    return None
+
+
+@app.get("/api/lan/internal")
+def internal_lan_status(_: str | None = Depends(require_auth)) -> dict:
+    """The internal-LAN PLAN for this appliance's release and whether the broker
+    VM is known. Live host state (bridge up, broker on .10) is reported by the
+    enable run's own probe — the orchestrator cannot see the host bridge from here."""
+    broker = _broker_instance()
+    release = broker["release"] if broker else None
+    net = None
+    if release:
+        manifests = load_all_manifests()
+        if release in manifests:
+            net = inet.from_manifest(manifests[release])
+    if not net:
+        return {"configured": False, "broker_known": broker is not None}
+    return {
+        "configured":   True,
+        "bridge":       net.bridge,
+        "subnet":       net.subnet,
+        "gateway":      net.gateway,
+        "broker_ip":    net.mqtt_host(),
+        "broker_vmid":  broker["vmid"] if broker else None,
+        "broker_known": broker is not None,
+        "assignments":  {t: net.ip_for(t) for t in net.assignments},
+    }
+
+
+@app.post("/api/lan/internal/enable")
+async def internal_lan_enable(_: str | None = Depends(require_auth)) -> dict:
+    """Bring the internal LAN up on this appliance's host and attach the broker
+    VM. Idempotent; does NOT reboot the HA VM (net1 is hot-plugged, the result
+    says whether it came up or a reboot is needed)."""
+    if not settings.build_configured():
+        raise HTTPException(400, "host trigger not configured (build key/host)")
+    broker = _broker_instance()
+    if not broker:
+        raise HTTPException(409, "no deployed ctrlable-pro VM found; cannot resolve "
+                                 "the release or the broker vmid to attach")
+    release, ha_vmid = broker["release"], broker["vmid"]
+    cmd = [
+        "ssh", "-i", settings.build_key_path,
+        "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=60",
+        f"root@{settings.pve_host}",
+        f"ctrlable-build enable-internal-net {release} {ha_vmid}",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _err = await proc.communicate()
+    output = out.decode(errors="replace")
+    ok = proc.returncode == 0
+    reachable = "OK: broker reachable" in output
+    return {
+        "ok": ok,
+        "release": release,
+        "broker_vmid": ha_vmid,
+        "broker_reachable": reachable,
+        "reboot_suggested": ok and not reachable,
+        "output": output,
     }
 
 
