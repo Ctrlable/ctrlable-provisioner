@@ -667,6 +667,94 @@ def guest_action(vmid: int, action: str, _: str | None = Depends(require_auth)) 
 
 
 # ---------------------------------------------------------------------------
+# USB serial device passthrough (LXC)
+#
+# Assign Zigbee / Z-Wave / Thread USB sticks to a service LXC by their STABLE
+# /dev/serial/by-id handle (never the ephemeral ttyUSB*/ttyACM* name). Raw
+# lxc.* keys cannot be set through the Proxmox API, so the host work runs in
+# ctrlable-build over the same command-restricted key as a deploy. VM USB/PCI
+# passthrough stays on the Proxmox-API path (GuestConfigUpdate) above.
+# ---------------------------------------------------------------------------
+
+_BYID_RE = re.compile(r"^[A-Za-z0-9._:+-]+$")   # a /dev/serial/by-id basename
+
+
+async def _run_build_ssh(remote_cmd: str) -> tuple[bool, str]:
+    """Run `ctrlable-build <remote_cmd>` on the host over the build key; return
+    (ok, combined stdout+stderr)."""
+    cmd = [
+        "ssh", "-i", settings.build_key_path,
+        "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=60",
+        f"root@{settings.pve_host}",
+        f"ctrlable-build {remote_cmd}",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _err = await proc.communicate()
+    return proc.returncode == 0, out.decode(errors="replace")
+
+
+@app.get("/api/host/devices/serial")
+async def list_serial_devices(_: str | None = Depends(require_auth)) -> dict:
+    """USB serial coordinators on the host, keyed by stable /dev/serial/by-id,
+    each annotated with the LXC that currently binds it (``bound_to``) and its
+    serial / by-path / vendor:product. Read-only."""
+    if not settings.build_configured():
+        return {"configured": False, "devices": []}
+    ok, output = await _run_build_ssh("list-serial-devices")
+    if not ok:
+        raise HTTPException(502, f"host device scan failed: {output.strip()[:500]}")
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        raise HTTPException(502, f"unparseable device scan: {output.strip()[:300]}")
+    return {"configured": True, "devices": data.get("devices", [])}
+
+
+class SerialDeviceRequest(BaseModel):
+    by_id: str
+
+
+@app.post("/api/guests/{vmid}/serial-device")
+async def attach_serial_device(
+    vmid: int, req: SerialDeviceRequest, _: str | None = Depends(require_auth),
+) -> dict:
+    """Bind a USB serial stick (by /dev/serial/by-id) to an LXC. The bind mount
+    takes effect on the container's NEXT START — the response flags
+    ``restart_required``; the caller restarts via the lifecycle controls after
+    confirming (we never restart a live radio container implicitly)."""
+    if not settings.build_configured():
+        raise HTTPException(400, "host trigger not configured (build key/host)")
+    if not _BYID_RE.match(req.by_id or ""):
+        raise HTTPException(400, f"invalid device id {req.by_id!r}")
+    ok, output = await _run_build_ssh(f"attach-device {vmid} {req.by_id}")
+    if not ok:
+        raise HTTPException(400, output.strip()[:500] or "attach failed")
+    return {"ok": True, "vmid": vmid, "by_id": req.by_id,
+            "restart_required": "RESTART REQUIRED" in output, "output": output}
+
+
+@app.post("/api/guests/{vmid}/serial-device/detach")
+async def detach_serial_device_ep(
+    vmid: int, req: SerialDeviceRequest, _: str | None = Depends(require_auth),
+) -> dict:
+    """Unbind a USB serial stick from an LXC (takes effect on next start)."""
+    if not settings.build_configured():
+        raise HTTPException(400, "host trigger not configured (build key/host)")
+    if not _BYID_RE.match(req.by_id or ""):
+        raise HTTPException(400, f"invalid device id {req.by_id!r}")
+    ok, output = await _run_build_ssh(f"detach-device {vmid} {req.by_id}")
+    if not ok:
+        raise HTTPException(400, output.strip()[:500] or "detach failed")
+    return {"ok": True, "vmid": vmid, "by_id": req.by_id,
+            "restart_required": "RESTART REQUIRED" in output, "output": output}
+
+
+# ---------------------------------------------------------------------------
 # Built templates (user-auth — for UI display)
 # ---------------------------------------------------------------------------
 

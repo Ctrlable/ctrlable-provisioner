@@ -85,13 +85,25 @@ def parse_args() -> tuple[str, str, str | None, str | None]:
         return "enable-internal-net", parts[2], (parts[3] if len(parts) == 4 else None), None
     if len(parts) == 2 and parts[0] == "ctrlable-build" and parts[1] == "update-host-tools":
         return "update-host-tools", None, None, None
+    # list-serial-devices — read-only inventory of /dev/serial/by-id sticks.
+    if len(parts) == 2 and parts[0] == "ctrlable-build" and parts[1] == "list-serial-devices":
+        return "list-serial-devices", None, None, None
+    # attach-device / detach-device <vmid> <by-id> — bind/unbind a USB serial
+    # coordinator to an LXC by its stable by-id. vmid rides the release slot,
+    # by-id the template slot. by-id has no spaces, so a 4-token split is exact.
+    if len(parts) == 4 and parts[0] == "ctrlable-build" \
+            and parts[1] in ("attach-device", "detach-device"):
+        return parts[1], parts[2], parts[3], None
     die(
         f"Unexpected SSH_ORIGINAL_COMMAND: {original!r}\n"
         f"Expected: ctrlable-build deploy <release> <template_name> <hostname>\n"
         f"      or: ctrlable-build preflight <release>\n"
         f"      or: ctrlable-build enable-internal-net <release> [ha_vmid]\n"
         f"      or: ctrlable-build migrate-internal <release> <template> <vmid>\n"
-        f"      or: ctrlable-build update-host-tools"
+        f"      or: ctrlable-build update-host-tools\n"
+        f"      or: ctrlable-build list-serial-devices\n"
+        f"      or: ctrlable-build attach-device <vmid> <by-id>\n"
+        f"      or: ctrlable-build detach-device <vmid> <by-id>"
     )
 
 
@@ -1327,11 +1339,209 @@ def deploy_vm(name: str, hostname: str, tmpl: dict, manifest: dict, conf: dict) 
 
 
 # ---------------------------------------------------------------------------
+# USB serial device passthrough (LXC)
+#
+# Assign Zigbee / Z-Wave / Thread USB sticks to a service LXC by their STABLE
+# /dev/serial/by-id handle, never the ephemeral ttyUSB*/ttyACM* name (which
+# renumbers on replug/reboot). The raw lxc.* lines written here mirror
+# backend/app/devices.py:lxc_passthrough_lines (unit-tested there) — keep the two
+# in sync. The PVE API does not accept raw lxc.* keys, which is why this lives in
+# the host wrapper. VM USB passthrough is a different path (usbN via the API).
+# ---------------------------------------------------------------------------
+
+import stat as _stat  # noqa: E402
+
+BYID_DIR = "/dev/serial/by-id"
+_BYID_RE = re.compile(r"^[A-Za-z0-9._:+-]+$")   # by-id basenames only — never a path
+
+
+def _lxc_conf_path(vmid: int) -> Path:
+    return Path(f"/etc/pve/lxc/{vmid}.conf")
+
+
+def _require_lxc(vmid: int) -> Path:
+    p = _lxc_conf_path(vmid)
+    if p.exists():
+        return p
+    if Path(f"/etc/pve/qemu-server/{vmid}.conf").exists():
+        die(f"vmid {vmid} is a VM; USB serial passthrough here is LXC-only "
+            f"(VM USB goes through the Proxmox API, not this path)")
+    die(f"no LXC {vmid} on this host")
+
+
+def _validate_byid(by_id: str) -> None:
+    if not by_id or "/" in by_id or not _BYID_RE.match(by_id):
+        die(f"invalid device id {by_id!r}")
+
+
+def _byid_node(by_id: str) -> tuple[str, int, int] | None:
+    """(node, major, minor) for a present by-id stick, or None if unplugged."""
+    link = os.path.join(BYID_DIR, by_id)
+    if not os.path.exists(link):
+        return None
+    node = os.path.realpath(link)
+    try:
+        st = os.stat(node)
+    except OSError:
+        return None
+    if not _stat.S_ISCHR(st.st_mode):
+        die(f"{node} is not a character device")
+    return node, os.major(st.st_rdev), os.minor(st.st_rdev)
+
+
+def _udev_props(node: str) -> dict:
+    try:
+        out = subprocess.run(["udevadm", "info", "--query=property", f"--name={node}"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return {}
+    props: dict = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            props[k] = v
+    return props
+
+
+def _byid_bindings() -> dict:
+    """by-id -> {'vmid', 'kind'} for every LXC that currently binds it."""
+    out: dict = {}
+    base = Path("/etc/pve/lxc")
+    if not base.is_dir():
+        return out
+    for conf in base.glob("*.conf"):
+        try:
+            vmid = int(conf.stem)
+        except ValueError:
+            continue
+        try:
+            text = conf.read_text()
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            m = re.match(r"^\s*lxc\.mount\.entry\s*[:=]\s*(\S+)", raw)
+            if m and m.group(1).startswith(BYID_DIR + "/"):
+                out[m.group(1)[len(BYID_DIR) + 1:]] = {"vmid": vmid, "kind": "lxc"}
+    return out
+
+
+def _passthrough_lines(by_id: str, major: int, minor: int) -> list[str]:
+    # MUST match backend/app/devices.py:lxc_passthrough_lines.
+    src = f"{BYID_DIR}/{by_id}"
+    return [
+        f"lxc.cgroup2.devices.allow: c {major}:{minor} rwm",
+        f"lxc.mount.entry: {src} dev/serial/by-id/{by_id} none bind,optional,create=file 0 0",
+    ]
+
+
+def _write_conf_lines(path: Path, lines: list[str]) -> None:
+    tmp = path.with_name(path.name + ".ctrlable-tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    os.replace(tmp, path)   # atomic within pmxcfs
+
+
+def list_serial_devices() -> None:
+    """Emit JSON (sole stdout) for every /dev/serial/by-id stick: stable id,
+    serial, current node + major:minor, by-path (port), vendor/product, and which
+    LXC binds it. Read-only — safe to run anytime."""
+    bindings = _byid_bindings()
+    devices = []
+    if os.path.isdir(BYID_DIR):
+        for by_id in sorted(os.listdir(BYID_DIR)):
+            resolved = _byid_node(by_id)
+            node = resolved[0] if resolved else None
+            major = resolved[1] if resolved else None
+            minor = resolved[2] if resolved else None
+            props = _udev_props(node) if node else {}
+            devices.append({
+                "by_id": by_id,
+                "serial": props.get("ID_SERIAL_SHORT"),
+                "node": node,
+                "major": major, "minor": minor,
+                "by_path": props.get("ID_PATH"),
+                "vendor_id": props.get("ID_VENDOR_ID"),
+                "product_id": props.get("ID_MODEL_ID"),
+                "vendor": props.get("ID_VENDOR_FROM_DATABASE") or props.get("ID_VENDOR"),
+                "product": props.get("ID_MODEL_FROM_DATABASE") or props.get("ID_MODEL"),
+                "bound_to": bindings.get(by_id),
+            })
+    print(json.dumps({"devices": devices}))
+
+
+def attach_serial_device(vmid: int, by_id: str) -> None:
+    _validate_byid(by_id)
+    path = _require_lxc(vmid)
+    resolved = _byid_node(by_id)
+    if not resolved:
+        die(f"device {by_id!r} is not present under {BYID_DIR} — plug it in first")
+    node, major, minor = resolved
+    lines = path.read_text().splitlines()
+    want = _passthrough_lines(by_id, major, minor)
+    existing = {l.strip() for l in lines}
+    to_add = [w for w in want if w not in existing]
+    if not to_add:
+        log(f"[attach-device] {by_id} already bound to LXC {vmid}")
+        log(f"[attach-device] OK: {by_id} on {vmid} (no change)")
+        return
+    _write_conf_lines(path, lines + to_add)
+    log(f"[attach-device] bound {by_id} (node {node}, {major}:{minor}) to LXC {vmid}")
+    log(f"[attach-device] RESTART REQUIRED: the bind mount takes effect when CT {vmid} next starts")
+    log(f"[attach-device] OK: {by_id} attached to {vmid}")
+
+
+def detach_serial_device(vmid: int, by_id: str) -> None:
+    _validate_byid(by_id)
+    path = _require_lxc(vmid)
+    src = f"{BYID_DIR}/{by_id}"
+    # Drop this device's cgroup-allow line too, but only if the stick is still
+    # present so we know its major:minor (mirrors devices.detach_plan). If it is
+    # unplugged we remove just the bind mount and leave the benign allow rule.
+    allow_val = None
+    resolved = _byid_node(by_id)
+    if resolved:
+        allow_val = f"c {resolved[1]}:{resolved[2]} rwm"
+    kept, dropped = [], 0
+    for raw in path.read_text().splitlines():
+        m = re.match(r"^\s*lxc\.mount\.entry\s*[:=]\s*(\S+)", raw)
+        if m and m.group(1) == src:
+            dropped += 1
+            continue
+        if allow_val is not None:
+            a = re.match(r"^\s*lxc\.cgroup2\.devices\.allow\s*[:=]\s*(.+?)\s*$", raw)
+            if a and a.group(1).strip() == allow_val:
+                dropped += 1
+                continue
+        kept.append(raw)
+    if dropped == 0:
+        log(f"[detach-device] {by_id} was not bound to LXC {vmid}")
+        log(f"[detach-device] OK: {by_id} not on {vmid} (no change)")
+        return
+    _write_conf_lines(path, kept)
+    log(f"[detach-device] removed {by_id} from LXC {vmid} ({dropped} line(s))")
+    log(f"[detach-device] RESTART REQUIRED: the unbind takes effect when CT {vmid} next starts")
+    log(f"[detach-device] OK: {by_id} detached from {vmid}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     action, release, template_name, hostname = parse_args()
+
+    # Device inventory + LXC passthrough need neither build.conf nor the
+    # manifest — handle them before anything else.
+    if action == "list-serial-devices":
+        list_serial_devices()
+        return
+    if action in ("attach-device", "detach-device"):
+        try:
+            vmid = int(release)         # release slot carries the vmid
+        except (TypeError, ValueError):
+            die(f"invalid vmid {release!r}")
+        (attach_serial_device if action == "attach-device" else detach_serial_device)(vmid, template_name)
+        return
+
     conf     = load_conf()
     base_url = conf["orchestrator_url"].rstrip("/")
     token    = conf["build_token"]

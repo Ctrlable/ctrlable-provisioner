@@ -186,6 +186,9 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
   const [cfg, setCfg]           = useState(null)
   const [usbDevs, setUsbDevs]   = useState([])
   const [pciDevs, setPciDevs]   = useState([])
+  const [serialDevs, setSerialDevs] = useState([])
+  const [serialBusy, setSerialBusy] = useState(false)
+  const [restartNote, setRestartNote] = useState(null)
   const [error, setError]       = useState(null)
   const [saving, setSaving]     = useState(false)
   const [resizeVal, setResizeVal] = useState('')
@@ -198,7 +201,30 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
     apiFetch('/api/host/devices/usb').then(r => r.json()).then(setUsbDevs).catch(() => {})
     if (guest.kind === 'qemu')
       apiFetch('/api/host/devices/pci').then(r => r.json()).then(setPciDevs).catch(() => {})
+    else
+      apiFetch('/api/host/devices/serial').then(r => r.json()).then(d => setSerialDevs(d.devices ?? [])).catch(() => {})
   }, [guest.vmid, guest.kind])
+
+  const refetchSerial = () =>
+    apiFetch('/api/host/devices/serial').then(r => r.json()).then(d => setSerialDevs(d.devices ?? [])).catch(() => {})
+
+  const serialOp = async (path, by_id, doneMsg) => {
+    setSerialBusy(true); setError(null); setRestartNote(null)
+    try {
+      const res = await apiFetch(path, { method: 'POST', body: JSON.stringify({ by_id }) })
+      const d = await res.json()
+      if (!res.ok) { setError(d.detail ?? 'Failed'); return }
+      if (d.restart_required) setRestartNote(doneMsg)
+      refetchSerial(); onRefresh()
+    } catch (e) { setError(e.message) }
+    finally { setSerialBusy(false) }
+  }
+  const attachSerial = (by_id) =>
+    serialOp(`/api/guests/${guest.vmid}/serial-device`, by_id,
+             `Attached. Restart ${guest.hostname} to activate the device — not done automatically.`)
+  const detachSerial = (by_id) =>
+    serialOp(`/api/guests/${guest.vmid}/serial-device/detach`, by_id,
+             `Removed. Restart ${guest.hostname} to release the device.`)
 
   const patch = async (body) => {
     setSaving(true); setError(null)
@@ -273,6 +299,7 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
             </div>
           </section>
 
+          {guest.kind === 'qemu' ? (
           <section className="cfg-section">
             <h3>USB passthrough</h3>
             {usbSlots.length === 0
@@ -293,9 +320,11 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
                   {usbDevs.map((d, i) => {
                     const id = `${d.vendid}:${d.prodid}`
                     const label = d.manufacturer ? `${d.manufacturer} — ${d.product ?? id}` : id
+                    const dup = usbDevs.filter(x => x.vendid === d.vendid && x.prodid === d.prodid).length > 1
                     return (
                       <div key={i} className="device-row">
                         <span className="muted">{label}</span>
+                        {dup && <span className="tag" title="Two identical devices share this ID — vendor:product passthrough is ambiguous. Bind by serial via an LXC, or use a network coordinator.">dup</span>}
                         <span className="tag">{id}</span>
                         <button className="btn-xs" disabled={saving}
                           onClick={() => patch({ usb_add: `host=${id}` })}>Add</button>
@@ -306,6 +335,40 @@ function GuestConfigDrawer({ guest, onClose, onRefresh }) {
               </details>
             )}
           </section>
+          ) : (
+          <section className="cfg-section">
+            <h3>USB radios <span className="muted small">— bound by serial, survives port moves</span></h3>
+            {restartNote && <div className="banner">{restartNote}</div>}
+            {serialDevs.length === 0
+              ? <p className="empty small">No USB serial devices detected on the host</p>
+              : serialDevs.map((d) => {
+                  const mine  = d.bound_to && d.bound_to.vmid === guest.vmid
+                  const other = d.bound_to && d.bound_to.vmid !== guest.vmid
+                  const dup   = d.vendor_id && serialDevs.filter(x =>
+                                  x.vendor_id === d.vendor_id && x.product_id === d.product_id).length > 1
+                  const name  = (d.vendor || d.product)
+                    ? `${d.vendor ?? ''}${d.vendor && d.product ? ' — ' : ''}${d.product ?? ''}`.trim()
+                    : d.by_id
+                  return (
+                    <div key={d.by_id} className="device-row">
+                      <span className="muted" title={d.by_id}>{name}</span>
+                      {d.serial && <span className="tag">sn {d.serial}</span>}
+                      {d.node && <span className="tag">{d.node.replace('/dev/', '')}</span>}
+                      {dup && <span className="tag" title="Two identical models are plugged in — the serial keeps them distinct.">dup model</span>}
+                      {mine
+                        ? <button className="btn-xs danger" disabled={serialBusy}
+                            onClick={() => detachSerial(d.by_id)}>Remove</button>
+                        : other
+                          ? <span className="tag" title={`Bound to CT ${d.bound_to.vmid}`}>on CT {d.bound_to.vmid}</span>
+                          : <button className="btn-xs" disabled={serialBusy}
+                              onClick={() => attachSerial(d.by_id)}>Attach</button>}
+                    </div>
+                  )
+                })
+            }
+            <p className="empty small">Binds the stick at <code>/dev/serial/by-id/…</code> into the container; takes effect on the next container start.</p>
+          </section>
+          )}
 
           {guest.kind === 'qemu' && (
             <section className="cfg-section">
