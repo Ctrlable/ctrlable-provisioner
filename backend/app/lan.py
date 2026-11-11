@@ -79,6 +79,38 @@ def detect_lan() -> tuple[str, str] | None:
     return iface, subnet
 
 
+def detect_own_ip() -> str | None:
+    """The orchestrator's own IPv4 on the default route — its real-LAN egress
+    address. Used to self-heal the firstboot call-home URL after a site move so
+    a hardcoded IP can't go stale (cf. the 172.16.1.142 trap). Reads the routing
+    table via a dummy UDP socket (sends nothing); the default route is the real
+    LAN, so WG/internal addresses are naturally excluded."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
+def resolve_orchestrator_url(explicit: str, detect=detect_own_ip) -> str:
+    """URL baked into new guests for firstboot call-home. An explicit setting
+    (ORCHESTRATOR_URL in .env) always wins — the operator override. Otherwise
+    auto-detect the real-LAN IP so the URL self-heals across site moves. Returns
+    "" when neither is available; the caller then omits the key so the host
+    falls back to build.conf's orchestrator_url."""
+    if explicit:
+        return explicit
+    ip = detect()
+    return f"http://{ip}:8000" if ip else ""
+
+
 def get_lan_candidates() -> list[str]:
     """Return all non-WG subnets as LAN candidates for the heartbeat payload."""
     candidates: list[str] = []

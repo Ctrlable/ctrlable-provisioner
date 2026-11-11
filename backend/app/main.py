@@ -20,7 +20,7 @@ from .drift_scan import scan_project
 from .manifest import load_all_manifests
 from . import internal_net as inet
 from . import selfupdate
-from .lan import setup_lan_access
+from .lan import setup_lan_access, resolve_orchestrator_url
 from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
 from .provision import complete_provisioning, get_assignment
 from .provider import GuestKind, GuestRef, Provider
@@ -264,7 +264,9 @@ def get_manifest(release: str, token: str = Query(...)) -> dict:
     row = db.get_release(release)
     if row:
         result["firstboot_secret"] = row["firstboot_secret"]
-    result["orchestrator_url"] = settings.orchestrator_url
+    url = resolve_orchestrator_url(settings.orchestrator_url)
+    if url:
+        result["orchestrator_url"] = url
     return result
 
 
