@@ -14,10 +14,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from app.devices import (  # noqa: E402
     assignment_absent,
+    bound_by_ids,
     detach_plan,
     lxc_passthrough_lines,
     model_is_ambiguous,
     parse_lxc_passthrough,
+    parse_pve_dev_passthrough,
     vm_usb_host_arg,
 )
 
@@ -127,6 +129,34 @@ check("absent: bound stick not currently present -> absent",
       assignment_absent(ZWAVE, [ZIGBEE]) is True, "")
 check("absent: present stick -> not absent",
       assignment_absent(ZWAVE, [ZWAVE, ZIGBEE]) is False, "")
+
+
+
+# ---- parse_pve_dev_passthrough: PVE-native devN binds (the false-free bug) ---
+pve_conf = [
+    "arch: amd64",
+    "hostname: zigbee2mqtt-1",
+    f"dev0: /dev/serial/by-id/{ZIGBEE},gid=20",
+    "net0: name=eth0,bridge=vmbr0,ip=dhcp,type=veth",
+]
+check("pve-dev: finds a devN-bound by-id (stored as dev0:, never a mount.entry)",
+      parse_pve_dev_passthrough(pve_conf) == [ZIGBEE], str(parse_pve_dev_passthrough(pve_conf)))
+check("pve-dev: strips the ,uid=/,gid=/,mode= option suffix",
+      parse_pve_dev_passthrough([f"dev1: /dev/serial/by-id/{ZWAVE},uid=0,gid=20,mode=0660"]) == [ZWAVE], "")
+check("pve-dev: a raw mount.entry is NOT a devN (left to parse_lxc_passthrough)",
+      parse_pve_dev_passthrough(conf_colon) == [], str(parse_pve_dev_passthrough(conf_colon)))
+check("pve-dev: ignores a devN pointing outside /dev/serial/by-id",
+      parse_pve_dev_passthrough(["dev0: /dev/dri/renderD128"]) == [], "")
+
+# ---- bound_by_ids: union of both transports = the free/in-use decision -------
+mixed = conf_colon + [f"dev0: /dev/serial/by-id/{ZIGBEE},gid=20"]
+check("bound: unions raw-mount + devN binds",
+      bound_by_ids(mixed) == [ZWAVE, ZIGBEE], str(bound_by_ids(mixed)))
+check("bound: a devN-only coordinator reads as bound (the reported false-free)",
+      assignment_absent(ZIGBEE, bound_by_ids(pve_conf)) is False, str(bound_by_ids(pve_conf)))
+check("bound: de-dups a device bound by BOTH spellings",
+      bound_by_ids([f"lxc.mount.entry: /dev/serial/by-id/{ZWAVE} dev/serial/by-id/{ZWAVE} none bind,optional,create=file 0 0",
+                    f"dev0: /dev/serial/by-id/{ZWAVE}"]) == [ZWAVE], "")
 
 
 print()

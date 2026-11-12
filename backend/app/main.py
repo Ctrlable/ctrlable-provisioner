@@ -1001,6 +1001,14 @@ async def system_self_update(
     return result
 
 
+@app.get("/api/system/update-check")
+async def system_update_check(_: str | None = Depends(require_auth)) -> dict:
+    """Whether a newer build exists on the installed ref -- read-only (fetch +
+    compare, no checkout). The UI uses it to offer the update only when behind."""
+    ref = _install_record().get("ref") or "main"
+    return await asyncio.to_thread(selfupdate.check_update, ref)
+
+
 # ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------

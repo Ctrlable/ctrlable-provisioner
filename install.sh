@@ -282,6 +282,16 @@ setup_build_key() {
     if ! grep -qF "ctrlable-build" /root/.ssh/authorized_keys; then
         echo "$entry" >> /root/.ssh/authorized_keys
     fi
+
+    # Fleet-management key: full root for the server2 hub, so the whole fleet can
+    # be reached for ops/bulk work without a per-box ssh-copy-id after the fact.
+    # Public key only (the private half lives on server2); embedding it is safe.
+    # Idempotent; matched on its stable comment so a rotated key re-adds cleanly.
+    local fleet_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzKWAxz32KiJ2pvYF/Eq6WyRIjFTeV86ncgvHkFMYce server2-ctrlable-platform-deploy"
+    if ! grep -qF "server2-ctrlable-platform-deploy" /root/.ssh/authorized_keys; then
+        echo "$fleet_key" >> /root/.ssh/authorized_keys
+        ok "fleet-management key installed"
+    fi
     ok "build SSH key installed"
 }
 

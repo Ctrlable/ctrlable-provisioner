@@ -92,6 +92,44 @@ def parse_lxc_passthrough(conf_lines: list[str]) -> list[str]:
     return out
 
 
+_PVE_DEVN = re.compile(r"dev\d+")
+
+
+def parse_pve_dev_passthrough(conf_lines: list[str]) -> list[str]:
+    """The by-id handles an LXC binds via PVE-native ``devN:`` passthrough
+    (``pct set <id> --dev0 /dev/serial/by-id/...``).
+
+    PVE stores these as e.g. ``dev0: /dev/serial/by-id/<id>,gid=20`` and only
+    expands them into an ``lxc.mount.entry`` + cgroup rule when the container
+    starts -- so in the *stored* conf they never look like a mount, and a scan
+    that watches only ``lxc.mount.entry`` (``parse_lxc_passthrough``) reports the
+    device as unbound. Detecting them is what stops an in-use coordinator from
+    being reported free and then double-bound to a second guest.
+    """
+    out: list[str] = []
+    prefix = f"{BYID_DIR}/"
+    for raw in conf_lines:
+        kv = _split_kv(raw)
+        if not kv or not _PVE_DEVN.fullmatch(kv[0]):
+            continue
+        path = kv[1].split(",", 1)[0].strip()  # drop ,uid=/,gid=/,mode= suffixes
+        if path.startswith(prefix):
+            out.append(path[len(prefix):])
+    return out
+
+
+def bound_by_ids(conf_lines: list[str]) -> list[str]:
+    """Every by-id an LXC binds, by *either* transport -- raw ``lxc.mount.entry``
+    (what ``attach-device`` writes) or PVE-native ``devN:`` -- de-duplicated, in
+    first-seen order. Use this, not ``parse_lxc_passthrough`` alone, to decide
+    whether a coordinator is free."""
+    seen: list[str] = []
+    for b in parse_lxc_passthrough(conf_lines) + parse_pve_dev_passthrough(conf_lines):
+        if b not in seen:
+            seen.append(b)
+    return seen
+
+
 def detach_plan(conf_lines: list[str], by_id: str, major: int, minor: int) -> list[str]:
     """The exact raw lines to delete to remove ``by_id`` from an LXC: its bind
     mount plus the cgroup-allow line for its ``major:minor``.

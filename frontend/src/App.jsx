@@ -1254,53 +1254,82 @@ function ReleasesTab({ releases }) {
 // ---------------------------------------------------------------------------
 function ProvisionerCard() {
   const [version, setVersion] = useState(null)
+  const [updateInfo, setUpdateInfo] = useState(null)   // /api/system/update-check
   const [updating, setUpdating] = useState(false)
+  const [restarting, setRestarting] = useState(false)
   const [updateResult, setUpdateResult] = useState(null)
   const [error, setError] = useState(null)
 
   const loadVersion = useCallback(() =>
     apiFetch('/api/version').then(r => r.json()).then(setVersion).catch(() => {}), [])
-  useEffect(() => { loadVersion() }, [loadVersion])
+  const checkUpdate = useCallback(() =>
+    apiFetch('/api/system/update-check').then(r => r.json()).then(setUpdateInfo).catch(() => setUpdateInfo(null)), [])
+  useEffect(() => { loadVersion(); checkUpdate() }, [loadVersion, checkUpdate])
+
+  // Poll /api/version across the restart window, then re-check for updates.
+  const pollVersion = (fromRev) => {
+    let tries = 0
+    const poll = setInterval(async () => {
+      tries += 1
+      try {
+        const v = await (await fetch(rel('/api/version'))).json()
+        setVersion(v)
+        if (v.revision && v.revision !== fromRev) { clearInterval(poll); setRestarting(false); checkUpdate() }
+      } catch { /* restart window \u2014 keep polling */ }
+      if (tries > 20) { clearInterval(poll); setRestarting(false) }
+    }, 3000)
+  }
 
   const selfUpdate = async () => {
     setUpdating(true); setError(null); setUpdateResult(null)
+    const fromRev = version?.revision
     try {
       const res = await apiFetch('/api/system/self-update', { method: 'POST', body: JSON.stringify({}) })
-      const data = await res.json()
+      let data
+      try { data = await res.json() }
+      catch {
+        // Update runs synchronously then restarts; behind the ingress proxy the
+        // long request can time out to an HTML error page (not JSON) even though
+        // the update is underway. Treat as dispatched and poll for the new rev.
+        setRestarting(true); pollVersion(fromRev); return
+      }
       if (res.status === 409) { setError(data.detail ?? 'Busy'); return }
       setUpdateResult(data)
-      if (data.ok && data.restarting) {
-        let tries = 0
-        const poll = setInterval(async () => {
-          tries += 1
-          try {
-            const v = await (await fetch(rel('/api/version'))).json()
-            setVersion(v)
-            if (v.revision && data.to && v.revision !== (version?.revision)) clearInterval(poll)
-          } catch { /* restart window — keep polling */ }
-          if (tries > 20) clearInterval(poll)
-        }, 3000)
-      }
-    } catch (e) { setError(e.message) }
-    finally { setUpdating(false) }
+      if (data.ok && data.restarting) { setRestarting(true); pollVersion(data.from) }
+      else if (data.ok) { checkUpdate() }
+    } catch {
+      setRestarting(true); pollVersion(fromRev)
+    } finally { setUpdating(false) }
   }
 
+  const avail = updateInfo?.update_available
   return (
     <div className="card">
       <div className="hd">
         <span className="status-dot" style={{background:'var(--ok)'}} />
         <h2>Orchestrator software</h2>
         <div className="right">
-          <button className="btn-primary" onClick={selfUpdate} disabled={updating}>
-            {updating ? 'Updating…' : 'Update now'}
-          </button>
+          {avail
+            ? <button className="btn-primary" onClick={selfUpdate} disabled={updating || restarting}>
+                {updating ? 'Updating\u2026' : restarting ? 'Restarting\u2026' : 'Update now'}
+              </button>
+            : <span className="sub mono" style={{opacity:.75}}>
+                {restarting ? 'Restarting\u2026' : updateInfo ? 'Up to date \u2713' : '\u2026'}
+              </span>}
         </div>
       </div>
       <div className="bd">
         {error && <div className="banner error">{error}</div>}
+        {restarting && !updateResult &&
+          <div className="banner success">{'Update is running \u2014 the orchestrator will restart and the version will refresh shortly.'}</div>}
+        {avail && !restarting &&
+          <div className="banner" style={{marginBottom:10}}>
+            {'Update available'}{updateInfo?.behind ? ` \u2014 ${updateInfo.behind} commit${updateInfo.behind === 1 ? '' : 's'} behind` : ''}
+            {updateInfo?.latest && <>{' \u2192 '}<code>{String(updateInfo.latest).slice(0,7)}</code></>}
+          </div>}
         <dl className="kv">
-          <dt>Version</dt><dd><code>{version?.version ?? '…'}</code></dd>
-          <dt>Revision</dt><dd><code>{version?.revision ?? '…'}</code></dd>
+          <dt>Version</dt><dd><code>{version?.version ?? '\u2026'}</code></dd>
+          <dt>Revision</dt><dd><code>{version?.revision ?? '\u2026'}</code></dd>
           {version?.ref && <><dt>Ref</dt><dd><code>{version.ref}</code></dd></>}
         </dl>
         <p className="form-note" style={{marginTop:10}}>
@@ -1311,15 +1340,15 @@ function ProvisionerCard() {
           <div style={{marginTop:12}}>
             {updateResult.ok
               ? <div className="banner success">
-                  {updateResult.unchanged ? 'Already up to date.' : `Updated ${String(updateResult.from).slice(0,7)} → ${String(updateResult.to).slice(0,7)}.`}
-                  {updateResult.restarting && ' Restarting — version will refresh shortly.'}
+                  {updateResult.unchanged ? 'Already up to date.' : `Updated ${String(updateResult.from).slice(0,7)} \u2192 ${String(updateResult.to).slice(0,7)}.`}
+                  {updateResult.restarting && ' Restarting \u2014 version will refresh shortly.'}
                   {updateResult.host_tools?.attempted && !updateResult.host_tools?.ok &&
-                    ' (Host tools not refreshed — the host may need a manual reinstall on this first update.)'}
+                    ' (Host tools not refreshed \u2014 the host may need a manual reinstall on this first update.)'}
                 </div>
-              : <div className="banner error">Update failed at “{updateResult.stage}”.{updateResult.rolled_back ? ' Rolled back.' : ''}</div>}
+              : <div className="banner error">{`Update failed at \u201c${updateResult.stage}\u201d.`}{updateResult.rolled_back ? ' Rolled back.' : ''}</div>}
             {updateResult.steps && (
               <pre className="build-log">
-                {updateResult.steps.map(s => `[${s.rc === 0 ? 'ok' : 'FAIL'}] ${s.step}\n${s.output || ''}`).join('\n')}
+                {updateResult.steps.map(st => `[${st.rc === 0 ? 'ok' : 'FAIL'}] ${st.step}\n${st.output || ''}`).join('\n')}
               </pre>
             )}
           </div>

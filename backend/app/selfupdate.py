@@ -131,3 +131,29 @@ def run_self_update(target_ref: str, settings: "Settings",
     return {"ok": True, "from": old, "to": new, "unchanged": old == new,
             "version": version, "revision": rev, "host_tools": host,
             "restarting": True, "steps": steps}
+
+
+def check_update(target_ref: str) -> dict:
+    """Is the orchestrator behind its remote ref? Does a quiet ``git fetch`` and
+    compares the installed HEAD to the fetched ref. Read-only -- no checkout, no
+    restart -- so the UI can call it on load to decide whether to even offer an
+    update. ``update_available`` is true only when the remote is strictly ahead.
+    """
+    fetch_rc, fetch_out = _run(["git", "-C", str(REPO_DIR), "fetch", "--quiet", "origin", target_ref])
+    current = _head()
+    rc, latest = _run(["git", "-C", str(REPO_DIR), "rev-parse", "FETCH_HEAD"])
+    latest = latest.strip() if rc == 0 else None
+    behind = None
+    if current and latest:
+        rc2, out = _run(["git", "-C", str(REPO_DIR), "rev-list", "--count", f"{current}..{latest}"])
+        if rc2 == 0 and out.strip().isdigit():
+            behind = int(out.strip())
+    return {
+        "ref": target_ref,
+        "current": current,
+        "latest": latest,
+        "behind": behind,
+        "update_available": bool(behind and behind > 0),
+        "fetch_ok": fetch_rc == 0,
+        "detail": fetch_out[-300:] if fetch_rc != 0 else "",
+    }

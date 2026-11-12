@@ -1422,6 +1422,16 @@ def _byid_bindings() -> dict:
             m = re.match(r"^\s*lxc\.mount\.entry\s*[:=]\s*(\S+)", raw)
             if m and m.group(1).startswith(BYID_DIR + "/"):
                 out[m.group(1)[len(BYID_DIR) + 1:]] = {"vmid": vmid, "kind": "lxc"}
+                continue
+            # PVE-native devN passthrough ("dev0: /dev/serial/by-id/<id>,gid=20"):
+            # PVE expands it to a mount only at CT start, so it is never stored as
+            # an lxc.mount.entry -- miss it and an in-use coordinator reads as free
+            # and can be double-bound. MUST match devices.py:parse_pve_dev_passthrough.
+            d = re.match(r"^\s*dev\d+\s*[:=]\s*(\S+)", raw)
+            if d:
+                dev_path = d.group(1).split(",", 1)[0]
+                if dev_path.startswith(BYID_DIR + "/"):
+                    out[dev_path[len(BYID_DIR) + 1:]] = {"vmid": vmid, "kind": "pve-dev"}
     return out
 
 
