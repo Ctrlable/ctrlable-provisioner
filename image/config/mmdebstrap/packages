@@ -32,6 +32,7 @@ nftables
 
 # remote access + handy field tools
 wireguard-tools
+nginx-light
 openssh-server
 curl
 jq

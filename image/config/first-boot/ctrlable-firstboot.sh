@@ -72,6 +72,12 @@ else
       listen=unix:/var/lib/incus/unix.socket bind=container 2>/dev/null || \
       log "WARN could not add incus-sock proxy device"
 
+  # Expose the orchestrator SPA/API (:8000 in the container) on the HOST loopback so the host's
+  # nginx front door can proxy to it (ws/SSE pass-through). bind=host → listen on the host.
+  incus config device add "$ORCH_NAME" orch-http proxy \
+      listen=tcp:127.0.0.1:8000 connect=tcp:127.0.0.1:8000 bind=host 2>/dev/null || \
+      log "WARN could not add orch-http proxy device (host front door will show 'starting')"
+
   # Inject enrol config so the orchestrator's platform.py can self-enrol with the portal.
   incus exec "$ORCH_NAME" -- mkdir -p /etc/ctrlable
   incus exec "$ORCH_NAME" -- bash -c "cat > /etc/ctrlable/.env" <<ENV

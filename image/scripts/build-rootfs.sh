@@ -34,6 +34,10 @@ install -D -m0644 "$here/config/first-boot/ctrlable-host-enroll.service" "$root/
 # dealer claim code display (CLI + login banner)
 install -D -m0755 "$here/config/first-boot/ctrlable-claim"               "$root/usr/local/bin/ctrlable-claim"
 install -D -m0644 "$here/config/first-boot/ctrlable-claim-profile.sh"    "$root/etc/profile.d/ctrlable-claim.sh"
+# host reverse-proxy front door (always-up entry -> orchestrator container :8000)
+install -D -m0644 "$here/config/nginx/ctrlable.conf"  "$root/etc/nginx/conf.d/ctrlable.conf"
+install -D -m0644 "$here/config/nginx/starting.html"  "$root/usr/share/ctrlable/www/starting.html"
+rm -f "$root/etc/nginx/sites-enabled/default"
 install -D -m0644 "$here/config/rauc/system.conf"          "$root/etc/rauc/system.conf"
 
 # trust anchors in /root/.ssh/authorized_keys:
@@ -66,7 +70,7 @@ DHCP=yes
 NET
 
 echo "build-rootfs: enable services + apply host branding (in chroot)"
-chroot "$root" systemctl enable systemd-networkd systemd-resolved ssh incus rauc \
+chroot "$root" systemctl enable systemd-networkd systemd-resolved ssh incus rauc nginx \
     ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good 2>/dev/null || true
 # branding: issue/motd/ssh banner get written; sshd reload + update-grub no-op in a chroot
 # (our hand-authored A/B grub.cfg from pack-image.sh is authoritative; GRUB_DISTRIBUTOR is cosmetic).
