@@ -73,16 +73,24 @@ set -x
 command -v zstd >/dev/null 2>&1 || { apk add --no-cache zstd >/dev/null 2>&1 || apk add zstd >/dev/null 2>&1; }
 beacon "zstd_bin=\$(command -v zstd 2>/dev/null | tr '/' '_')__ver=\$(zstd --version 2>&1 | tr ' /,()' '______')"
 if ! command -v zstd >/dev/null 2>&1; then beacon FATAL_no_zstd; sleep 5; poweroff -f; fi
-# Target = the LARGEST block device (by sectors); skip loop/rom/ram and the tiny iPXE boot ESP.
-DISK=""; max=0
-for d in /sys/block/*; do
-  n=\$(basename "\$d")
-  case "\$n" in loop*|sr*|ram*|fd*|dm-*) continue;; esac
-  sz=\$(cat "\$d/size" 2>/dev/null || echo 0)
-  if [ "\$sz" -gt "\$max" ]; then max=\$sz; DISK="/dev/\$n"; fi
+# Target = the LARGEST block device >1GiB. Diskless boot enumerates virtio disks a beat late and
+# there are tiny decoy drives (Incus config drive ~MBs, the iPXE boot ESP 16M), so wait+retry
+# and require >1GiB (2097152 512B-sectors) to avoid dd'ing the wrong tiny device.
+modprobe virtio_blk 2>/dev/null; modprobe virtio_scsi 2>/dev/null; modprobe sd_mod 2>/dev/null
+DISK=""; maxsz=0; tries=0
+while [ \$tries -lt 30 ]; do
+  blist=""
+  for d in /sys/block/*; do
+    n=\$(basename "\$d"); case "\$n" in loop*|sr*|ram*|fd*|dm-*) continue;; esac
+    sz=\$(cat "\$d/size" 2>/dev/null || echo 0); blist="\$blist \$n:\$sz"
+    if [ "\$sz" -gt 2097152 ] && [ "\$sz" -gt "\$maxsz" ]; then maxsz=\$sz; DISK="/dev/\$n"; fi
+  done
+  [ \$tries -eq 0 ] && beacon "blocks=\$(echo \$blist | tr ' :' '__')"
+  [ -n "\$DISK" ] && break
+  sleep 1; tries=\$((tries+1))
 done
-[ -z "\$DISK" ] && DISK=/dev/vda
-beacon "disk=\$(echo \$DISK | tr '/' '_')__sectors=\$max"
+beacon "disk=\$(echo \${DISK:-NONE} | tr '/' '_')__sectors=\$maxsz__waited=\$tries"
+if [ -z "\$DISK" ]; then beacon FATAL_no_target_disk; sleep 5; poweroff -f; fi
 if command -v curl >/dev/null 2>&1; then DL="curl -fL \$IMGURL"; else DL="wget -O - \$IMGURL"; fi
 beacon "dl=\$(echo \$DL | tr ' /:.' '____')"
 # decompress smoke-test: pull a little, decompress, count bytes + capture any zstd error
