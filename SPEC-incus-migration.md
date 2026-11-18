@@ -232,7 +232,11 @@ If #2 fights us, that materially changes the plan (and reopens Option B as a fal
 - **P3 — Ctrlable Pro.** HAOS as an Incus VM **or** Supervised-in-LXC per the §6/§13 outcome; carry over rebrand + firstboot (+ RAUC OTA if VM, LXC-snapshot rollback if LXC).
 - **P4 — Networking & storage.** Adopt `vmbr0/1`; storage pool; backup/restore.
 - **P5 — Bootstrap.** `bootstrap-appliance.sh` installs Incus on plain Debian instead of
-  standing up Proxmox. Per-box cutover with Proxmox rollback retained.
+  standing up Proxmox. Per-box cutover with Proxmox rollback retained. **Zero-touch path built +
+  validated (2026-11-17):** the RAUC image (`image/`) bakes Incus + first-boot + the orchestrator
+  image (`image/builders/build-orchestrator.sh`); first boot brings up the btrfs pool and launches
+  `ctrlable-orchestrator`, which — proven on the box — drives the host Incus over a proxied socket
+  and serves the provisioner API, then self-enrols + deploys the fleet. No human input.
 
 ## 13. Radio coordinators & service topology (what actually drives the host choice)
 

@@ -53,9 +53,10 @@ else
     log "launch $ORCH_NAME from $ORCHESTRATOR_IMAGE"
     incus launch "$ORCHESTRATOR_IMAGE" "$ORCH_NAME"
   else
-    # TODO(orchestrator image): publish ctrlable-orchestrator as an Incus image and bake or
-    # pull it here. Until then first-boot stops at a ready host + data pool; the orchestrator
-    # can be deployed manually. This is the one remaining gap to full zero-touch.
+    # The orchestrator image is produced by image/builders/build-orchestrator.sh and baked at
+    # /opt/ctrlable/images/<name>.tar.zst (or pulled). Validated 2026-11-17: launched this way it
+    # drives the host Incus over the proxied socket and serves the API on :8000. If it is somehow
+    # absent, stop at a ready host + data pool (orchestrator can then be deployed manually).
     log "WARN orchestrator image '$ORCHESTRATOR_IMAGE' not available — host is ready; orchestrator not launched"
     rauc status mark-good booted || true
     touch "$STAMP"; exit 0
@@ -63,11 +64,12 @@ else
   sleep 3
 
   # Hand the orchestrator the host Incus API so it can drive the host (deploy the fleet),
-  # per SPEC §4 (Provisioner -> Incus REST API -> host). A proxy device bridges the host
-  # unix socket into the container.
+  # per SPEC §4 (Provisioner -> Incus REST API -> host). A proxy device bridges the host unix
+  # socket into the container AT THE DEFAULT CLIENT PATH, so the orchestrator's `incus` client
+  # (incus-client, baked into the image — no daemon in the container) just works unconfigured.
   incus config device add "$ORCH_NAME" incus-sock proxy \
       connect=unix:/var/lib/incus/unix.socket \
-      listen=unix:/run/incus/host.socket bind=container 2>/dev/null || \
+      listen=unix:/var/lib/incus/unix.socket bind=container 2>/dev/null || \
       log "WARN could not add incus-sock proxy device"
 
   # Inject enrol config so the orchestrator's platform.py can self-enrol with the portal.
