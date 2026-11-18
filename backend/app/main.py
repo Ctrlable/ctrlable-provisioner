@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1065,6 +1065,63 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
         },
         "guests": guests,
     }
+
+
+# ---------------------------------------------------------------------------
+# Live management surface (P6.1, SPEC §16.1) — direct Incus REST over the proxied
+# unix socket. The CLI provider can't stream; this is what powers a live fleet
+# view + a push event stream without the browser polling.
+# ---------------------------------------------------------------------------
+
+def _incus_rest():
+    """A per-request Incus REST client (cheap — just holds the socket path).
+    Live endpoints require the incus backend; other providers have no socket here."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "live fleet requires the incus backend (settings.provider=incus)")
+    from .incus_rest import IncusREST
+    return IncusREST(socket_path=getattr(settings, "incus_socket", None)
+                     or "/var/lib/incus/unix.socket")
+
+
+@app.get("/api/fleet/live")
+async def fleet_live(_: str | None = Depends(require_auth)) -> list[dict]:
+    """Snapshot of every instance with live state (status, cpu, mem, net, disk) — the live
+    fleet view's initial render + fallback. Served straight from the Incus REST API."""
+    from .incus_rest import IncusError
+    rest = _incus_rest()
+    try:
+        return await rest.fleet_snapshot()
+    except IncusError as e:
+        raise HTTPException(502, f"incus unreachable: {e}")
+
+
+@app.get("/api/incus/events")
+async def incus_events(_: str | None = Depends(require_auth)):
+    """Server-Sent Events relay of the Incus change stream (SSE is simpler than WS for one-way
+    push and fits StreamingResponse). Each `data:` line is one JSON event. The generator is
+    cancelled when the client disconnects, which closes the underlying poll loop.
+
+    TODO(P6.1): also multiplex our deploy `[PHASE] n/tot msg` markers (deploy.py) onto this
+    stream so the UI shows deploy progress as operations. Hook point: have deploy_instance push
+    phase dicts onto an asyncio.Queue that this generator drains alongside rest.events().
+    """
+    rest = _incus_rest()
+
+    async def gen():
+        yield ": ctrlable-orchestrator event stream\n\n"  # SSE comment / preamble
+        try:
+            async for ev in rest.events():
+                yield f"data: {json.dumps(ev)}\n\n"
+        except asyncio.CancelledError:  # client disconnected
+            raise
+        except Exception as e:  # noqa: BLE001 — surface, don't 500 the stream
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",   # don't let a reverse proxy buffer the stream
+        "Connection": "keep-alive",
+    })
 
 
 # ---------------------------------------------------------------------------
