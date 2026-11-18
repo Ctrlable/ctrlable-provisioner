@@ -33,10 +33,11 @@ tag 2026.11.0). Gates the `os` and `network_manager` unsupported evaluations beh
 `CTRLABLE_PLATFORM=lxc` (set only by our image; inert on HAOS). Rationale: both are structurally
 unsatisfiable in an Incus LXC (os_agent is not HAOS; the NM-managed veth is not enumerable over
 Supervisor's NM D-Bus) yet neither blocks a feature — so this clears the "unsupported" banner for
-HAOS parity. CAVEAT: silencing `network_manager` does not ADD the NETWORK host-feature, so the
-Supervisor Network UI stays inert until the veth is exposed over D-Bus (follow-up); host/Incus owns
-networking meanwhile. Behavioural validation (supported→true) needs a build of the forked
-Supervisor image (`make build`); the patch applies clean + compiles against 2026.11.0.
+HAOS parity. VALIDATED on ctrlable-pro-1 (2026-11-18): `make build`-style thin image (official Supervisor +
+these two patched files + `CTRLABLE_PLATFORM=lxc`) reports **supported:true, unsupported:[]**,
+healthy, add-ons install, Core up. CAVEAT: silencing `network_manager` does not ADD the NETWORK
+host-feature, so the Supervisor Network UI stays inert until the veth is exposed over D-Bus
+(follow-up); host/Incus owns networking meanwhile.
 - **Target:** `supervisor/resolution/evaluations/*.py` (the bare-metal-only evaluations, e.g.
   `systemd`, `os_agent`, `docker_configuration`) and the resolution manager that aggregates
   `UnsupportedReason`.

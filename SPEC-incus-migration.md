@@ -226,11 +226,13 @@ supported-gate-*`, pinned to tag 2026.11.0, applies clean + compiles — only cl
 **"unsupported" banner**: on Supervised-in-LXC the `os` reason (os_agent is not HAOS) and the
 `network_manager` reason (the NM-managed Incus veth is not enumerable over Supervisor's NM D-Bus)
 are structurally unsatisfiable yet block no feature, so the patch gates both behind
-`CTRLABLE_PLATFORM=lxc` (set by our image's `hassio-supervisor.service`; inert on HAOS) to reach
-`supported:true` for HAOS parity. Caveat: it does not revive the Supervisor Network UI (veth-over-
-D-Bus exposure is a tracked follow-up); host/Incus owns networking. The `supported:true` effect
-needs a build of the forked Supervisor image (`make -C supervisor build`); a stock Supervisor
-ignores the flag.
+`CTRLABLE_PLATFORM=lxc` to reach `supported:true` for HAOS parity. **VALIDATED on ctrlable-pro-1
+(2026-11-18):** `make -C supervisor build` layers the two patched files + the flag onto the
+official Supervisor image; after swapping it in, Supervisor reports **healthy:true + supported:true,
+unsupported:[]**, add-ons install, Core healthy. Caveat: it does not revive the Supervisor Network
+UI (veth-over-D-Bus exposure is a tracked follow-up); host/Incus owns networking. PRODUCTION: push
+the built image to the Ctrlable registry and PIN it as the appliance's supervisor image, so a
+Supervisor self-update never reverts to vanilla.
 
 ## 7. The builder problem (the long pole)
 

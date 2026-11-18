@@ -39,5 +39,6 @@ test on the box, ship. If conflicting, resolve exactly the named hunk, regenerat
   `core_mosquitto` installed on a stock Supervisor, 2026-11-18). The single patch,
   `0001-ctrlable-platform-supported-gate-*`, is the OPTIONAL supported-banner branding (gates the
   `os`/`network_manager` unsupported reasons behind `CTRLABLE_PLATFORM=lxc`, inert on HAOS). C1 is
-  not needed; see `patches/CANDIDATES.md`. Applies clean + compiles against 2026.11.0; behavioural
-  validation needs `make build` of the forked image.
+  not needed; see `patches/CANDIDATES.md`. VALIDATED on the box (2026-11-18):
+  `make build` layers the two patched files + `CTRLABLE_PLATFORM=lxc` onto the official Supervisor
+  image → **supported:true, unsupported:[]** in an Incus LXC, add-ons install, Core healthy.
