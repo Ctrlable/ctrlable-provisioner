@@ -1,0 +1,23 @@
+# Scheduled upstream-release watch for the Ctrlable Pro Supervisor fork.
+# Runs `make report` so every vanilla Supervisor release is visible with its
+# conflict surface against our patch stack — the mechanism that keeps us updating
+# "frequently, just as upstream does" (SPEC §6a). Adapt to the CI in use.
+name: supervisor-upstream-watch
+on:
+  schedule:
+    - cron: '17 6 * * *'   # daily; upstream ships ~weekly, this never misses one
+  workflow_dispatch: {}
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report upstream status + patch-stack health
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchutils
+          cd supervisor && make report | tee report.md
+      - name: Open/update an issue when behind or conflicting
+        if: ${{ hashFiles('supervisor/report.md') != '' }}
+        run: |
+          grep -qE 'behind by|CONFLICTS' supervisor/report.md && \
+            echo "TODO: wire to gh issue create/update" || echo "up to date"

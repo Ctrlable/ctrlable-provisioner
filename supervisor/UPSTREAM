@@ -1,0 +1,8 @@
+# Pinned vanilla Home Assistant Supervisor release our fork currently tracks.
+# `make sync` compares the newest upstream tag against this; bump it only after
+# `make apply` re-applies the patch stack cleanly (or a human resolves conflicts)
+# and `make build` produces a working image.
+UPSTREAM_REPO=https://github.com/home-assistant/supervisor
+# Set to the real tag once the first `make sync` runs on a box with network.
+# Format: a Supervisor release tag, e.g. 2026.11.3  (NOT a Core version).
+UPSTREAM_TAG=UNPINNED

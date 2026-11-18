@@ -156,18 +156,36 @@ systemctl restart systemd-networkd"
 partA(){ ensure_int_net; build_zwavejs_image; deploy_zwavejs "$@"; }
 
 # ---- Part B: Ctrlable Pro = HA Supervised in an LXC ------------------------
-# VERIFIED 2026-11-17 on this box: Supervisor + 97-addon store + Core on :8123,
-# unprivileged container, no AppArmor disable. Remaining: `healthy/supported=false`
-# banner (OURS to flip via our Supervisor fork, §6) and USB passthrough (partB_usb).
+# VERIFIED 2026-11-17: Supervisor + 97-addon store + full Core (:80 + :8123) come up.
+# Add-on INSTALLS are gated until the container looks like HAOS; we clear that with
+# Layer-0 environment parity (§6a), NO Supervisor fork: (1) privileged CT → clears the
+# `healthy → [privileged]` gate; (2) NetworkManager owns eth0 → clears `host_internet`.
+# Both are applied below. The Supervisor fork (supervisor/) is reserved for anything an
+# LXC environment can't satisfy — ideally nothing. USB passthrough is partB_usb.
 CPRO="${CPRO:-ctrlable-pro-1}"
 HA_MACHINE="${HA_MACHINE:-qemux86-64}"
 
 partB(){
-  log "partB: launch $CPRO on Debian 13 (installer hard-requires debian 13)"
-  incus info "$CPRO" >/dev/null 2>&1 || incus launch images:debian/13 "$CPRO" \
-    -c security.nesting=true \
-    -c security.syscalls.intercept.mknod=true \
-    -c security.syscalls.intercept.setxattr=true </dev/null
+  # Layer-0 environment parity (§6a): a PRIVILEGED container clears Supervisor's
+  # `healthy:false → [privileged]` add-on-install gate with ZERO Supervisor fork.
+  # Set CPRO_PRIV=0 to test the unprivileged path (then the health gate needs the
+  # Layer-1 C2 patch instead). Default on — the decision is HAOS-like add-on parity.
+  CPRO_PRIV="${CPRO_PRIV:-1}"
+  log "partB: launch $CPRO on Debian 13 (installer hard-requires debian 13; privileged=$CPRO_PRIV)"
+  if ! incus info "$CPRO" >/dev/null 2>&1; then
+    if [ "$CPRO_PRIV" = 1 ]; then
+      incus launch images:debian/13 "$CPRO" -c security.privileged=true -c security.nesting=true </dev/null
+    else
+      incus launch images:debian/13 "$CPRO" \
+        -c security.nesting=true \
+        -c security.syscalls.intercept.mknod=true \
+        -c security.syscalls.intercept.setxattr=true </dev/null
+    fi
+  elif [ "$CPRO_PRIV" = 1 ] && [ "$(incus config get "$CPRO" security.privileged)" != true ]; then
+    log "partB: flipping existing $CPRO to privileged (health gate) — restart required"
+    incus config set "$CPRO" security.privileged true
+    incus restart "$CPRO" </dev/null
+  fi
   sleep 4
   for i in $(seq 1 30); do incus exec "$CPRO" -- getent hosts download.docker.com >/dev/null 2>&1 && break; sleep 2; done
 
@@ -210,8 +228,27 @@ partB(){
   # (HAOS/os-agent creates it), so Supervisor can't create the Core/audio containers and Core
   # never leaves landingpage. Pre-create it so full Core (:80 + :8123) comes up.
   incus exec "$CPRO" -- mkdir -p /var/lib/homeassistant/audio/external
+
+  # Layer-0 connectivity parity (§6a): hand eth0 to NetworkManager so a STOCK Supervisor
+  # stops reporting host_internet:false (which blocks add-on installs/store refresh). This
+  # is the HAOS-faithful fix and needs ZERO Supervisor fork IF it sticks — the open empirical
+  # question (SPEC §15). The canonical script lives in supervisor/env/; push + run it here.
+  # If it can't get egress under NM it restores networkd and returns non-zero (then the
+  # Layer-1 C1 connectivity-fallback patch is the fallback — see supervisor/patches/CANDIDATES.md).
+  NETPARITY="$(dirname "$0")/../supervisor/env"
+  if [ -f "$NETPARITY/apply-net-parity.sh" ]; then
+    log "partB: Layer-0 NetworkManager NIC parity (clears host_internet without a fork)"
+    incus exec "$CPRO" -- mkdir -p /opt/ctrlable/net-parity
+    incus file push "$NETPARITY/apply-net-parity.sh" "$CPRO/opt/ctrlable/net-parity/apply-net-parity.sh" 2>/dev/null || true
+    incus file push "$NETPARITY/10-globally-managed-devices.conf" "$CPRO/opt/ctrlable/net-parity/10-globally-managed-devices.conf" 2>/dev/null || true
+    incus exec "$CPRO" -- bash /opt/ctrlable/net-parity/apply-net-parity.sh </dev/null \
+      && log "partB: ✓ NM parity OK — host_internet should clear on a stock Supervisor" \
+      || log "partB: ⚠ NM parity did NOT get egress — connectivity needs the C1 patch (CANDIDATES.md)"
+  else
+    log "partB: WARN supervisor/env/apply-net-parity.sh not found next to bootstrap — skipping NM parity"
+  fi
   log "partB: Supervisor starting; store + Core pull in background. Verify with: incus exec $CPRO -- ha supervisor info"
-  # TODO(fork): flip healthy/supported banner via our Supervisor fork; apply ctrlable rebrand.
+  # Layer-1 fork (only if the above env parity is insufficient): see supervisor/ harness.
 }
 
 # USB coordinator passthrough — run when a Z-Wave/Zigbee stick is plugged into the host.

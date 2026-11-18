@@ -157,6 +157,60 @@ B is what the bootstrap builds by default. (C is excluded by the store req.) **H
 update safety is a separate, higher-value axis — see §14; the host's own A/B is where the
 "A/B model" lives now, since Ctrlable Pro no longer carries HAOS's A/B.**
 
+### 6a. Supervisor parity & fork-tracking strategy (DECIDED 2026-11-18)
+
+**Directive (owner, 2026-11-18):** Ctrlable Pro must behave **as close to HAOS as possible,
+without sacrificing any feature HAOS offers** — if that means modifying Supervisor, we modify
+it. But our Supervisor must **stay continuously rebaseable on vanilla**: on every upstream
+release we diff vanilla against ours, pull in anything useful, and keep shipping updates at the
+**same cadence Home Assistant ships today.** That cadence constraint is the governing design
+rule — *every line we patch is merge-conflict surface against a weekly upstream*, so the whole
+strategy is built to minimise and isolate the diff.
+
+**Consequence — minimise the fork by reproducing the HAOS _environment_ first.** Most of the
+add-on-install gate stack (§6 corrected note) is **not** a Supervisor bug; it is Supervisor
+correctly detecting that the LXC does not look like HAOS. So we clear it in layers, patching
+Supervisor only for what no environment can satisfy:
+
+- **Layer 0 — environment parity (ZERO fork, the HAOS-faithful path). Do this first.**
+  Make the Ctrlable Pro container present the same environment HAOS gives Supervisor, so stock
+  checks pass unmodified:
+    - **privileged container** → clears `healthy:false → [privileged]` (PoC-confirmed).
+    - **NetworkManager owns the NIC** (install NM in the container, remove the systemd-networkd
+      `.network` for `eth0`, `unmanaged-devices=none`, one NM connection profile) → this is how
+      HAOS does networking and is the intended fix for `host_internet:false`. **Must be validated
+      on the box** — the live hack in the PoC did not stick; the image-level config is the real
+      test. If NM-manages-veth works, the connectivity gate needs **no fork at all.**
+    - **os-agent + a Supervisor-expected Docker daemon** (overlay2, correct cgroup, AppArmor
+      profile loaded) → clears the Docker/os-agent evaluations.
+  Target: **add-ons install on a stock Supervisor** with only environment set-up. Prove
+  `core_mosquitto` installs end-to-end before writing a single patch.
+- **Layer 1 — thin tracked fork (only the irreducible remainder).** For checks that are
+  *physically impossible* in an LXC even with a correct environment (e.g. a kernel/boot check
+  that assumes bare-metal HAOS) and for the **"unsupported" / branding** surface we own anyway,
+  carry a **small, isolated patch stack** (see the fork-tracking harness below). Each patch:
+  one concern, heavily commented with *why LXC needs it*, and ideally gated behind a config/env
+  flag so it is inert on real HAOS and trivial to re-apply. **No broad "rip out all the checks"
+  rewrite** — that would make upstream merges impossible, violating the cadence rule.
+
+**Fork-tracking harness (the deliverable the cadence rule demands).** Lives in `supervisor/`.
+It vendors vanilla `home-assistant/supervisor` as an upstream git remote pinned to a release
+tag, carries our changes as a **`git format-patch` stack** (not a divergent branch), and gives
+Make targets to: `sync` (fetch the newest upstream tag, show us the diff since our pinned tag),
+`apply` (re-apply our patch stack onto the new tag, reporting any patch that no longer applies
+cleanly so a human resolves exactly that hunk), `report` (human-readable "what changed upstream
++ does our stack still apply"), and `build` (produce the Ctrlable-Pro Supervisor container
+image). CI runs `report` on a schedule so we *see* every upstream release and its conflict
+surface — the mechanism that keeps us "updating frequently just as today." This mirrors the
+existing **rebrand-tools** discipline for the HAOS OS/frontend rebrand, extended to Supervisor.
+
+**Why this still beats Option A for the USB fleet:** Option A (HAOS VM) gets all of Layer 0
+for free, but pays the VM + USB-passthrough cost the whole fleet wants to avoid. With Layer 0
+done in the image, Option B reaches add-on parity with a **near-empty** Layer-1 fork — the
+cadence-safe outcome — and keeps the single-container host. If Layer 0 on the box turns out to
+*not* clear connectivity without an unacceptably large patch, that is the signal to fall back to
+A for add-on-heavy sites (§6). **This is the open empirical question the next box session answers.**
+
 ## 7. The builder problem (the long pole)
 
 `community-scripts/ProxmoxVE` recipes are Proxmox-native (`pct`, Proxmox storage, whiptail) and
@@ -410,6 +464,7 @@ banner — those live in the app layer / Supervisor fork, not here.
 ## 15. Open decisions
 
 - [x] **DECIDED 2026-11-17 — Ctrlable Pro host: Option B (Supervised-in-LXC), avoid VMs.** Container by default; Option A (HAOS VM) retained only as a per-site exception for network-attached-coordinator sites (§6, §13).
+- [x] **DECIDED 2026-11-18 — Supervisor parity: match HAOS behaviour with no feature loss; fork Supervisor where needed but keep it continuously rebaseable on vanilla at upstream cadence (§6a).** Strategy: clear the add-on-install gates with **environment parity first (Layer 0, zero fork)** — privileged CT + NetworkManager-managed NIC + os-agent — and carry only an irreducible, isolated patch stack (Layer 1) via a `supervisor/` fork-tracking harness (vendored upstream + `format-patch` stack + sync/apply/report/build targets + CI release watch).
 - [x] **DECIDED 2026-11-17 — disk layout: disposable OS slot(s) + ONE persistent Incus data pool on a separate filesystem (§14a).** The data pool is the single backup/move artifact and is never touched by an OS update.
 - [x] **DECIDED 2026-11-17 — OS A/B mechanism: image-based A/B via RAUC-for-host (§14a/§14b)**, reusing the HAOS/rebrand-tools RAUC+image pipeline. btrfs-subvolume alternative rejected.
 - [ ] **OPEN — RAUC bootloader slot-select backend (§14b): GRUB + grubenv** (leaning; best x86 RAUC story + built-in boot-counting auto-rollback) **vs systemd-boot/`bootctl`**.
@@ -419,6 +474,7 @@ banner — those live in the app layer / Supervisor fork, not here.
 - [ ] Builders: fork/adapt community-scripts logic vs write clean distro-agnostic recipes.
 - [ ] Target Debian base: 13 (trixie) + Incus from Debian repo vs Zabbly packages.
 - [ ] **Management UI (§16): build-into-our-orchestrator vs adopt a generic Incus tool (Incus UI / LXConsole) vs hybrid.** Constraint: provisioning/fleet/OTA/Ctrlable flows have no off-the-shelf equivalent — generic tools can only own day-2 instance management. Evaluate hands-on against the PoC box (P6).
+- [ ] **OPEN (next box session) — does Layer-0 environment parity clear `host_internet` without a fork?** Install NetworkManager in the Ctrlable Pro container, hand it `eth0` (remove the networkd `.network`, `unmanaged-devices=none`), and prove `core_mosquitto` installs on a **stock** Supervisor. Outcome decides whether the Layer-1 fork is near-empty (stay B) or heavy (fall back to A for add-on-heavy sites).
 
 ## 16. Provisioner / orchestrator web UI — management roadmap
 
