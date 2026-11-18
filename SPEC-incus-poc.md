@@ -199,7 +199,7 @@ Driven by `poc/incus-bootstrap.sh` (the verified recipe). Incus **6.0.4**, btrfs
 |---|---|
 | Service-container path end-to-end? | ✅ `ctrlable-zwavejs` built→published→deployed; firstboot + `eth1=198.18.0.20`; host→svc **HTTP 200** on backplane |
 | Per-service **builder** effort (long pole) | ✅ 17 s for the zwavejs recipe (prebuilt binary, no community-scripts). Cost is *owning* a recipe per service, not build time |
-| **HA Supervised comes up in an (unprivileged) LXC**? | ✅ Supervisor+cli+dns+observer+multicast+homeassistant all Up; Core on `:8123` (host→302); **no privileged CT, no AppArmor disable** |
+| **HA Supervised comes up in an (unprivileged) LXC**? | ✅ Supervisor+cli+dns+observer+multicast up; **full Core 2026.11.2** serving on **`:80` and `:8123`** (host→302/307); **no privileged CT, no AppArmor disable**. Needed one fix: pre-create `/var/lib/homeassistant/audio/external` (HAOS/os-agent makes it; a plain LXC doesn't), else Core can't create its container and stays on landingpage. Audio plugin itself needs real audio setup (non-fatal to Core) |
 | Add-on **store** intact in the container? | ✅ **97 add-ons** (core + hassio-addons + music-assistant + esphome) |
 | Supervisor **healthy/supported**? | `healthy:false, supported:false` — **expected**; the banner is ours to flip via our Supervisor fork (§6), not a technical blocker |
 | Container accommodations (the §6 "own the base compat" cost) | **debian 13 base** (installer OS gate); **host `kernel.dmesg_restrict=0`** (installer writes a host sysctl); benign cgroup-v1 warning. All small |

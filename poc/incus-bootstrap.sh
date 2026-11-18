@@ -206,6 +206,10 @@ partB(){
     curl -fsSL -o /tmp/hass-supervised.deb https://github.com/home-assistant/supervised-installer/releases/latest/download/homeassistant-supervised.deb
     apt-get install -y /tmp/hass-supervised.deb
   "
+  # PoC finding 2026-11-17: in a plain LXC the audio plugin's external mount path is absent
+  # (HAOS/os-agent creates it), so Supervisor can't create the Core/audio containers and Core
+  # never leaves landingpage. Pre-create it so full Core (:80 + :8123) comes up.
+  incus exec "$CPRO" -- mkdir -p /var/lib/homeassistant/audio/external
   log "partB: Supervisor starting; store + Core pull in background. Verify with: incus exec $CPRO -- ha supervisor info"
   # TODO(fork): flip healthy/supported banner via our Supervisor fork; apply ctrlable rebrand.
 }
