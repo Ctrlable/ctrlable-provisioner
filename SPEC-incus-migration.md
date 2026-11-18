@@ -547,7 +547,7 @@ banner — those live in the app layer / Supervisor fork, not here.
 - [ ] Networks: **adopt existing `vmbrN`** vs Incus-managed networks.
 - [ ] Builders: fork/adapt community-scripts logic vs write clean distro-agnostic recipes.
 - [ ] Target Debian base: 13 (trixie) + Incus from Debian repo vs Zabbly packages.
-- [ ] **Management UI (§16): build-into-our-orchestrator vs adopt a generic Incus tool (Incus UI / LXConsole) vs hybrid.** Constraint: provisioning/fleet/OTA/Ctrlable flows have no off-the-shelf equivalent — generic tools can only own day-2 instance management. Evaluate hands-on against the PoC box (P6).
+- [x] **RESOLVED 2026-11-18 (§16.1): BUILD into our orchestrator; borrow incus-ui-canonical's techniques over a direct Incus REST client.** Native Incus UI rejected — it is version-coupled to Zabbly's Incus (Debian 6.0.4 serves `/ui/`→404), so adopting it would reverse the §15 Debian-native decision. It's open source, so we reimplement its live-API techniques (events/console/exec/metrics websockets) ourselves, in one branded surface that also owns our provisioning/fleet/OTA/claim flows.
 - [x] **RESOLVED 2026-11-18 — Layer-0 environment parity clears both add-on gates with ZERO fork, persistently.** Masking networkd for the NIC + NM-alone DHCP on the Incus-bridge veth gives `connectivity=full` / `host_internet:true`; `ha addons install core_mosquitto` then succeeded on a **stock** Supervisor and the state survived a container reboot. Patch stack stays empty; B validated for add-on parity.
 
 ## 16. Provisioner / orchestrator web UI — management roadmap
@@ -596,3 +596,48 @@ between them. Decide after hands-on evaluation.
 
 > **Action:** stand up `incus-ui-canonical` (and try LXConsole) against the PoC box to evaluate
 > reuse-vs-build-vs-hybrid, then scope the chosen management surface as a **P6** phase.
+
+### 16.1 DECISION + design (2026-11-18): build it ourselves, borrow incus-ui's techniques
+
+**Decision:** build the day-2 management surface **into our own orchestrator UI**; do NOT adopt a
+generic tool. The PoC note above is decisive — `incus-ui-canonical` is version-coupled to Zabbly's
+Incus and won't serve on Debian's 6.0.4, so "adopt it" ⇒ "run Zabbly's Incus," reversing §15. It is
+open source (LXD-UI lineage), so we **learn from its techniques** and reimplement over the same Incus
+REST API, inside one branded surface that also owns the flows no generic tool can.
+
+**Keystone — a direct Incus REST client** over the proxied `/var/lib/incus/unix.socket`, alongside
+today's CLI-shelling `IncusProvider`. The CLI is request/response only and cannot stream; the REST
+path is what unlocks the live events websocket, console/exec websockets, the operations model, and
+the metrics endpoint. Everything below depends on this.
+
+**Borrow (reimplemented our way):**
+- `/1.0/events` websocket → push-based fleet + instance state; map our deploy `[PHASE]` markers into
+  the same operations stream (kills polling — the biggest UX win).
+- `/1.0/instances/<n>/console` + `/exec` websockets → in-browser VGA console + shell (pairs with the
+  host VPN backdoor for true remote field support).
+- operations model → deploy / OTA / clone surface as tracked operations with progress, not spinners.
+- `/1.0/metrics` (Prometheus) → per-instance + host CPU/mem/disk/net cards + sparklines.
+
+**Our moat (primary surface, no off-the-shelf equivalent):** appliance/site/fleet model,
+provision-from-manifest, clone-to-deploy, RAUC OTA + A/B rollback, dealer claim, enrollment +
+VPN/backdoor status, internal-net wiring, Ctrlable-Pro health (Core :8123, Supervisor
+`supported:true`, add-ons). The borrowed Incus day-2 is folded in as a tab — one interface, no second tool.
+
+**Deployment:** keep the orchestrator **containerized** (OTA-updatable via image/Store) + a thin
+**host reverse-proxy front door** that fronts the SPA and stays up even when the orchestrator
+container is down (same philosophy as the host VPN backdoor). Reachable on one host address behind
+the VPN/LAN.
+
+**Frontend stack:** upgrade from today's bare React (`react`+`react-dom`, single `App.jsx`) to the
+portal's stack (react-query + router + a component system + a ws client) and **share the portal's
+design system**, for one coherent Ctrlable surface across portal + appliance.
+
+**Phases (P6):**
+- **P6.1 spike:** REST client + `/1.0/events` → live fleet/instance view + operations (deploy phases). *(Prove the approach before the full rebuild.)*
+- **P6.2:** in-browser console + exec.
+- **P6.3:** metrics + Ctrlable-Pro health probes.
+- **P6.4:** domain flows — provision wizard, OTA/rollback, claim/dealer, network/storage views.
+
+**Open sub-decisions:** (a) confirm shared-vs-own design system (recommended: shared with portal);
+(b) folds in the §14b data-persistence item (Incus DB on the data partition) since the OTA/rollback
+panel depends on it.
