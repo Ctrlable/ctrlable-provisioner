@@ -73,23 +73,19 @@ set -x
 command -v zstd >/dev/null 2>&1 || { apk add --no-cache zstd >/dev/null 2>&1 || apk add zstd >/dev/null 2>&1; }
 beacon "zstd_bin=\$(command -v zstd 2>/dev/null | tr '/' '_')__ver=\$(zstd --version 2>&1 | tr ' /,()' '______')"
 if ! command -v zstd >/dev/null 2>&1; then beacon FATAL_no_zstd; sleep 5; poweroff -f; fi
-# Target = the LARGEST block device >1GiB. Diskless boot enumerates virtio disks a beat late and
-# there are tiny decoy drives (Incus config drive ~MBs, the iPXE boot ESP 16M), so wait+retry
-# and require >1GiB (2097152 512B-sectors) to avoid dd'ing the wrong tiny device.
-modprobe virtio_blk 2>/dev/null; modprobe virtio_scsi 2>/dev/null; modprobe sd_mod 2>/dev/null
-DISK=""; maxsz=0; tries=0
-while [ \$tries -lt 30 ]; do
-  blist=""
-  for d in /sys/block/*; do
-    n=\$(basename "\$d"); case "\$n" in loop*|sr*|ram*|fd*|dm-*) continue;; esac
-    sz=\$(cat "\$d/size" 2>/dev/null || echo 0); blist="\$blist \$n:\$sz"
-    if [ "\$sz" -gt 2097152 ] && [ "\$sz" -gt "\$maxsz" ]; then maxsz=\$sz; DISK="/dev/\$n"; fi
-  done
-  [ \$tries -eq 0 ] && beacon "blocks=\$(echo \$blist | tr ' :' '__')"
+# Probe virtio transports, then pick the largest whole disk >1GiB from /proc/partitions (the
+# authoritative kernel view; #blocks is KiB). Retry: diskless virtio enumerates a beat late.
+modprobe virtio_pci 2>/dev/null; modprobe virtio_blk 2>/dev/null; modprobe virtio_scsi 2>/dev/null; modprobe sd_mod 2>/dev/null
+beacon "parts0=\$(sed -n '2,25p' /proc/partitions | tr -s ' ' '_' | tr '\n' '|' | cut -c1-200)"
+beacon "mods=\$(lsmod 2>/dev/null | awk '/virtio|_blk|scsi|sd_mod/{print \$1}' | tr '\n' ',')__dev=\$(ls /dev 2>/dev/null | grep -E '^(vd|sd|nvme)' | tr '\n' ',')"
+DISK=""; tries=0
+while [ \$tries -lt 40 ]; do
+  DISK=\$(awk 'NR>2{n=\$4;b=\$3; if(n~/^(loop|ram|sr|fd|dm-)/)next; if(n~/[0-9]\$/ && n!~/nvme[0-9]+n[0-9]+\$/)next; if(b+0>1048576 && b+0>m){m=b+0;best=n}} END{if(best)print "/dev/" best}' /proc/partitions)
   [ -n "\$DISK" ] && break
+  modprobe virtio_blk 2>/dev/null; modprobe virtio_scsi 2>/dev/null; modprobe sd_mod 2>/dev/null
   sleep 1; tries=\$((tries+1))
 done
-beacon "disk=\$(echo \${DISK:-NONE} | tr '/' '_')__sectors=\$maxsz__waited=\$tries"
+beacon "disk=\$(echo \${DISK:-NONE} | tr '/' '_')__waited=\$tries"
 if [ -z "\$DISK" ]; then beacon FATAL_no_target_disk; sleep 5; poweroff -f; fi
 if command -v curl >/dev/null 2>&1; then DL="curl -fL \$IMGURL"; else DL="wget -O - \$IMGURL"; fi
 beacon "dl=\$(echo \$DL | tr ' /:.' '____')"
