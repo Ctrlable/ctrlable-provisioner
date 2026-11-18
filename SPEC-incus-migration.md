@@ -138,16 +138,17 @@ want for an automated appliance build.
 > 3. `healthy:false → [privileged]` **blocks installs** until the CT is **privileged**. Flipping
 >    Ctrlable Pro to a privileged LXC cleared it (so it joins frigate as privileged, OR the fork
 >    patches the health check to keep it unprivileged).
-> 4. `host_internet:false` **still blocks installs**: Supervisor derives connectivity from a
->    **NetworkManager-managed** interface, and the LXC's `eth0` stays NM-*unmanaged* (networkd owns
->    it); handing it to NM in a container is non-trivial and was NOT cleared in the PoC.
+> 4. `host_internet:false` blocks installs because Supervisor derives connectivity from a
+>    **NetworkManager-managed** interface. **CLEARED 2026-11-18:** mask networkd for the NIC and
+>    let NM alone DHCP the Incus-bridge veth → `connectivity=full`, `host_internet:true` (persists
+>    across reboot). Zero fork — see §6a. (Earlier "not cleared" was a networkd/NM conflict.)
 >
-> So add-on *installation* in Supervised-LXC needs **privileged + a NetworkManager-managed NIC**,
-> and the Supervisor fork must neutralise the health/connectivity gates (or the image must set all
-> this up). A **HAOS VM (Option A) hits none of these** — healthy/supported/NM-managed out of the
-> box, add-ons install trivially. Net: this **raises Option B's cost and strengthens Option A for
-> add-on-heavy sites**; B still wins where USB passthrough + no-VM-overhead dominate and we accept
-> the fork/base-compat work.
+> So add-on *installation* in Supervised-LXC needs **privileged + a NetworkManager-managed NIC** —
+> both pure **environment** set-up the image applies, **no Supervisor fork** (VALIDATED 2026-11-18,
+> §6a: `core_mosquitto` installed on a stock Supervisor; parity survived reboot). A **HAOS VM
+> (Option A)** gets this for free but pays the VM + USB-passthrough cost. Net: **Option B reaches
+> HAOS-equivalent add-on parity with an empty patch stack** — the cadence-safe outcome — so B
+> stands for the USB fleet and A is only the network-coordinator exception.
 
 **Option A (HAOS VM) is retained only as a documented exception** for a site whose radios
 are **network-attached** (no USB to pass through), where the clean `.img` deploy and intact
@@ -176,15 +177,21 @@ Supervisor only for what no environment can satisfy:
   Make the Ctrlable Pro container present the same environment HAOS gives Supervisor, so stock
   checks pass unmodified:
     - **privileged container** → clears `healthy:false → [privileged]` (PoC-confirmed).
-    - **NetworkManager owns the NIC** (install NM in the container, remove the systemd-networkd
-      `.network` for `eth0`, `unmanaged-devices=none`, one NM connection profile) → this is how
-      HAOS does networking and is the intended fix for `host_internet:false`. **Must be validated
-      on the box** — the live hack in the PoC did not stick; the image-level config is the real
-      test. If NM-manages-veth works, the connectivity gate needs **no fork at all.**
+    - **NetworkManager owns the NIC** (install NM, MASK systemd-networkd for the NIC,
+      `unmanaged-devices=none`, one persistent NM DHCP connection) → this is how HAOS does
+      networking and is the fix for `host_internet:false`. **VALIDATED 2026-11-18 on the box:**
+      with networkd fully out of the way and NM alone doing DHCP on the Incus-bridge veth,
+      `nmcli networking connectivity` = `full` and Supervisor reports `host_internet:true` /
+      `supervisor_internet:true` — **persisting across a container reboot.** The connectivity
+      gate needs **no fork at all.** (The earlier "live hack didn't stick" was networkd and NM
+      fighting over `eth0`, which broke DHCP; the clean NM-only config is the fix.)
     - **os-agent + a Supervisor-expected Docker daemon** (overlay2, correct cgroup, AppArmor
       profile loaded) → clears the Docker/os-agent evaluations.
-  Target: **add-ons install on a stock Supervisor** with only environment set-up. Prove
-  `core_mosquitto` installs end-to-end before writing a single patch.
+  Target: **add-ons install on a stock Supervisor** with only environment set-up.
+  **PROVEN 2026-11-18:** with privileged + NM parity, `ha addons install core_mosquitto`
+  completed and the add-on container (`app_core_mosquitto`) came up healthy on a STOCK
+  Supervisor — **patch stack empty, zero fork.** (Note: this Supervisor renamed `addons`→`apps`;
+  track the terminology in future rebases.)
 - **Layer 1 — thin tracked fork (only the irreducible remainder).** For checks that are
   *physically impossible* in an LXC even with a correct environment (e.g. a kernel/boot check
   that assumes bare-metal HAOS) and for the **"unsupported" / branding** surface we own anyway,
@@ -209,7 +216,9 @@ for free, but pays the VM + USB-passthrough cost the whole fleet wants to avoid.
 done in the image, Option B reaches add-on parity with a **near-empty** Layer-1 fork — the
 cadence-safe outcome — and keeps the single-container host. If Layer 0 on the box turns out to
 *not* clear connectivity without an unacceptably large patch, that is the signal to fall back to
-A for add-on-heavy sites (§6). **This is the open empirical question the next box session answers.**
+A for add-on-heavy sites (§6). **RESOLVED 2026-11-18: Layer-0 cleared both gates with zero
+fork and survived reboot — so the Layer-1 patch stack stays empty and B is fully validated for
+add-on parity. A remains only the per-site network-coordinator exception, not an add-on fallback.**
 
 ## 7. The builder problem (the long pole)
 
@@ -474,7 +483,7 @@ banner — those live in the app layer / Supervisor fork, not here.
 - [ ] Builders: fork/adapt community-scripts logic vs write clean distro-agnostic recipes.
 - [ ] Target Debian base: 13 (trixie) + Incus from Debian repo vs Zabbly packages.
 - [ ] **Management UI (§16): build-into-our-orchestrator vs adopt a generic Incus tool (Incus UI / LXConsole) vs hybrid.** Constraint: provisioning/fleet/OTA/Ctrlable flows have no off-the-shelf equivalent — generic tools can only own day-2 instance management. Evaluate hands-on against the PoC box (P6).
-- [ ] **OPEN (next box session) — does Layer-0 environment parity clear `host_internet` without a fork?** Install NetworkManager in the Ctrlable Pro container, hand it `eth0` (remove the networkd `.network`, `unmanaged-devices=none`), and prove `core_mosquitto` installs on a **stock** Supervisor. Outcome decides whether the Layer-1 fork is near-empty (stay B) or heavy (fall back to A for add-on-heavy sites).
+- [x] **RESOLVED 2026-11-18 — Layer-0 environment parity clears both add-on gates with ZERO fork, persistently.** Masking networkd for the NIC + NM-alone DHCP on the Incus-bridge veth gives `connectivity=full` / `host_internet:true`; `ha addons install core_mosquitto` then succeeded on a **stock** Supervisor and the state survived a container reboot. Patch stack stays empty; B validated for add-on parity.
 
 ## 16. Provisioner / orchestrator web UI — management roadmap
 

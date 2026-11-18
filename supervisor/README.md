@@ -35,5 +35,7 @@ test on the box, ship. If conflicting, resolve exactly the named hunk, regenerat
 
 ## Status
 - `UPSTREAM_TAG=UNPINNED` — set it on the first `make sync` from a networked box.
-- `patches/` empty — **intended.** First prove `env/apply-net-parity.sh` (Layer-0) clears
-  `host_internet` on the box (SPEC §15 open item). Only then decide if C1/C2 are needed.
+- `patches/` empty — **intended, and now validated as sufficient.** `env/apply-net-parity.sh`
+  (Layer-0) cleared `host_internet` on the box and `core_mosquitto` installed on a stock
+  Supervisor (2026-11-18, survived reboot). C1/C2 remain documented in `patches/CANDIDATES.md`
+  only as reserves for future upstream changes — none needed today.

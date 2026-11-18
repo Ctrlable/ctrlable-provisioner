@@ -230,9 +230,9 @@ partB(){
   incus exec "$CPRO" -- mkdir -p /var/lib/homeassistant/audio/external
 
   # Layer-0 connectivity parity (§6a): hand eth0 to NetworkManager so a STOCK Supervisor
-  # stops reporting host_internet:false (which blocks add-on installs/store refresh). This
-  # is the HAOS-faithful fix and needs ZERO Supervisor fork IF it sticks — the open empirical
-  # question (SPEC §15). The canonical script lives in supervisor/env/; push + run it here.
+  # stops reporting host_internet:false (which blocks add-on installs/store refresh). VALIDATED
+  # 2026-11-18 (zero Supervisor fork; add-on installed; survived reboot). The canonical script
+  # (supervisor/env/apply-net-parity.sh) masks networkd for the NIC + NM-alone DHCP; push+run it.
   # If it can't get egress under NM it restores networkd and returns non-zero (then the
   # Layer-1 C1 connectivity-fallback patch is the fallback — see supervisor/patches/CANDIDATES.md).
   NETPARITY="$(dirname "$0")/../supervisor/env"
