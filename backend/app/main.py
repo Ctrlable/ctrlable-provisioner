@@ -1279,12 +1279,18 @@ async def incus_console(ws: WebSocket, name: str):
     md = op.get("metadata") or {}
     fds = (md.get("metadata") or {}).get("fds") or md.get("fds") or {}
     secret0 = fds.get("0") or fds.get("1")
+    secret_ctl = fds.get("control")
     if not opid or not secret0:
         await ws.send_text("\r\n[exec: no websocket fds returned]\r\n"); await ws.close(); return
 
-    uri0 = f"ws://unix/1.0/operations/{opid}/websocket?secret={secret0}"
+    base = f"ws://unix/1.0/operations/{opid}/websocket?secret="
+    ictl = None
     try:
-        iws = await websockets.unix_connect(rest.socket_path, uri=uri0)
+        iws = await websockets.unix_connect(rest.socket_path, uri=base + secret0)
+        # Incus only STARTS streaming once the 'control' WS is also attached — attach + keep it
+        # open for the session (it also carries window-resize, a later refinement).
+        if secret_ctl:
+            ictl = await websockets.unix_connect(rest.socket_path, uri=base + secret_ctl)
     except Exception as e:  # noqa: BLE001
         await ws.send_text(f"\r\n[console connect failed: {e}]\r\n"); await ws.close(); return
 
@@ -1321,10 +1327,12 @@ async def incus_console(ws: WebSocket, name: str):
     finally:
         for t in (t1, t2):
             t.cancel()
-        try:
-            await iws.close()
-        except Exception:  # noqa: BLE001
-            pass
+        for w in (iws, ictl):
+            if w is not None:
+                try:
+                    await w.close()
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             await ws.close()
         except Exception:  # noqa: BLE001
