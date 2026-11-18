@@ -381,9 +381,12 @@ what makes us us. So full replacement is unlikely — the realistic axis is how 
 Candidates to evaluate (all speak the same Incus REST API our `HostDriver` targets):
 - **Incus built-in UI** (`incus-ui-canonical`; daemon serves it at `core.https_address`, usually
   `:8443`) — modern SPA (LXD-UI lineage): instances, snapshots, console, metrics, storage, networks.
-  *PoC note (2026-11-17): the HTTPS API serves (`:8443`→200) but `incus-ui-canonical` is **not in
-  Debian's repo** — it ships via **Zabbly**, so the built-in UI needs the Zabbly repo or manually
-  dropped UI assets on our Debian-repo base. This couples to the §15 Debian-repo-vs-Zabbly decision.*
+  *PoC note (2026-11-17): the HTTPS API serves (`:8443`→200) but the built-in UI is **version-
+  coupled to Zabbly's Incus**. `incus-ui-canonical` is not in Debian's repo; Zabbly ships it (even
+  for trixie), but the assets are built for Zabbly's Incus **7.6** and **Debian's Incus 6.0.4 does
+  not serve them** (`/ui/`→404 even with the assets dropped at `/opt/incus/ui`). So the built-in UI
+  effectively requires **adopting Zabbly's Incus wholesale** — which is exactly the §15 Debian-repo-
+  vs-Zabbly decision, now with teeth: "want the native Incus UI" ⇒ "run Zabbly's Incus."*
 - **LXConsole** — open-source multi-server web UI for LXD/Incus; closer to a Proxmox-style fleet view.
 - **Our provisioner UI, extended** — build the day-2 panels in, for one branded, coherent surface.
 - **Proxmox UI** — the familiarity benchmark for field techs (node tree, guest tabs, console, task log).
