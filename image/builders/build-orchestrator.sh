@@ -48,6 +48,14 @@ incus exec "$BUILD" -- mkdir -p /opt/ctrlable-provisioner
 tar -C "$SRC" -cf - backend frontend/dist deploy 2>/dev/null | \
   incus exec "$BUILD" -- tar -C /opt/ctrlable-provisioner -xf -
 
+log "write the install record (so /health + the Platform tab report a real version, not 'unknown')"
+VER="$(git -C "$SRC" describe --tags --always --dirty 2>/dev/null || echo "${ORCH_VERSION:-unknown}")"
+REV="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo "${ORCH_REVISION:-unknown}")"
+DIRTY=false; git -C "$SRC" diff --quiet 2>/dev/null || DIRTY=true
+incus exec "$BUILD" -- sh -c 'cat > /opt/ctrlable-provisioner/install.json' <<JSON
+{"version":"$VER","revision":"$REV","dirty":$DIRTY,"built_by":"build-orchestrator.sh","built_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+JSON
+
 log "create venv + install backend requirements"
 incus exec "$BUILD" -- bash -c '
   set -e

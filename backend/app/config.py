@@ -70,6 +70,11 @@ class Settings(BaseSettings):
         return Path(__file__).parent.parent / "ctrlable.db"
 
     def configured(self) -> bool:
+        # Incus/libvirt drive a local daemon (the host Incus socket / libvirt), so they need no
+        # PVE credentials — "configured" means the provider backend is usable, not that PVE is set.
+        # Any real backend failure surfaces via the dashboard's provider call (try/except there).
+        if (self.provider or "proxmox").lower() in ("incus", "libvirt"):
+            return True
         return bool(self.pve_host and self.pve_token_id and self.pve_token_secret)
 
     def build_configured(self) -> bool:
