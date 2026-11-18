@@ -1,44 +1,38 @@
-# Ctrlable Pro — Supervisor fork-tracking harness
+# Ctrlable Pro Supervisor on Incus — delegates to rebrand-tools
 
-**Goal (owner directive, 2026-11-18):** Ctrlable Pro must behave **as close to HAOS as
-possible, with no feature loss.** Where that needs Supervisor changes, we make them — but our
-Supervisor stays **continuously rebaseable on vanilla** so we keep shipping at Home Assistant's
-own release cadence. See `SPEC-incus-migration.md` §6a.
+**The Ctrlable Supervisor is built and tracked in ONE place: `rebrand-tools`** —
+`server/patch_supervisor.py` + `.github/workflows/build-supervisor.yml`. That pipeline
+pulls the **official upstream Supervisor (STABLE releases only** — enforced there, never
+dev/beta/`:latest`), applies the Ctrlable brand patches, and publishes
+`ghcr.io/ctrlable/<arch>-hassio-supervisor`. **The whole fleet runs that same branded image** —
+the Proxmox HAOS-in-VM appliances *and* this Incus LXC appliance — pinned via the version
+endpoint's `images.supervisor` (`stable.json`).
 
-**Design rule:** every patched line is merge-conflict surface against a weekly upstream, so the
-stack is kept **minimal and isolated** — ideally *empty*. We clear the Supervised-in-LXC
-add-on-install gates with **environment parity first** (no fork), and patch Supervisor only for
-what no LXC environment can satisfy.
+We deliberately do **NOT** fork or track Supervisor a second time here — that would duplicate
+rebrand-tools' upstream tracking and break the "track upstream once, at HA's cadence" rule.
+(An earlier draft of this dir carried a parallel `format-patch` harness; removed 2026-11-18 once
+we confirmed rebrand-tools already owns Supervisor.)
 
-## Layout
-- `UPSTREAM`            — pinned vanilla Supervisor tag we track (+ repo URL).
-- `patches/`           — the `git format-patch` stack applied on top of that tag. **Empty is
-                         the goal.** `CANDIDATES.md` lists the only patches we expect to need
-                         (connectivity fallback, platform-supported/branding) and their exact
-                         upstream targets — add them only if the box proves the environment
-                         can't clear the gate.
-- `env/`               — **Layer-0, zero-fork** container config that makes a *stock*
-                         Supervisor pass (NetworkManager owns the NIC, etc.). Consumed by the
-                         appliance build, not by this harness; documents the contract.
-- `scripts/`, `Makefile` — the harness: `sync` / `apply` / `report` / `build`.
-- `ci/`                — scheduled upstream-release watch (runs `report`).
+## The only LXC-specific pieces (what this directory is for)
 
-## Workflow
-```
-make sync       # fetch vanilla, show commits + merge-risk files since our pin (read-only)
-make apply      # apply our stack on the pinned tag; names any patch that won't apply
-make report     # CI/human: newest release, how far behind, does the stack still apply
-make build      # apply stack + build the Ctrlable Pro Supervisor image (needs docker)
-```
-On each upstream release: `make report` → if clean, bump `UPSTREAM_TAG`, `make build`, smoke
-test on the box, ship. If conflicting, resolve exactly the named hunk, regenerate that patch.
+1. **The supported-gate lives in rebrand-tools**, not here:
+   `patch_supervisor.py::_patch_lxc_supported_gate` clears the two unsupported reasons that are
+   structurally unsatisfiable in an LXC but block no feature — `os` (os_agent is not HAOS) and
+   `network_manager` (the NM-managed Incus veth is not enumerable over Supervisor's NM D-Bus).
+   It is gated at runtime on **`CTRLABLE_PLATFORM=lxc`**, so the one branded image stays inert on
+   the VM path (which never sets the flag, and is genuinely supported anyway). Validated on
+   ctrlable-pro-1 2026-11-18: with the flag, `supported:true`, `unsupported:[]`.
 
-## Status
-- `UPSTREAM_TAG=2026.11.0` — pinned to the Supervisor the PoC box runs.
-- `patches/` — **one patch.** Add-on parity needs ZERO fork (Layer-0 env cleared it;
-  `core_mosquitto` installed on a stock Supervisor, 2026-11-18). The single patch,
-  `0001-ctrlable-platform-supported-gate-*`, is the OPTIONAL supported-banner branding (gates the
-  `os`/`network_manager` unsupported reasons behind `CTRLABLE_PLATFORM=lxc`, inert on HAOS). C1 is
-  not needed; see `patches/CANDIDATES.md`. VALIDATED on the box (2026-11-18):
-  `make build` layers the two patched files + `CTRLABLE_PLATFORM=lxc` onto the official Supervisor
-  image → **supported:true, unsupported:[]** in an Incus LXC, add-ons install, Core healthy.
+2. **Setting the flag** is the appliance's job: `poc/incus-bootstrap.sh partB` wires
+   `-e CTRLABLE_PLATFORM=lxc` into `hassio-supervisor.service`. The flag is NEVER baked into the
+   image (fail-safe: a missing flag = vanilla behaviour, never a false "supported").
+
+3. **`env/` — Layer-0 network parity** (the zero-fork part): hand `eth0` to NetworkManager so a
+   stock Supervisor reports `host_internet:true` and add-ons install (SPEC §6a). `apply-net-parity.sh`
+   masks systemd-networkd for the NIC and lets NM alone DHCP the Incus-bridge veth. Applied by
+   `incus-bootstrap partB`. This is pure deployment config — correctly a provisioner concern.
+
+## Production pin
+A rebrand-tools build of the branded Supervisor carries the gate automatically. To put it on the
+fleet, point `stable.json`'s `images.supervisor` at that build — a **deliberate fleet-wide deploy**,
+done from rebrand-tools, not here.

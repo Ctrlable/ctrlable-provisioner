@@ -16,3 +16,7 @@ Apply order inside the container (after the Supervised install, before first add
    NM then reports `limited`. `apply-net-parity.sh` encodes the validated clean sequence.
 3. **os-agent** running + `/var/lib/homeassistant/audio/external` present (bootstrap already
    does the audio path) — clears the os-agent/audio evaluations.
+
+> The Supervisor **supported-gate** (os/network_manager) is NOT here — it lives in
+> rebrand-tools `patch_supervisor.py::_patch_lxc_supported_gate`, gated on `CTRLABLE_PLATFORM=lxc`
+> (set by incus-bootstrap partB). This dir is only the Layer-0 network parity + the flag wiring.

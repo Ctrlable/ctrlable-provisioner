@@ -162,11 +162,16 @@ update safety is a separate, higher-value axis — see §14; the host's own A/B 
 
 **Directive (owner, 2026-11-18):** Ctrlable Pro must behave **as close to HAOS as possible,
 without sacrificing any feature HAOS offers** — if that means modifying Supervisor, we modify
-it. But our Supervisor must **stay continuously rebaseable on vanilla**: on every upstream
-release we diff vanilla against ours, pull in anything useful, and keep shipping updates at the
-**same cadence Home Assistant ships today.** That cadence constraint is the governing design
-rule — *every line we patch is merge-conflict surface against a weekly upstream*, so the whole
-strategy is built to minimise and isolate the diff.
+it. But our Supervisor must **stay continuously rebaseable on vanilla**, tracking upstream
+**STABLE releases only** (never dev/beta/`:latest`), and keep shipping at the **same cadence
+Home Assistant ships today.** We do not invent a new tracker: Supervisor is already owned by
+**rebrand-tools**, which rebrands the official upstream Supervisor (brand strings, Core-image
+redirect, version endpoint, and it already neutralises `virtualization_image`) and publishes
+`ghcr.io/ctrlable/<arch>-hassio-supervisor` — the image the WHOLE fleet runs (Proxmox HAOS-in-VM
+*and* the Incus LXC appliance), pinned via the version endpoint's `images.supervisor`. Its model
+is reset-to-upstream forks + **build-time programmatic patches** (not committed diffs), stable-only
+by rule (PR #18 fixed a `:latest`→dev regression). So the cadence rule is satisfied by keeping the
+LXC delta a tiny patch *in that pipeline*, not by a second tracker.
 
 **Consequence — minimise the fork by reproducing the HAOS _environment_ first.** Most of the
 add-on-install gate stack (§6 corrected note) is **not** a Supervisor bug; it is Supervisor
@@ -195,21 +200,22 @@ Supervisor only for what no environment can satisfy:
 - **Layer 1 — thin tracked fork (only the irreducible remainder).** For checks that are
   *physically impossible* in an LXC even with a correct environment (e.g. a kernel/boot check
   that assumes bare-metal HAOS) and for the **"unsupported" / branding** surface we own anyway,
-  carry a **small, isolated patch stack** (see the fork-tracking harness below). Each patch:
+  carry a **small, isolated patch stack** (in rebrand-tools — see below). Each patch:
   one concern, heavily commented with *why LXC needs it*, and ideally gated behind a config/env
   flag so it is inert on real HAOS and trivial to re-apply. **No broad "rip out all the checks"
   rewrite** — that would make upstream merges impossible, violating the cadence rule.
 
-**Fork-tracking harness (the deliverable the cadence rule demands).** Lives in `supervisor/`.
-It vendors vanilla `home-assistant/supervisor` as an upstream git remote pinned to a release
-tag, carries our changes as a **`git format-patch` stack** (not a divergent branch), and gives
-Make targets to: `sync` (fetch the newest upstream tag, show us the diff since our pinned tag),
-`apply` (re-apply our patch stack onto the new tag, reporting any patch that no longer applies
-cleanly so a human resolves exactly that hunk), `report` (human-readable "what changed upstream
-+ does our stack still apply"), and `build` (produce the Ctrlable-Pro Supervisor container
-image). CI runs `report` on a schedule so we *see* every upstream release and its conflict
-surface — the mechanism that keeps us "updating frequently just as today." This mirrors the
-existing **rebrand-tools** discipline for the HAOS OS/frontend rebrand, extended to Supervisor.
+**Where the fork lives (corrected 2026-11-18): rebrand-tools, not a second harness.** The
+Ctrlable "Ctrlable Supervisor" is built by **rebrand-tools** (`server/patch_supervisor.py` +
+`.github/workflows/build-supervisor.yml`): it pulls the official upstream Supervisor for the
+**stable** release, applies the brand patches, and pushes `ghcr.io/ctrlable/<arch>-hassio-supervisor`.
+The LXC supported-gate is just one more patch there — `patch_supervisor.py::_patch_lxc_supported_gate`
+— next to the `virtualization_image` suppression it already does, idempotent and loud-on-miss per
+that repo's conventions. The provisioner does **not** vendor or track Supervisor a second time
+(that would duplicate rebrand-tools' upstream tracking, against the cadence rule); `supervisor/`
+here holds only the **LXC deployment delta** — setting `CTRLABLE_PLATFORM=lxc` on the Supervisor
+container and the Layer-0 `env/` network parity. rebrand-tools' weekly `sync-upstream.yml` + brand
+verification are the "see every release" mechanism.
 
 **Why this still beats Option A for the USB fleet:** Option A (HAOS VM) gets all of Layer 0
 for free, but pays the VM + USB-passthrough cost the whole fleet wants to avoid. With Layer 0
@@ -220,19 +226,20 @@ A for add-on-heavy sites (§6). **RESOLVED 2026-11-18: Layer-0 cleared both gate
 fork and survived reboot — so the Layer-1 patch stack stays empty and B is fully validated for
 add-on parity. A remains only the per-site network-coordinator exception, not an add-on fallback.**
 
-**Fork status (2026-11-18):** the patch stack is **one patch**, and it is OPTIONAL. Add-on parity
-needs **zero fork** (Layer-0 env). The single patch — `supervisor/patches/0001-ctrlable-platform-
-supported-gate-*`, pinned to tag 2026.11.0, applies clean + compiles — only clears the
-**"unsupported" banner**: on Supervised-in-LXC the `os` reason (os_agent is not HAOS) and the
-`network_manager` reason (the NM-managed Incus veth is not enumerable over Supervisor's NM D-Bus)
-are structurally unsatisfiable yet block no feature, so the patch gates both behind
-`CTRLABLE_PLATFORM=lxc` to reach `supported:true` for HAOS parity. **VALIDATED on ctrlable-pro-1
-(2026-11-18):** `make -C supervisor build` layers the two patched files + the flag onto the
-official Supervisor image; after swapping it in, Supervisor reports **healthy:true + supported:true,
-unsupported:[]**, add-ons install, Core healthy. Caveat: it does not revive the Supervisor Network
-UI (veth-over-D-Bus exposure is a tracked follow-up); host/Incus owns networking. PRODUCTION: push
-the built image to the Ctrlable registry and PIN it as the appliance's supervisor image, so a
-Supervisor self-update never reverts to vanilla.
+**Fork status (2026-11-18, corrected):** the LXC delta is **one env-gated patch** in rebrand-tools
+(`_patch_lxc_supported_gate`) and it is OPTIONAL — add-on parity needs **zero** Supervisor change
+(Layer-0 env). The patch only clears the **"unsupported" banner**: the `os` reason (os_agent isn't
+HAOS) and `network_manager` reason (the NM-managed Incus veth isn't enumerable over Supervisor's NM
+D-Bus) are structurally unsatisfiable in an LXC yet block no feature, so it gates both behind
+`CTRLABLE_PLATFORM=lxc`. **ISOLATION:** the flag is set ONLY by the Incus appliance deployment
+(incus-bootstrap wires it into `hassio-supervisor.service`); the Proxmox HAOS-in-VM path never sets
+it, so the *same* branded image is inert there (and on real HAOS os_agent IS HAOS + the NIC is real,
+so the VM is genuinely supported anyway). **VALIDATED on ctrlable-pro-1 (2026-11-18):** the branded
+Supervisor image + the two gated evaluations + the flag → **healthy:true + supported:true,
+unsupported:[]**, add-ons install, Core healthy. Non-vacuous + idempotent proven against vanilla
+2026.11.0. Caveat: it does not revive the Supervisor Network UI (veth-over-D-Bus exposure is a
+tracked follow-up); host/Incus owns networking. PRODUCTION: a rebrand-tools build carries the gate;
+pin it fleet-wide via the version endpoint's `images.supervisor` (a deliberate fleet deploy).
 
 ## 7. The builder problem (the long pole)
 
@@ -521,7 +528,7 @@ banner — those live in the app layer / Supervisor fork, not here.
 ## 15. Open decisions
 
 - [x] **DECIDED 2026-11-17 — Ctrlable Pro host: Option B (Supervised-in-LXC), avoid VMs.** Container by default; Option A (HAOS VM) retained only as a per-site exception for network-attached-coordinator sites (§6, §13).
-- [x] **DECIDED 2026-11-18 — Supervisor parity: match HAOS behaviour with no feature loss; fork Supervisor where needed but keep it continuously rebaseable on vanilla at upstream cadence (§6a).** Strategy: clear the add-on-install gates with **environment parity first (Layer 0, zero fork)** — privileged CT + NetworkManager-managed NIC + os-agent — and carry only an irreducible, isolated patch stack (Layer 1) via a `supervisor/` fork-tracking harness (vendored upstream + `format-patch` stack + sync/apply/report/build targets + CI release watch).
+- [x] **DECIDED 2026-11-18 — Supervisor parity: match HAOS behaviour with no feature loss; fork Supervisor where needed but keep it continuously rebaseable on vanilla at upstream cadence (§6a).** Strategy: clear the add-on-install gates with **environment parity first (Layer 0, zero fork)** — privileged CT + NetworkManager-managed NIC + os-agent — and carry only an irreducible, isolated patch stack (Layer 1) as one env-gated patch in **rebrand-tools** `patch_supervisor.py` (the existing, stable-only Supervisor rebrand pipeline — NOT a second tracker); the provisioner only sets `CTRLABLE_PLATFORM=lxc` + the Layer-0 `env/` parity. VALIDATED: supported:true on the box.
 - [x] **DECIDED 2026-11-17 — disk layout: disposable OS slot(s) + ONE persistent Incus data pool on a separate filesystem (§14a).** The data pool is the single backup/move artifact and is never touched by an OS update.
 - [x] **DECIDED 2026-11-17 — OS A/B mechanism: image-based A/B via RAUC-for-host (§14a/§14b)**, reusing the HAOS/rebrand-tools RAUC+image pipeline. btrfs-subvolume alternative rejected.
 - [ ] **OPEN — RAUC bootloader slot-select backend (§14b): GRUB + grubenv** (leaning; best x86 RAUC story + built-in boot-counting auto-rollback) **vs systemd-boot/`bootctl`**.

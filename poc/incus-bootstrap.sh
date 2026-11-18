@@ -234,7 +234,7 @@ partB(){
   # 2026-11-18 (zero Supervisor fork; add-on installed; survived reboot). The canonical script
   # (supervisor/env/apply-net-parity.sh) masks networkd for the NIC + NM-alone DHCP; push+run it.
   # If it can't get egress under NM it restores networkd and returns non-zero (then the
-  # Layer-1 C1 connectivity-fallback patch is the fallback — see supervisor/patches/CANDIDATES.md).
+  # connectivity needs attention — but Layer-0 (NM parity) has cleared it in practice).
   NETPARITY="$(dirname "$0")/../supervisor/env"
   if [ -f "$NETPARITY/apply-net-parity.sh" ]; then
     log "partB: Layer-0 NetworkManager NIC parity (clears host_internet without a fork)"
@@ -248,7 +248,7 @@ partB(){
     log "partB: WARN supervisor/env/apply-net-parity.sh not found next to bootstrap — skipping NM parity"
   fi
   # Tell our FORKED Supervisor it is the Ctrlable LXC platform, so the C2 patch
-  # (supervisor/patches/0001-*) clears the structurally-unsatisfiable `os` +
+  # (rebrand-tools patch_supervisor.py::_patch_lxc_supported_gate) clears the structurally-unsatisfiable `os` +
   # `network_manager` unsupported reasons -> supported:true (HAOS parity). Inert
   # on a stock Supervisor and on HAOS (flag unset). We add it to the ExecStart of
   # the Supervised-installer's unit, which is the launch point we control.
@@ -262,9 +262,11 @@ partB(){
   ' </dev/null || log "partB: note - could not wire CTRLABLE_PLATFORM (stock Supervisor ignores it anyway)"
 
   log "partB: Supervisor starting; store + Core pull in background. Verify with: incus exec $CPRO -- ha supervisor info"
-  # Layer-1 fork: supported-banner only (supervisor/patches/0001). Add-on parity is zero-fork.
-  # The C2 'supported:true' effect needs our FORKED Supervisor image (make -C supervisor build);
-  # a stock Supervisor keeps supported:false (harmless — blocks no feature).
+  # Supervisor fork: supported-banner only, and it lives in rebrand-tools
+  # (patch_supervisor.py::_patch_lxc_supported_gate). Add-on parity is zero-fork. The
+  # supported:true effect needs the rebrand-tools-built branded Supervisor image (which carries
+  # the gate) pinned via the version endpoint; the official image keeps supported:false
+  # (harmless — blocks no feature). This block only SETS the flag the gate reads.
 }
 
 # USB coordinator passthrough — run when a Z-Wave/Zigbee stick is plugged into the host.

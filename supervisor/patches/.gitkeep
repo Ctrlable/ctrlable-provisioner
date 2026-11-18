@@ -1,4 +1,0 @@
-# The patch stack is intentionally empty until Layer-0 environment parity is
-# proven insufficient on the box. Empty = zero fork = cheapest upstream merges.
-# Add numbered `NNNN-<concern>.patch` (git format-patch) ONLY for checks no LXC
-# environment can satisfy. See CANDIDATES.md for the two we expect might be needed.
