@@ -241,6 +241,13 @@ unsupported:[]**, add-ons install, Core healthy. Non-vacuous + idempotent proven
 tracked follow-up); host/Incus owns networking. PRODUCTION: a rebrand-tools build carries the gate;
 pin it fleet-wide via the version endpoint's `images.supervisor` (a deliberate fleet deploy).
 
+**Supervisor naming (DECIDED 2026-11-18):** keep the shared **"Ctrlable Pro Supervisor"** label on
+both the Proxmox-VM and Incus-LXC boxes — it is accurate (it *is* the Ctrlable Pro Supervisor on
+both), and the label is composed in `ha-core`'s `hassio` integration, not the Supervisor image, so a
+per-platform name would be a cross-component core patch. The two boxes are already distinguished by
+the **site/sidebar identity** (which follows the site's own name), so no forked core string per
+platform. One image, one brand; platform shows through the flag at the `supported`/behaviour layer, not the name.
+
 ## 7. The builder problem (the long pole)
 
 `community-scripts/ProxmoxVE` recipes are Proxmox-native (`pct`, Proxmox storage, whiptail) and
