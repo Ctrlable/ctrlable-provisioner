@@ -60,29 +60,41 @@ ov="$(mktemp -d)"
 mkdir -p "$ov/etc/local.d" "$ov/etc/runlevels/default"
 cat > "$ov/etc/local.d/00-ctrlable-write.start" <<WRITER
 #!/bin/sh
-# Ctrlable Pro netboot writer — streams the appliance image to the local disk, then reboots.
-exec >/dev/console 2>&1
-set -x
+# Ctrlable Pro netboot writer — streams the appliance image to the LARGEST local disk, then
+# reboots INTO it only on a verified write. A failed/short write halts (poweroff) instead of
+# rebooting, so a blank box never falls into a netboot->fail->reboot loop.
+exec >/dev/ttyS0 2>&1
+echo "=============================================="
+echo " Ctrlable Pro network install (writer)"
+echo "=============================================="
 BASE="$BASE"
 IMGURL="\$BASE/ctrlable-pro.img.zst"
-echo "=============================================="
-echo " Ctrlable Pro network install"
-echo " source: \$IMGURL"
-echo "=============================================="
-apk add --no-cache zstd >/dev/null 2>&1 || apk add zstd || true
-# Target = the first real disk (the blank box). Never a loop/rom; in a VM this is vda/sda.
-DISK="\$(lsblk -dnpo NAME,TYPE 2>/dev/null | awk '\$2=="disk"{print \$1; exit}')"
-[ -z "\$DISK" ] && DISK="/dev/sda"
-echo "target disk: \$DISK"
-echo "writing in 5s (Ctrl-C to abort)…"; sleep 5
-if command -v curl >/dev/null 2>&1; then
-  curl -fL "\$IMGURL" | zstd -dc | dd of="\$DISK" bs=4M status=progress
+set -x
+# zstd decompresses the stream; the image is --long compressed so decompress needs --long too.
+command -v zstd >/dev/null 2>&1 || { apk add --no-cache zstd || apk add zstd; }
+if ! command -v zstd >/dev/null 2>&1; then echo "FATAL: zstd unavailable — halting"; sleep 5; poweroff -f; fi
+zstd --version
+# Target = the LARGEST block device (by sectors); skip loop/rom/ram and the tiny iPXE boot ESP.
+DISK=""; max=0
+for d in /sys/block/*; do
+  n=\$(basename "\$d")
+  case "\$n" in loop*|sr*|ram*|fd*|dm-*) continue;; esac
+  sz=\$(cat "\$d/size" 2>/dev/null || echo 0)
+  if [ "\$sz" -gt "\$max" ]; then max=\$sz; DISK="/dev/\$n"; fi
+done
+[ -z "\$DISK" ] && DISK=/dev/vda
+echo "target disk: \$DISK (\$max sectors)"
+echo "streaming \$IMGURL -> \$DISK"
+if command -v curl >/dev/null 2>&1; then DL="curl -fL \$IMGURL"; else DL="wget -O - \$IMGURL"; fi
+\$DL | zstd -dc --long=31 | dd of="\$DISK" bs=4M 2>/tmp/dd.err
+cat /tmp/dd.err
+bytes=\$(awk '/copied|bytes/{print \$1; exit}' /tmp/dd.err)
+echo "bytes written: \${bytes:-0}"
+if [ "\${bytes:-0}" -gt 1000000000 ]; then
+  sync; echo "WRITE OK (\$bytes bytes) — rebooting into the appliance in 5s"; sleep 5; reboot -f
 else
-  wget -O - "\$IMGURL" | zstd -dc | dd of="\$DISK" bs=4M
+  echo "WRITE FAILED/short — halting (no reboot loop); inspect over serial"; sync; sleep 5; poweroff -f
 fi
-sync
-echo "write complete — rebooting into the appliance in 5s"; sleep 5
-reboot -f
 WRITER
 chmod +x "$ov/etc/local.d/00-ctrlable-write.start"
 # enable the 'local' service so local.d scripts run at boot
