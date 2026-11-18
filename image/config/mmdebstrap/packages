@@ -22,6 +22,7 @@ rauc
 # containers + the data pool
 incus
 btrfs-progs
+dnsmasq-base
 
 # networking
 systemd-resolved
