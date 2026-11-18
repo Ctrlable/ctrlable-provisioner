@@ -66,7 +66,7 @@ DHCP=yes
 NET
 
 echo "build-rootfs: enable services + apply host branding (in chroot)"
-chroot "$root" systemctl enable systemd-networkd systemd-resolved ssh incus \
+chroot "$root" systemctl enable systemd-networkd systemd-resolved ssh incus rauc \
     ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good 2>/dev/null || true
 # branding: issue/motd/ssh banner get written; sshd reload + update-grub no-op in a chroot
 # (our hand-authored A/B grub.cfg from pack-image.sh is authoritative; GRUB_DISTRIBUTOR is cosmetic).
