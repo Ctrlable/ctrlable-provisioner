@@ -44,7 +44,7 @@ class IncusREST:
 
     # -- raw HTTP/1.1 over the unix socket -----------------------------------
 
-    async def _request(self, method: str, path: str) -> dict:
+    async def _request(self, method: str, path: str, body: "dict | None" = None) -> dict:
         """One request/response over a fresh UDS connection (Connection: close → read to EOF).
         Returns the parsed Incus envelope dict ({"type": "sync"|"error", "metadata": ...})."""
         try:
@@ -53,15 +53,17 @@ class IncusREST:
         except (OSError, asyncio.TimeoutError) as e:
             raise IncusError(f"cannot connect to Incus socket {self.socket_path}: {e}") from e
         try:
-            req = (
-                f"{method} {path} HTTP/1.1\r\n"
-                "Host: incus\r\n"
-                "Accept: application/json\r\n"
-                "User-Agent: ctrlable-orchestrator\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-            )
-            writer.write(req.encode())
+            payload = b"" if body is None else json.dumps(body).encode()
+            lines = [
+                f"{method} {path} HTTP/1.1",
+                "Host: incus",
+                "Accept: application/json",
+                "User-Agent: ctrlable-orchestrator",
+                "Connection: close",
+            ]
+            if body is not None:
+                lines += ["Content-Type: application/json", f"Content-Length: {len(payload)}"]
+            writer.write(("\r\n".join(lines) + "\r\n\r\n").encode() + payload)
             await writer.drain()
             raw = await reader.read()  # Connection: close → server EOFs after the body
         finally:
@@ -108,6 +110,24 @@ class IncusREST:
         gpu). This is the REAL host's hardware (what to pass through), not the container's."""
         md = await self._sync("/1.0/resources")
         return md or {}
+
+    async def exec_setup(self, name: str, command: "list | None" = None,
+                         width: int = 80, height: int = 24) -> dict:
+        """Start an interactive exec (POST /1.0/instances/<name>/exec, wait-for-websocket). Returns
+        the async operation envelope; metadata.metadata.fds carry the per-stream WS secrets, and
+        `operation` is the op path. The WS attach (over the UDS) runs the command — see the console
+        endpoint in main.py."""
+        body = {
+            "command": command or ["/bin/sh"],
+            "wait-for-websocket": True,
+            "interactive": True,
+            "environment": {"TERM": "xterm-256color"},
+            "width": int(width), "height": int(height),
+        }
+        env = await self._request("POST", f"/1.0/instances/{name}/exec", body)
+        if env.get("type") == "error":
+            raise IncusError(f"exec {name}: {env.get('error')} ({env.get('error_code')})")
+        return env
 
     async def operations(self) -> dict:
         """GET /1.0/operations?recursion=1 → running/queued operations (for progress + events)."""

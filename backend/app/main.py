@@ -5,7 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1247,6 +1247,88 @@ async def incus_exec(name: str, req: ExecRequest,
         return await asyncio.to_thread(_provider().exec_cmd, ref, req.command)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"exec failed: {e}")
+
+
+@app.websocket("/api/incus/instance/{name}/console")
+async def incus_console(ws: WebSocket, name: str):
+    """Interactive terminal into an instance (SPEC §16.1, P6.2). Bridges the browser WebSocket to
+    an Incus `exec` websocket over the unix socket: POST /exec (wait-for-websocket) → attach the
+    fd0 WS over the UDS (via websockets.unix_connect) → relay bytes both ways. Auth is the ?token=
+    query param (a browser can't set an Authorization header on a WebSocket)."""
+    from .auth import validate_token
+    try:
+        validate_token(ws.query_params.get("token", ""))
+    except Exception:
+        await ws.close(code=1008); return
+    if (settings.provider or "").lower() != "incus":
+        await ws.close(code=1011); return
+    try:
+        cols = int(ws.query_params.get("cols", "80")); rows = int(ws.query_params.get("rows", "24"))
+    except ValueError:
+        cols, rows = 80, 24
+
+    import websockets
+    from .incus_rest import IncusREST, IncusError
+    rest = IncusREST(socket_path=getattr(settings, "incus_socket", None) or "/var/lib/incus/unix.socket")
+    await ws.accept()
+    try:
+        op = await rest.exec_setup(name, width=cols, height=rows)
+    except IncusError as e:
+        await ws.send_text(f"\r\n[exec failed: {e}]\r\n"); await ws.close(); return
+    opid = (op.get("operation") or "").rstrip("/").split("/")[-1]
+    md = op.get("metadata") or {}
+    fds = (md.get("metadata") or {}).get("fds") or md.get("fds") or {}
+    secret0 = fds.get("0") or fds.get("1")
+    if not opid or not secret0:
+        await ws.send_text("\r\n[exec: no websocket fds returned]\r\n"); await ws.close(); return
+
+    uri0 = f"ws://unix/1.0/operations/{opid}/websocket?secret={secret0}"
+    try:
+        iws = await websockets.unix_connect(rest.socket_path, uri=uri0)
+    except Exception as e:  # noqa: BLE001
+        await ws.send_text(f"\r\n[console connect failed: {e}]\r\n"); await ws.close(); return
+
+    async def browser_to_incus():
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                data = msg.get("bytes")
+                if data is None:
+                    t = msg.get("text")
+                    if t is None:
+                        continue
+                    data = t.encode()
+                await iws.send(data)
+        except Exception:  # noqa: BLE001 — client gone / stream closed
+            pass
+
+    async def incus_to_browser():
+        try:
+            async for chunk in iws:
+                if isinstance(chunk, (bytes, bytearray)):
+                    await ws.send_bytes(bytes(chunk))
+                else:
+                    await ws.send_text(chunk)
+        except Exception:  # noqa: BLE001
+            pass
+
+    t1 = asyncio.create_task(browser_to_incus())
+    t2 = asyncio.create_task(incus_to_browser())
+    try:
+        await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in (t1, t2):
+            t.cancel()
+        try:
+            await iws.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------

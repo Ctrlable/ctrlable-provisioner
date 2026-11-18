@@ -70,3 +70,11 @@ def require_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return _decode(creds.credentials, settings.jwt_secret or _EPHEMERAL_SECRET)
+
+
+def validate_token(token: str) -> str:
+    """Validate a raw JWT (for a WebSocket's ?token= query param — the browser can't send an
+    Authorization header on a WS). Returns the username or raises HTTPException(401)."""
+    from .config import get_settings
+    settings = get_settings()
+    return _decode(token, settings.jwt_secret or _EPHEMERAL_SECRET)

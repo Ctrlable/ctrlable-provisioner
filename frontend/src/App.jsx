@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import './App.css'
+import '@xterm/xterm/css/xterm.css'
 
 // ---------------------------------------------------------------------------
 // Auth helpers
@@ -1574,6 +1575,7 @@ function InstanceDrawer({ name, onClose }) {
   const [cmd, setCmd] = useState('')
   const [cmdOut, setCmdOut] = useState(null)
   const [cmdBusy, setCmdBusy] = useState(false)
+  const [termOpen, setTermOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -1742,13 +1744,19 @@ function InstanceDrawer({ name, onClose }) {
           </section>
 
           <section>
-            <h4>Console <span className="dw-hint" style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 0 }}>run a command — interactive terminal next</span></h4>
-            <div className="dw-cmd">
-              <input className="dd-in cmd mono" placeholder="uptime · ls / · cat /etc/os-release" value={cmd}
-                     onChange={e => setCmd(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runCmd() }} />
-              <button className="btn-xs" disabled={cmdBusy || !cmd.trim()} onClick={runCmd}>{cmdBusy ? 'Running…' : 'Run'}</button>
-            </div>
-            {cmdOut && <pre className="dw-raw mono">{(cmdOut.stdout || '') + (cmdOut.stderr ? '\n' + cmdOut.stderr : '')}{cmdOut.exit != null ? `\n[exit ${cmdOut.exit}]` : ''}</pre>}
+            <h4>Console
+              <button className="h4-add" onClick={() => setTermOpen(o => !o)}>{termOpen ? 'Quick command' : 'Open terminal'}</button>
+            </h4>
+            {termOpen ? <TerminalPanel name={name} /> : (
+              <>
+                <div className="dw-cmd">
+                  <input className="dd-in cmd mono" placeholder="uptime · ls / · cat /etc/os-release" value={cmd}
+                         onChange={e => setCmd(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runCmd() }} />
+                  <button className="btn-xs" disabled={cmdBusy || !cmd.trim()} onClick={runCmd}>{cmdBusy ? 'Running…' : 'Run'}</button>
+                </div>
+                {cmdOut && <pre className="dw-raw mono">{(cmdOut.stdout || '') + (cmdOut.stderr ? '\n' + cmdOut.stderr : '')}{cmdOut.exit != null ? `\n[exit ${cmdOut.exit}]` : ''}</pre>}
+              </>
+            )}
           </section>
 
           <section>
@@ -1759,6 +1767,41 @@ function InstanceDrawer({ name, onClose }) {
       </aside>
     </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Interactive terminal — xterm.js bridged to the Incus exec websocket (SPEC §16.1, P6.2).
+// The WS is Bearer-less (browser can't set headers), so the JWT rides as ?token=.
+// ---------------------------------------------------------------------------
+function TerminalPanel({ name }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    let term, ws, disposed = false
+    ;(async () => {
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import('@xterm/xterm'), import('@xterm/addon-fit'),
+      ])
+      if (disposed || !ref.current) return
+      term = new Terminal({
+        fontSize: 12, cursorBlink: true, convertEol: false,
+        fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+        theme: { background: '#0b0e14', foreground: '#e6eaf2' },
+      })
+      const fit = new FitAddon(); term.loadAddon(fit)
+      term.open(ref.current); try { fit.fit() } catch { /* ignore */ }
+      const u = new URL(rel(`api/incus/instance/${encodeURIComponent(name)}/console`), document.baseURI)
+      u.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      u.search = `?token=${encodeURIComponent(getToken() || '')}&cols=${term.cols}&rows=${term.rows}`
+      ws = new WebSocket(u.toString()); ws.binaryType = 'arraybuffer'
+      ws.onopen = () => term.focus()
+      ws.onmessage = (e) => term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data))
+      ws.onclose = () => { if (!disposed) term.write('\r\n\x1b[2m[session closed]\x1b[0m\r\n') }
+      ws.onerror = () => { if (!disposed) term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n') }
+      term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d) })
+    })()
+    return () => { disposed = true; try { ws && ws.close() } catch { /* */ } try { term && term.dispose() } catch { /* */ } }
+  }, [name])
+  return <div className="term" ref={ref} />
 }
 
 // ---------------------------------------------------------------------------

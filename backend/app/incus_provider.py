@@ -91,10 +91,16 @@ class IncusProvider(Provider):
     # -- inventory / health ---------------------------------------------------
 
     def node_health(self) -> NodeHealth:
+        # The orchestrator runs in a container, so /proc here is the CONTAINER's. When the host's
+        # /proc is bind-mounted in (firstboot adds `hostproc` -> /host/proc, read-only), read that
+        # so the dashboard host card reflects the PHYSICAL host, not the orchestrator container.
+        proc = "/host/proc" if os.path.isdir("/host/proc") else "/proc"
+        host_root = "/host/root" if os.path.isdir("/host/root") else self.storage_root
+
         # Host-wide CPU via a short /proc/stat delta; per-guest CPU is skipped
         # (see list_guests) because sampling it makes listing slow.
         def _cpu_snapshot() -> tuple[int, int]:
-            with open("/proc/stat") as fh:
+            with open(f"{proc}/stat") as fh:
                 vals = [int(x) for x in fh.readline().split()[1:]]
             idle = vals[3] + (vals[4] if len(vals) > 4 else 0)  # idle + iowait
             return idle, sum(vals)
@@ -106,7 +112,7 @@ class IncusProvider(Provider):
         cpu = 0.0 if dt <= 0 else max(0.0, min(1.0, 1.0 - (i1 - i0) / dt))
 
         mem: dict[str, int] = {}
-        with open("/proc/meminfo") as fh:
+        with open(f"{proc}/meminfo") as fh:
             for line in fh:
                 key, _, rest = line.partition(":")
                 try:
@@ -116,15 +122,21 @@ class IncusProvider(Provider):
         mem_total = mem.get("MemTotal", 0)
         mem_avail = mem.get("MemAvailable", mem.get("MemFree", 0))
 
-        st = os.statvfs(self.storage_root)
+        st = os.statvfs(host_root)
         disk_total = st.f_blocks * st.f_frsize
         disk_free = st.f_bavail * st.f_frsize
 
-        with open("/proc/uptime") as fh:
+        try:
+            with open(f"{proc}/sys/kernel/hostname") as fh:
+                node = fh.read().strip() or self.node
+        except OSError:
+            node = self.node
+
+        with open(f"{proc}/uptime") as fh:
             uptime = int(float(fh.readline().split()[0]))
 
         return NodeHealth(
-            node=self.node, cpu=cpu,
+            node=node, cpu=cpu,
             mem_used=mem_total - mem_avail, mem_total=mem_total,
             disk_used=disk_total - disk_free, disk_total=disk_total,
             uptime=uptime,

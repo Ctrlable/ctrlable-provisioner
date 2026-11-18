@@ -388,3 +388,7 @@ td .svccell{display:flex;align-items:center;gap:10px}
   padding:4px 6px;font-size:12px;max-width:100%}
 .dd-rm{margin-left:auto}
 .dw-cmd{display:flex;gap:6px;align-items:center}
+
+/* Interactive terminal (xterm) */
+.term{height:320px;background:#0b0e14;border:1px solid var(--border);border-radius:8px;padding:6px 8px;overflow:hidden}
+.term .xterm,.term .xterm-viewport,.term .xterm-screen{height:100%!important}

@@ -78,6 +78,11 @@ else
       listen=tcp:127.0.0.1:8000 connect=tcp:127.0.0.1:8000 bind=host 2>/dev/null || \
       log "WARN could not add orch-http proxy device (host front door will show 'starting')"
 
+  # Bind the host's /proc (read-only) into the orchestrator so its dashboard host card reflects
+  # the PHYSICAL host, not the container (incus_provider.node_health reads /host/proc when present).
+  incus config device add "$ORCH_NAME" hostproc disk source=/proc path=/host/proc readonly=true 2>/dev/null \
+      || log "note: could not bind host /proc into the orchestrator (host metrics will show the container)"
+
   # Inject enrol config so the orchestrator's platform.py can self-enrol with the portal.
   incus exec "$ORCH_NAME" -- mkdir -p /etc/ctrlable
   incus exec "$ORCH_NAME" -- bash -c "cat > /etc/ctrlable/.env" <<ENV
