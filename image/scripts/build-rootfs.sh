@@ -31,6 +31,9 @@ install -D -m0644 "$here/config/first-boot/ctrlable-firstboot.service" "$root/et
 install -D -m0644 "$here/config/first-boot/ctrlable-mark-good.service" "$root/etc/systemd/system/ctrlable-mark-good.service"
 install -D -m0755 "$here/config/first-boot/ctrlable-host-enroll.sh"      "$root/opt/ctrlable/ctrlable-host-enroll.sh"
 install -D -m0644 "$here/config/first-boot/ctrlable-host-enroll.service" "$root/etc/systemd/system/ctrlable-host-enroll.service"
+# dealer claim code display (CLI + login banner)
+install -D -m0755 "$here/config/first-boot/ctrlable-claim"               "$root/usr/local/bin/ctrlable-claim"
+install -D -m0644 "$here/config/first-boot/ctrlable-claim-profile.sh"    "$root/etc/profile.d/ctrlable-claim.sh"
 install -D -m0644 "$here/config/rauc/system.conf"          "$root/etc/rauc/system.conf"
 
 # trust anchors in /root/.ssh/authorized_keys:

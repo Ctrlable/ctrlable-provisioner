@@ -63,6 +63,7 @@ DEVICE_ID=$(printf '%s' "$resp"  | jq -r '.device_id // empty')
 TUNNEL_IP=$(printf '%s' "$resp"  | jq -r '.tunnel_ip // empty')
 WG_IFACE=$(printf '%s' "$resp"   | jq -r '.interface // empty')
 DEVICE_TOKEN=$(printf '%s' "$resp"| jq -r '.device_token // empty')
+CLAIM_CODE=$(printf '%s' "$resp" | jq -r '.claim_code // empty')
 if [ -z "$DEVICE_ID" ] || [ -z "$WG_IFACE" ]; then
   log "ERROR unexpected portal response: $(printf '%s' "$resp" | head -c 200)"; exit 0
 fi
@@ -79,6 +80,15 @@ DEVICE_TOKEN=$DEVICE_TOKEN
 TUNNEL_IP=$TUNNEL_IP
 WG_IFACE=$WG_IFACE
 EOF
+
+# Dealer claim code: world-readable so a tech on the console (or the local UI) can read it to
+# claim this appliance from the portal. The portal stores only its hash; this is the plaintext.
+if [ -n "$CLAIM_CODE" ]; then
+  ( umask 022
+    printf '%s\n' "$CLAIM_CODE" > /etc/ctrlable/claim-code
+    printf '%s\n' "$MAC"        > /etc/ctrlable/appliance-mac )
+  log "claim code available on the host (run: ctrlable-claim)"
+fi
 
 modprobe wireguard 2>/dev/null || true
 wg-quick down "$WG_IFACE" >/dev/null 2>&1 || true

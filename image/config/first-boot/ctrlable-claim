@@ -1,0 +1,24 @@
+#!/bin/sh
+# ctrlable-claim — print this appliance's dealer claim code + MAC so it can be claimed in the
+# portal. The portal stores only the code's hash; the plaintext lives here (written by
+# ctrlable-host-enroll at enrolment). Readable by a field tech on the console or the local UI.
+CODE=$(cat /etc/ctrlable/claim-code 2>/dev/null)
+MAC=$(cat /etc/ctrlable/appliance-mac 2>/dev/null)
+PORTAL="https://portal.ctrlable.com"
+[ -f /etc/ctrlable/appliance.conf ] && . /etc/ctrlable/appliance.conf 2>/dev/null
+PORTAL="${PORTAL_URL:-$PORTAL}"
+if [ -z "$CODE" ]; then
+  echo "This appliance has no claim code yet (it enrols with the portal on first network access)."
+  exit 0
+fi
+cat <<MSG
+
+  +-- Claim this Ctrlable Pro appliance ----------------------------+
+     Claim code : $CODE
+     MAC        : ${MAC:-unknown}
+     Portal     : $PORTAL  ->  Appliances  ->  Claim
+  +-----------------------------------------------------------------+
+  Enter the claim code + MAC in the portal to add this appliance to
+  your account. Keep the code private; anyone with it can claim this box.
+
+MSG
