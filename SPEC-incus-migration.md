@@ -159,7 +159,7 @@ What actually has to be ported, and how hard each is:
 |---|---|---|---|---|
 | zwavejs (zwave-js-ui) | community-scripts | USB coordinator | **easy** (static binary) | ✅ built + deployed |
 | zigbee2mqtt (z2m) | community-scripts | **USB coordinator** | easy–moderate | path ✅; **USB passthrough ✅** (SONOFF MG24, B3) |
-| mosquitto / MQTT | community-scripts | none | easy | follows the recipe |
+| mosquitto / MQTT | community-scripts | none | easy | ✅ built via generic `build_service` |
 | matter-server | community-scripts | none (host net) | easy–moderate | follows the recipe |
 | go2rtc | community-scripts | none | easy | follows the recipe |
 | dali-bridge | `host/builders/dali-bridge.sh` | USB (hasseb DALI) | moderate | USB path ✅ (B3-style) |
@@ -173,6 +173,8 @@ coordinator passthrough — is already retired by the B3 test. The genuine remai
 risk is **frigate**: iGPU `/dev/dri` passthrough + VAAPI transcode inside an Incus container,
 which, like Supervised, is where Incus semantics could fight. That is why it gets its own PoC
 item rather than being assumed mechanical. freepbx's SIP/RTP is a lesser, networking-shaped risk.
+The easy tier is now a **generic `build_service`** (`poc/incus-bootstrap.sh partD`), proven by
+building `ctrlable-mosquitto`; the remaining mechanical services port through it with the same shape.
 
 **Frigate PoC result (2026-11-17), the one surprise worth pinning:** iGPU VAAPI transcode works
 in an Incus container — the box's Braswell N3700 render node passed through, `vainfo` enumerating

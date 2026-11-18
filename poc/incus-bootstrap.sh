@@ -270,14 +270,45 @@ partC_frigate(){
   # same as every other service -- this function establishes the GPU-capable, Docker-ready base.
 }
 
+# ---- Generic service builder (the mechanical tier, §7a) --------------------
+# community-scripts don't run on Incus; each mechanical service is a short distro-agnostic
+# install snippet in a base container, then `incus publish` -- the exact shape partA proved with
+# zwavejs. Deploy-time concerns (internal NIC, USB coordinator) are partA/partB_usb, not build.
+#   build_service <name> '<install-snippet run as root in the base CT>'
+build_service(){
+  local svc="$1" install="$2" alias="ctrlable-$1"
+  if incus image show "$alias" >/dev/null 2>&1; then log "image $alias exists"; return 0; fi
+  incus delete -f "$svc-build" 2>/dev/null || true
+  incus launch "$BASE_IMG" "$svc-build" </dev/null; sleep 5
+  for i in $(seq 1 30); do incus exec "$svc-build" -- getent hosts deb.debian.org >/dev/null 2>&1 && break; sleep 2; done
+  incus exec "$svc-build" -- bash -c "set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; $install; mkdir -p /etc/ctrlable"
+  incus stop "$svc-build" </dev/null
+  incus publish "$svc-build" --alias "$alias" </dev/null
+  incus delete -f "$svc-build" </dev/null
+  log "built $alias"
+}
+
+# Concrete easy-tier recipe (pure Debian package). mosquitto is the canonical trivial case that
+# proves the generic builder end-to-end.
+build_mosquitto(){ build_service mosquitto 'apt-get install -y -qq mosquitto >/dev/null; systemctl enable mosquitto >/dev/null 2>&1'; }
+
+partD_services(){ ensure_int_net; build_mosquitto; }
+# TODO(P2): the rest port through build_service with the same shape:
+#   go2rtc / matter-server  -> a release binary or pip install (like zwavejs/mosquitto),
+#   dali-bridge             -> host/builders/dali-bridge.sh + partB_usb-style USB passthrough,
+#   hardware-manager        -> host/builders/hardware-manager.sh,
+#   freepbx                 -> host/builders/freepbx.sh; SIP/RTP ports on the site NIC at deploy
+#                              (networking config, not an Incus blocker).
+
 main(){
   case "${1:-all}" in
     stage1) stage1 ;;
     partA)  shift || true; partA "$@" ;;
     partB)  partB ;;
     partC)  partC_frigate ;;
-    all)    stage1; partA; partB; partC_frigate ;;
-    *) echo "usage: $0 [stage1|partA|partB|partC|all]"; exit 2 ;;
+    partD)  partD_services ;;
+    all)    stage1; partA; partB; partC_frigate; partD_services ;;
+    *) echo "usage: $0 [stage1|partA|partB|partC|partD|all]"; exit 2 ;;
   esac
   log "done: ${1:-all}"
 }
