@@ -1,0 +1,45 @@
+# Ctrlable Pro A/B slot-selection GRUB config (installed to the ESP by pack-image.sh).
+# Hand-authored (NOT grub-mkconfig): it reads grubenv and picks a slot with one-retry fallback,
+# the standard RAUC grub pattern. GRUB script has no arithmetic, so we SET a try-flag to 1 rather
+# than count; userspace `rauc status mark-good` resets it to 0 after a healthy boot. If a slot is
+# tried and doesn't mark good, the next boot falls through to the other slot = automatic rollback.
+
+set timeout=3
+set default=0
+
+load_env
+
+# First-boot / empty-grubenv defaults: A is the freshly-flashed good slot, B empty.
+if [ -z "$ORDER" ]; then set ORDER="A B"; fi
+if [ -z "$A_OK"  ]; then set A_OK=1;  fi
+if [ -z "$B_OK"  ]; then set B_OK=0;  fi
+if [ -z "$A_TRY" ]; then set A_TRY=0; fi
+if [ -z "$B_TRY" ]; then set B_TRY=0; fi
+
+# Pick the first slot in ORDER that is OK and not already mid-try.
+set selected=""
+for slot in $ORDER; do
+    if [ "$slot" = "A" -a "$A_OK" = "1" -a "$A_TRY" = "0" ]; then set selected="A"; set A_TRY=1; break; fi
+    if [ "$slot" = "B" -a "$B_OK" = "1" -a "$B_TRY" = "0" ]; then set selected="B"; set B_TRY=1; break; fi
+done
+# Both slots already mid-try (previous boots failed) -> fall back to whichever is still marked OK.
+if [ -z "$selected" ]; then
+    if [ "$A_OK" = "1" ]; then set selected="A"; else set selected="B"; fi
+fi
+save_env A_TRY B_TRY
+
+if [ "$selected" = "A" ]; then set slotlabel="root-a"; else set slotlabel="root-b"; fi
+
+menuentry "Ctrlable Pro ($selected)" {
+    search --no-floppy --label --set=root $slotlabel
+    linux  /boot/vmlinuz  root=PARTLABEL=$slotlabel ro quiet systemd.machine_id=firstboot rauc.slot=$selected
+    initrd /boot/initrd.img
+}
+
+# Recovery: force the other slot (for a field tech at the console).
+menuentry "Ctrlable Pro — boot OTHER slot (recovery)" {
+    if [ "$selected" = "A" ]; then set other="root-b"; else set other="root-a"; fi
+    search --no-floppy --label --set=root $other
+    linux  /boot/vmlinuz  root=PARTLABEL=$other ro quiet
+    initrd /boot/initrd.img
+}
