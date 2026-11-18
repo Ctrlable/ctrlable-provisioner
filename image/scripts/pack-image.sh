@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # pack-image.sh — assemble the flashable GPT A/B image from $WORK/rootfs.
-#   esp (FAT32) + root-a (populated) + root-b (empty) + data (btrfs, empty).
+#   esp (FAT32) + root-a (populated) + root-b (empty) + data (clean, no FS; pool made at first boot).
 # Run as root on a Debian 13 build host (needs sgdisk, losetup, grub-efi-amd64-bin).
 #
 set -euo pipefail
@@ -32,7 +32,7 @@ echo "pack-image: filesystems"
 mkfs.vfat  -n ESP          "${lo}p1" >/dev/null
 mkfs.ext4  -F -L root-a -d "$root" "${lo}p2" >/dev/null   # slot A = the rootfs tree
 mkfs.ext4  -F -L root-b       "${lo}p3" >/dev/null        # slot B empty; first OTA fills it
-mkfs.btrfs -f -L data         "${lo}p4" >/dev/null        # the persistent Incus data pool
+wipefs -a                     "${lo}p4" >/dev/null 2>&1 || true  # leave data partition CLEAN (no FS): firstboot/incus-bootstrap creates the btrfs 'data' pool on it. Pre-formatting here made `incus storage create` fail ("existing filesystem").
 
 echo "pack-image: GRUB (EFI) + A/B grub.cfg + fresh grubenv on the ESP"
 mnt="$(mktemp -d)"; mount "${lo}p1" "$mnt"
