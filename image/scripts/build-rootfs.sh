@@ -35,6 +35,9 @@ install -D -m0644 "$here/config/rauc/system.conf"          "$root/etc/rauc/syste
 install -d -m0700 "$root/root/.ssh"
 install -D -m0600 "$here/config/orchestrator/authorized_keys" "$root/root/.ssh/authorized_keys"
 
+# baked appliance config (placeholders here; CI/flash injects real PROVISIONING_KEY etc.)
+install -D -m0600 "$here/config/orchestrator/appliance.conf.example" "$root/etc/ctrlable/appliance.conf"
+
 # RAUC keyring = the cert used to VERIFY bundles (dev cert if built; prod cert supplied in CI)
 if [ -f "$here/keys/dev-cert.pem" ]; then
   install -D -m0644 "$here/keys/dev-cert.pem" "$root/etc/rauc/keyring.pem"
