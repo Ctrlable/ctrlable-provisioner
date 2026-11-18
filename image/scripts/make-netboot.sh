@@ -87,7 +87,7 @@ WRITER
 chmod +x "$ov/etc/local.d/00-ctrlable-write.start"
 # enable the 'local' service so local.d scripts run at boot
 ln -sf /etc/init.d/local "$ov/etc/runlevels/default/local"
-( cd "$ov" && tar czf "$ND/ctrlable-writer.apkovl.tar.gz" etc )
+tar -C "$ov" -czf "$ND/ctrlable-writer.apkovl.tar.gz" etc
 rm -rf "$ov"
 log "apkovl: $ND/ctrlable-writer.apkovl.tar.gz"
 
