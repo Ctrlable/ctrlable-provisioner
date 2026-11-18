@@ -225,13 +225,59 @@ partB_usb(){
   log "partB_usb: $byid bound into $CPRO (same by-id path, restart-stable, Supervisor-visible)"
 }
 
+# ---- Part C: frigate (iGPU VAAPI transcode) --------------------------------
+# VERIFIED 2026-11-17: iGPU VAAPI (H264 decode+encode) works in an Incus container, but frigate
+# needs a PRIVILEGED container for the /dev/dri node mount (unprivileged forkmount fails; privileged
+# succeeds) -- unlike Supervised. Matches host/builders/frigate-docker.sh. Only the render node is
+# needed (not card0). Driver: i965 on Gen8 Braswell/CherryView, iHD on Broadwell+.
+FRIGATE_NAME="${FRIGATE_NAME:-frigate-1}"
+FRIGATE_IMG="${FRIGATE_IMG:-ghcr.io/blakeblackshear/frigate:stable}"
+RENDER_NODE="${RENDER_NODE:-/dev/dri/renderD128}"
+
+partC_frigate(){
+  if [ ! -e "$RENDER_NODE" ]; then
+    log "partC: no $RENDER_NODE on host (no iGPU) -> frigate would run CPU-only; skipping GPU setup"
+    return 0
+  fi
+  log "partC: privileged CT $FRIGATE_NAME + render-node passthrough (GPU needs privileged)"
+  incus info "$FRIGATE_NAME" >/dev/null 2>&1 || incus launch images:debian/13 "$FRIGATE_NAME" \
+    -c security.privileged=true -c security.nesting=true \
+    -c security.syscalls.intercept.mknod=true -c security.syscalls.intercept.setxattr=true </dev/null
+  incus config device get "$FRIGATE_NAME" renderD128 source >/dev/null 2>&1 || \
+    incus config device add "$FRIGATE_NAME" renderD128 unix-char \
+        source="$RENDER_NODE" path="$RENDER_NODE" </dev/null
+
+  log "partC: Docker-in-LXC + pick the VAAPI driver the way frigate-docker.sh does"
+  incus exec "$FRIGATE_NAME" -- bash -c '
+    set -e; export DEBIAN_FRONTEND=noninteractive
+    command -v docker >/dev/null || { mkdir -p /etc/docker
+      printf "%s\n" "{ \"storage-driver\": \"overlay2\" }" > /etc/docker/daemon.json
+      curl -fsSL https://get.docker.com | sh >/dev/null 2>&1; }'
+  incus exec "$FRIGATE_NAME" -- docker pull -q "$FRIGATE_IMG" >/dev/null
+  # iHD covers Broadwell+, i965 the Gen8 Atoms -- ask the image which one actually decodes.
+  local drv=""
+  for d in iHD i965; do
+    if incus exec "$FRIGATE_NAME" -- docker run --rm --device "$RENDER_NODE" \
+         -e LIBVA_DRIVER_NAME="$d" --entrypoint vainfo "$FRIGATE_IMG" \
+         --display drm --device "$RENDER_NODE" >/dev/null 2>&1; then drv="$d"; break; fi
+  done
+  if [ -n "$drv" ]; then
+    log "partC: VAAPI works with LIBVA_DRIVER_NAME=$drv (frigate: -hwaccel vaapi -hwaccel_device $RENDER_NODE)"
+  else
+    log "partC: VAAPI unusable with iHD or i965 -> frigate decodes on CPU"
+  fi
+  # The frigate container itself (config.yml + cameras) is deployed from the release manifest,
+  # same as every other service -- this function establishes the GPU-capable, Docker-ready base.
+}
+
 main(){
   case "${1:-all}" in
     stage1) stage1 ;;
     partA)  shift || true; partA "$@" ;;
     partB)  partB ;;
-    all)    stage1; partA; partB ;;
-    *) echo "usage: $0 [stage1|partA|partB|all]"; exit 2 ;;
+    partC)  partC_frigate ;;
+    all)    stage1; partA; partB; partC_frigate ;;
+    *) echo "usage: $0 [stage1|partA|partB|partC|all]"; exit 2 ;;
   esac
   log "done: ${1:-all}"
 }

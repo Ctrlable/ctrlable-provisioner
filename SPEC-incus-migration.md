@@ -150,6 +150,41 @@ inside a base Incus container, then `incus publish` to a local image — reusing
 version + `var_*`* intent we already encode, minus the Proxmox plumbing. This is new code **and**
 permanent maintenance we currently get upstream for free — the single biggest cost line.
 
+### 7a. Service inventory & porting difficulty (so P2's scope is explicit)
+
+The PoC built **one** service (zwavejs) to prove the path + size this cost — not the catalog.
+What actually has to be ported, and how hard each is:
+
+| Service | Source today | Hardware / nesting | Incus difficulty | PoC status |
+|---|---|---|---|---|
+| zwavejs (zwave-js-ui) | community-scripts | USB coordinator | **easy** (static binary) | ✅ built + deployed |
+| zigbee2mqtt (z2m) | community-scripts | **USB coordinator** | easy–moderate | path ✅; **USB passthrough ✅** (SONOFF MG24, B3) |
+| mosquitto / MQTT | community-scripts | none | easy | follows the recipe |
+| matter-server | community-scripts | none (host net) | easy–moderate | follows the recipe |
+| go2rtc | community-scripts | none | easy | follows the recipe |
+| dali-bridge | `host/builders/dali-bridge.sh` | USB (hasseb DALI) | moderate | USB path ✅ (B3-style) |
+| hardware-manager | `host/builders/hardware-manager.sh` | host introspection | moderate | — |
+| freepbx | `host/builders/freepbx.sh` | SIP/RTP networking | moderate–hard | — (networking quirks) |
+| **frigate** | `host/builders/frigate-docker.sh` | **privileged + Docker-in-LXC + `/dev/dri` iGPU VAAPI** | **hard** | ✅ VAAPI **H264 dec+enc** in a *privileged* Incus CT (render node + i965) |
+| Ctrlable Pro | HAOS → Supervised-LXC | Docker-in-LXC + USB | hardest overall | ✅ Part B (store + Core) |
+
+**Net:** the zwavejs-likes all share one recipe shape (proven) and z2m's scary part — USB
+coordinator passthrough — is already retired by the B3 test. The genuine remaining service-level
+risk is **frigate**: iGPU `/dev/dri` passthrough + VAAPI transcode inside an Incus container,
+which, like Supervised, is where Incus semantics could fight. That is why it gets its own PoC
+item rather than being assumed mechanical. freepbx's SIP/RTP is a lesser, networking-shaped risk.
+
+**Frigate PoC result (2026-11-17), the one surprise worth pinning:** iGPU VAAPI transcode works
+in an Incus container — the box's Braswell N3700 render node passed through, `vainfo` enumerating
+H264 `VAEntrypointVLD`+`VAEntrypointEncSlice` both directly and from the real frigate image. But it
+**requires a *privileged* container**: the unprivileged `/dev/dri` node mount fails at Incus's
+forkmount layer, where privileged succeeds (Supervised, by contrast, ran unprivileged). This matches
+`frigate-docker.sh`'s existing privileged model, and only the **render node** (`renderD128`) is
+needed — `card0` is display-only and its mount is what broke the `gpu`-device attempt. So the
+service-container split is: **everything unprivileged except frigate, which is privileged for the
+GPU.** Driver is **i965** on this Gen8 Braswell (iHD is Broadwell+), selected the same way the
+builder already probes.
+
 ## 8. Networking
 
 Adopt the existing `vmbr0` (site/real LAN) and `vmbr1` (internal `198.18.0.0/24`, SPEC §20)

@@ -205,6 +205,7 @@ Driven by `poc/incus-bootstrap.sh` (the verified recipe). Incus **6.0.4**, btrfs
 | Container accommodations (the §6 "own the base compat" cost) | **debian 13 base** (installer OS gate); **host `kernel.dmesg_restrict=0`** (installer writes a host sysctl); benign cgroup-v1 warning. All small |
 | **USB coordinator passthrough** (B3) | ✅ **SONOFF Dongle Plus MG24** (CP210x) bound at same `by-id` path (char 188:0), **survives `incus restart`**, and `ha hardware info` lists it after a udev trigger (needed only for hot-plug; enumerates at boot). Trivial vs the VM controller dance |
 | **Data-pool separation** + LXC-snapshot rollback (B4) | ✅ instances root on btrfs `data` pool; pool is a separate FS from the OS |
+| **frigate iGPU VAAPI** (Part C) | ✅ H264 decode+encode via `vainfo` (direct + frigate image) on Braswell N3700 (i965). **Needs a *privileged* CT** — unprivileged `/dev/dri` mount fails; render node only (not card0). Pinned in `poc/incus-bootstrap.sh partC` |
 | (optional) HAOS-VM escape hatch | not run (Part B-alt; only needed for the network-coordinator exception) |
 
 ## 4. Go / No-Go — **GO** (2026-11-17)
