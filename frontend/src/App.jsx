@@ -1478,6 +1478,7 @@ function FleetTab() {
   const [instances, setInstances] = useState({})
   const [live, setLive] = useState(false)
   const [err, setErr]   = useState(null)
+  const [selected, setSelected] = useState(null)   // instance name for the detail drawer
 
   useEffect(() => {
     const ac = new AbortController()
@@ -1536,7 +1537,9 @@ function FleetTab() {
         ? <div className="loading">{live ? 'No instances yet.' : 'Connecting to the Incus event stream…'}</div>
         : <div className="fleet-grid">
             {list.map(i => (
-              <div className="fleet-card" key={i.name}>
+              <div className="fleet-card" key={i.name} role="button" tabIndex={0}
+                   onClick={() => setSelected(i.name)}
+                   onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(i.name) } }}>
                 <div className="fc-head">
                   <span className="fc-name mono">{i.name}</span>
                   <span className={`pill ${variantFor((i.status || '').toLowerCase())}`}>{i.status || 'unknown'}</span>
@@ -1550,7 +1553,130 @@ function FleetTab() {
               </div>
             ))}
           </div>}
+      {selected && <InstanceDrawer name={selected} onClose={() => setSelected(null)} />}
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Instance detail drawer — full config/devices/state + lifecycle (SPEC §16.1, P6.2/P6.4).
+// Fetches the name-keyed Incus record; shows compute, storage (disks), network (NICs), and
+// passthrough (USB/GPU/PCI) devices + raw config, with Start/Stop/Restart.
+// ---------------------------------------------------------------------------
+function InstanceDrawer({ name, onClose }) {
+  const [rec, setRec] = useState(null)
+  const [err, setErr] = useState(null)
+  const [busy, setBusy] = useState(null)      // action in flight
+  const [showRaw, setShowRaw] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/incus/instance/${encodeURIComponent(name)}`)
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`)
+      setRec(await res.json()); setErr(null)
+    } catch (e) { setErr(e.message) }
+  }, [name])
+  useEffect(() => { load() }, [load])
+
+  const act = async (action) => {
+    setBusy(action); setErr(null)
+    try {
+      const res = await apiFetch(`/api/incus/instance/${encodeURIComponent(name)}/action`,
+        { method: 'POST', body: JSON.stringify({ action }) })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`)
+      setTimeout(load, 1200)
+    } catch (e) { setErr(e.message) }
+    finally { setBusy(null) }
+  }
+
+  const cfg = rec?.config || {}
+  const st  = rec?.state || {}
+  const devices = rec?.expanded_devices || rec?.devices || {}
+  const ofType = (...types) => Object.entries(devices).filter(([, d]) => types.includes(d.type))
+  const disks = ofType('disk'), nics = ofType('nic')
+  const passth = ofType('usb', 'gpu', 'pci', 'unix-char', 'unix-block', 'infiniband', 'tpm')
+  const status = (rec?.status || st.status || '').toLowerCase()
+  const running = status === 'running'
+  const ips = []
+  for (const nd of Object.values(st.network || {})) for (const a of (nd.addresses || []))
+    if (a.scope === 'global') ips.push(`${a.address}/${a.netmask}`)
+
+  return (
+    <div className="drawer-wrap" onClick={onClose}>
+      <aside className="drawer" onClick={e => e.stopPropagation()} role="dialog" aria-label={`Instance ${name}`}>
+        <div className="dw-head">
+          <div>
+            <div className="dw-name mono">{name}</div>
+            <div className="dw-sub">{rec?.type === 'virtual-machine' ? 'virtual machine' : 'container'}
+              {rec?.project && rec.project !== 'default' ? ` · ${rec.project}` : ''}
+              {cfg['image.description'] ? ` · ${cfg['image.description']}` : ''}</div>
+          </div>
+          <div className="dw-head-right">
+            <span className={`pill ${variantFor(status)}`}>{rec?.status || st.status || '…'}</span>
+            <button className="icon-btn" onClick={onClose} title="Close">✕</button>
+          </div>
+        </div>
+
+        <div className="dw-actions">
+          <button className="btn-xs" disabled={busy || running} onClick={() => act('start')}>{busy==='start'?'Starting…':'Start'}</button>
+          <button className="btn-xs" disabled={busy || !running} onClick={() => act('restart')}>{busy==='restart'?'Restarting…':'Restart'}</button>
+          <button className="btn-xs danger" disabled={busy || !running} onClick={() => act('stop')}>{busy==='stop'?'Stopping…':'Stop'}</button>
+          <span className="dw-hint">Console &amp; device editing (resize / USB / PCI) land next — P6.2.</span>
+        </div>
+
+        {err && <div className="banner error" style={{margin:'0 0 14px'}}>{err}</div>}
+        {!rec && !err && <div className="loading">Loading…</div>}
+
+        {rec && <div className="dw-body">
+          <section><h4>Compute</h4>
+            <dl className="dw-kv">
+              <dt>vCPUs</dt><dd>{cfg['limits.cpu'] || 'unlimited'}</dd>
+              <dt>Memory limit</dt><dd>{cfg['limits.memory'] || 'unlimited'}</dd>
+              <dt>Mem used</dt><dd className="mono">{st.memory?.usage != null ? fmtBytes(st.memory.usage) : '—'}</dd>
+              <dt>PID</dt><dd className="mono">{st.pid || '—'}</dd>
+              {ips.length > 0 && <><dt>Addresses</dt><dd className="mono">{ips.join(', ')}</dd></>}
+            </dl>
+          </section>
+
+          <section><h4>Storage <span className="cnt">{disks.length}</span></h4>
+            {disks.length === 0 ? <p className="muted sm">No disk devices.</p> :
+              disks.map(([dn, d]) => (
+                <div className="dw-dev" key={dn}>
+                  <span className="dd-name mono">{dn}</span>
+                  <span className="dd-meta">{[d.pool && `pool ${d.pool}`, d.path && `at ${d.path}`, d.size].filter(Boolean).join(' · ')}</span>
+                  {st.disk?.[dn]?.usage != null && <span className="dd-use mono">{fmtBytes(st.disk[dn].usage)}</span>}
+                </div>
+              ))}
+          </section>
+
+          <section><h4>Network <span className="cnt">{nics.length}</span></h4>
+            {nics.length === 0 ? <p className="muted sm">No NICs.</p> :
+              nics.map(([dn, d]) => (
+                <div className="dw-dev" key={dn}>
+                  <span className="dd-name mono">{dn}</span>
+                  <span className="dd-meta">{[d.network || d.parent, d.nictype, d['ipv4.address']].filter(Boolean).join(' · ')}</span>
+                </div>
+              ))}
+          </section>
+
+          <section><h4>Passthrough <span className="cnt">{passth.length}</span></h4>
+            {passth.length === 0 ? <p className="muted sm">No USB / GPU / PCI devices passed through.</p> :
+              passth.map(([dn, d]) => (
+                <div className="dw-dev" key={dn}>
+                  <span className="dd-name mono">{dn}</span>
+                  <span className={`pill ${d.type === 'gpu' ? 'accent' : 'brand'}`} style={{marginLeft:8}}>{d.type}</span>
+                  <span className="dd-meta">{Object.entries(d).filter(([k]) => k !== 'type').map(([k, v]) => `${k}=${v}`).join(' · ')}</span>
+                </div>
+              ))}
+          </section>
+
+          <section>
+            <h4 className="dw-rawtoggle" onClick={() => setShowRaw(s => !s)}>Raw config <span className="cnt">{showRaw ? '−' : '+'}</span></h4>
+            {showRaw && <pre className="dw-raw mono">{cfg.raw || JSON.stringify(cfg, null, 2)}</pre>}
+          </section>
+        </div>}
+      </aside>
+    </div>
   )
 }
 

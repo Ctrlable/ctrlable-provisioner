@@ -97,6 +97,12 @@ class IncusREST:
         md = await self._sync(f"/1.0/instances/{name}/state")
         return md or {}
 
+    async def instance(self, name: str) -> dict:
+        """Full instance record (config + devices + expanded_devices + inline state) for the
+        detail drawer — GET /1.0/instances/<name>?recursion=1. recursion=1 inlines `state`."""
+        md = await self._sync(f"/1.0/instances/{name}?recursion=1")
+        return md or {}
+
     async def operations(self) -> dict:
         """GET /1.0/operations?recursion=1 → running/queued operations (for progress + events)."""
         try:

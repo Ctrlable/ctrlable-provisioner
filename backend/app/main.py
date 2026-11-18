@@ -1124,6 +1124,41 @@ async def incus_events(_: str | None = Depends(require_auth)):
     })
 
 
+@app.get("/api/incus/instance/{name}")
+async def incus_instance(name: str, _: str | None = Depends(require_auth)) -> dict:
+    """Full instance record (config, devices incl. disk/nic/usb/pci passthrough, inline state)
+    for the detail drawer — name-keyed to match the live fleet view."""
+    from .incus_rest import IncusError
+    rest = _incus_rest()
+    try:
+        return await rest.instance(name)
+    except IncusError as e:
+        raise HTTPException(404, f"instance {name!r}: {e}")
+
+
+class InstanceActionRequest(BaseModel):
+    action: str   # start | stop | restart
+
+
+@app.post("/api/incus/instance/{name}/action")
+async def incus_instance_action(name: str, req: InstanceActionRequest,
+                                _: str | None = Depends(require_auth)) -> dict:
+    """Lifecycle a live instance by name (start/stop/restart). Incus addresses instances by
+    name, so the provider acts on a name GuestRef — no vmid round-trip."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "live instance actions require the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)  # kind only labels; Incus acts by name
+    p = _provider()
+    fn = {"start": p.start, "stop": p.stop, "restart": p.reboot, "reboot": p.reboot}.get(req.action)
+    if not fn:
+        raise HTTPException(400, f"unknown action {req.action!r}")
+    try:
+        await asyncio.to_thread(fn, ref)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"{req.action} {name!r} failed: {e}")
+    return {"ok": True, "name": name, "action": req.action}
+
+
 # ---------------------------------------------------------------------------
 # Serve built frontend (production)
 # ---------------------------------------------------------------------------
