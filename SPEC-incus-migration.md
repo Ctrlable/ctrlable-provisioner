@@ -126,12 +126,28 @@ Beyond those, a **single-container-model host is simpler to provision, snapshot,
 and move** than one that mixes containers and a VM disk image — which is the direction we
 want for an automated appliance build.
 
-> **PoC-validated 2026-11-17** (`SPEC-incus-poc.md` §3): HA Supervised came up in an
-> **unprivileged** LXC on Debian 13 — Supervisor + a **97-add-on store** + Core on `:8123`,
-> no privileged container, no AppArmor disable. The only caveats are the `supported:false`
-> banner (ours to flip via the Supervisor fork) and three small container accommodations
-> (Debian-13 base, a host `kernel.dmesg_restrict` sysctl, a benign cgroup-v1 warning). The
-> "own the Debian+Docker base compat" cost is therefore **real but small**.
+> **PoC-validated 2026-11-17** (`SPEC-incus-poc.md` §3): HA Supervised came up in an LXC on
+> Debian 13 — Supervisor + the **97-add-on store** loaded, and full Core 2026.11.2 serves on
+> `:80`+`:8123`.
+>
+> **Corrected 2026-11-17 (do not repeat the earlier "banner is cosmetic" claim):** the store
+> *loads*, but stock Supervisor **gates add-on _installs_** behind a STACK of environment checks,
+> which is the concrete "own the Debian+Docker base compat" cost — **real, not small**:
+> 1. host `kernel.dmesg_restrict=0` (installer writes it; unpriv CT can't) — fixed host-side.
+> 2. `/var/lib/homeassistant/audio/external` must pre-exist or Core stays on landingpage — fixed.
+> 3. `healthy:false → [privileged]` **blocks installs** until the CT is **privileged**. Flipping
+>    Ctrlable Pro to a privileged LXC cleared it (so it joins frigate as privileged, OR the fork
+>    patches the health check to keep it unprivileged).
+> 4. `host_internet:false` **still blocks installs**: Supervisor derives connectivity from a
+>    **NetworkManager-managed** interface, and the LXC's `eth0` stays NM-*unmanaged* (networkd owns
+>    it); handing it to NM in a container is non-trivial and was NOT cleared in the PoC.
+>
+> So add-on *installation* in Supervised-LXC needs **privileged + a NetworkManager-managed NIC**,
+> and the Supervisor fork must neutralise the health/connectivity gates (or the image must set all
+> this up). A **HAOS VM (Option A) hits none of these** — healthy/supported/NM-managed out of the
+> box, add-ons install trivially. Net: this **raises Option B's cost and strengthens Option A for
+> add-on-heavy sites**; B still wins where USB passthrough + no-VM-overhead dominate and we accept
+> the fork/base-compat work.
 
 **Option A (HAOS VM) is retained only as a documented exception** for a site whose radios
 are **network-attached** (no USB to pass through), where the clean `.img` deploy and intact
@@ -175,6 +191,18 @@ which, like Supervised, is where Incus semantics could fight. That is why it get
 item rather than being assumed mechanical. freepbx's SIP/RTP is a lesser, networking-shaped risk.
 The easy tier is now a **generic `build_service`** (`poc/incus-bootstrap.sh partD`), proven by
 building `ctrlable-mosquitto`; the remaining mechanical services port through it with the same shape.
+
+**Architecture correction (2026-11-17): most of these are HA ADD-ONS, not separate Incus
+containers.** zwavejs, zigbee2mqtt, mosquitto, matter-server, go2rtc, esphome, whisper, piper are
+all in the add-on store (`core_zwave_js`, `core_mosquitto`, `core_matter_server`, …) and should run
+as **Supervisor-managed add-ons INSIDE Ctrlable Pro**, exactly like HAOS — *not* as hand-built Incus
+service containers. That **collapses most of §7's builder burden**: the only things that genuinely
+need their own Incus container/builder are the **orchestrator** (ours), the **proprietary** services
+(`dali-bridge`, `hardware-manager` — not in the HA store, private source), **freepbx** (not an
+add-on), and **frigate** (by the GPU/privileged exception, though it is also an add-on). The catch:
+this depends on Supervised-LXC being **add-on-capable**, which per §6 needs the privileged + NM gate
+work — or on using the HAOS **VM** (Option A), where add-ons install for free. Either way, the old
+"port every community-script to Incus" framing of §7 is largely retired by running them as add-ons.
 
 **Frigate PoC result (2026-11-17), the one surprise worth pinning:** iGPU VAAPI transcode works
 in an Incus container — the box's Braswell N3700 render node passed through, `vainfo` enumerating
