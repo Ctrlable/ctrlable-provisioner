@@ -1469,6 +1469,92 @@ function PlatformTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Fleet (Live) tab — instances streamed over the Incus event relay (SPEC §16.1, P6.1).
+// Loads nothing up front: it follows /api/incus/events (SSE), whose first frame is a full
+// snapshot, then live changes. The SSE endpoint is Bearer-authed and EventSource can't set
+// headers, so we consume it with fetch + a stream reader (auto-reconnecting).
+// ---------------------------------------------------------------------------
+function FleetTab() {
+  const [instances, setInstances] = useState({})
+  const [live, setLive] = useState(false)
+  const [err, setErr]   = useState(null)
+
+  useEffect(() => {
+    const ac = new AbortController()
+    let stopped = false
+    const apply = (evt) => {
+      if (evt.type === 'snapshot') {
+        const m = {}; for (const i of evt.instances || []) m[i.name] = i; setInstances(m)
+      } else if (evt.type === 'instance-added' || evt.type === 'instance-changed') {
+        setInstances(p => ({ ...p, [evt.name]: evt.instance }))
+      } else if (evt.type === 'instance-removed') {
+        setInstances(p => { const n = { ...p }; delete n[evt.name]; return n })
+      } else if (evt.type === 'error') { setErr(evt.error) }
+    }
+    const run = async () => {
+      while (!stopped) {
+        try {
+          const res = await fetch(rel('/api/incus/events'),
+            { headers: { Authorization: `Bearer ${getToken()}` }, signal: ac.signal })
+          if (res.status === 401) { clearToken(); window.location.reload(); return }
+          if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+          setLive(true); setErr(null)
+          const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''
+          while (!stopped) {
+            const { value, done } = await reader.read(); if (done) break
+            buf += dec.decode(value, { stream: true })
+            let idx
+            while ((idx = buf.indexOf('\n\n')) >= 0) {
+              const frame = buf.slice(0, idx); buf = buf.slice(idx + 2)
+              const dl = frame.split('\n').find(l => l.startsWith('data:'))
+              if (dl) { try { apply(JSON.parse(dl.slice(5).trim())) } catch { /* partial frame */ } }
+            }
+          }
+        } catch (e) {
+          if (stopped || ac.signal.aborted) return
+          setLive(false); setErr(e.message || 'stream lost')
+        }
+        if (!stopped) await new Promise(r => setTimeout(r, 3000))   // reconnect backoff
+      }
+    }
+    run()
+    return () => { stopped = true; ac.abort() }
+  }, [])
+
+  const list = Object.values(instances).sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+  const running = list.filter(i => (i.status || '').toLowerCase() === 'running').length
+  const b = (v) => (v != null ? fmtBytes(v) : '—')
+
+  return (
+    <>
+      <div className="head"><div>
+        <h1>Fleet <span className={`livedot ${live ? 'on' : ''}`} title={live ? 'live' : 'reconnecting…'} /></h1>
+        <p>Instances on this appliance, live over the Incus event stream — {list.length} total, {running} running.</p>
+      </div></div>
+      {err && !live && <div className="banner error">Live stream: {err} — reconnecting…</div>}
+      {list.length === 0
+        ? <div className="loading">{live ? 'No instances yet.' : 'Connecting to the Incus event stream…'}</div>
+        : <div className="fleet-grid">
+            {list.map(i => (
+              <div className="fleet-card" key={i.name}>
+                <div className="fc-head">
+                  <span className="fc-name mono">{i.name}</span>
+                  <span className={`pill ${variantFor((i.status || '').toLowerCase())}`}>{i.status || 'unknown'}</span>
+                </div>
+                <div className="fc-type">{i.type === 'virtual-machine' ? 'virtual machine' : 'container'}{i.project && i.project !== 'default' ? ` · ${i.project}` : ''}</div>
+                <dl className="fc-metrics">
+                  <div><dt>Memory</dt><dd className="mono">{b(i.memory_usage)}</dd></div>
+                  <div><dt>Net ↓/↑</dt><dd className="mono">{b(i.network_rx)} / {b(i.network_tx)}</dd></div>
+                  <div><dt>Disk</dt><dd className="mono">{b(i.disk_usage)}</dd></div>
+                </dl>
+              </div>
+            ))}
+          </div>}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
 function useTheme() {
@@ -1499,6 +1585,7 @@ const NAV = [
     { id: 'network', label: 'Internal network', ic: '⇄' },
   ]},
   { group: 'Fleet', items: [
+    { id: 'fleet',    label: 'Live',     ic: '◱' },
     { id: 'deploy',   label: 'Deploy',   ic: '＋' },
     { id: 'releases', label: 'Releases', ic: '⤓' },
     { id: 'platform', label: 'Platform', ic: '◉' },
@@ -1596,6 +1683,7 @@ export default function App() {
         <main>
           {tab === 'map'      && <MapTab data={dashboard} lan={lan} onAction={handleAction} onConfigure={setConfigGuest} goTo={setTab} />}
           {tab === 'network'  && <InternalNetworkTab lan={lan} data={dashboard} reloadLan={loadLan} />}
+          {tab === 'fleet'    && <FleetTab />}
           {tab === 'deploy'   && <DeployTab releases={releases} />}
           {tab === 'releases' && <ReleasesTab releases={releases} />}
           {tab === 'platform' && <PlatformTab />}
