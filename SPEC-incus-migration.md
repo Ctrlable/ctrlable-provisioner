@@ -486,6 +486,9 @@ GRUB snapshot pick.)
 
 ### 14b. RAUC-for-host build stack (x86 Debian) — concrete shape
 
+> **VALIDATED end-to-end 2026-11-18** on the box (Debian 13, mmdebstrap/rauc/grub present): `make keys rootfs image bundle` produced a **flashable `ctrlable-pro-2026.11.18.img`** (17.7 GB) with the designed GPT A/B layout — `esp 512M · root-a 4G · root-b 4G · data 8G` — EFI GRUB installed, `PRETTY_NAME="Ctrlable Pro (Debian 13)"`, and `ctrlable-firstboot` + `incus` enabled to boot zero-touch; and a **signed verity RAUC bundle `*.raucb`** (336 MB) that **verifies against the keyring** (`Verified inline signature by 'O = Ctrlable, CN = ctrlable-pro-dev'`, compatible `ctrlable-pro-x86-64`). Two chroot-only warnings (`sshd -t`, `grub-probe`) are expected and harmless (the A/B `grub.cfg` comes from `pack-image`, not chroot `update-grub`). Remaining: boot-test the `.img` in a UEFI VM to watch first-boot run stage1→orchestrator→deploy; wire prod RAUC keys (CI secrets) in place of the dev keys.
+
+
 ```
   Build pipeline (CI, mirrors rebrand-tools HAOS build):
     mmdebstrap/mkosi → sealed Debian rootfs (Incus + orchestrator key baked in)
