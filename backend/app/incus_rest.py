@@ -103,6 +103,12 @@ class IncusREST:
         md = await self._sync(f"/1.0/instances/{name}?recursion=1")
         return md or {}
 
+    async def resources(self) -> dict:
+        """Host hardware over the socket — GET /1.0/resources (cpu, memory, storage, usb, pci,
+        gpu). This is the REAL host's hardware (what to pass through), not the container's."""
+        md = await self._sync("/1.0/resources")
+        return md or {}
+
     async def operations(self) -> dict:
         """GET /1.0/operations?recursion=1 → running/queued operations (for progress + events)."""
         try:

@@ -1568,6 +1568,12 @@ function InstanceDrawer({ name, onClose }) {
   const [err, setErr] = useState(null)
   const [busy, setBusy] = useState(null)      // action in flight
   const [showRaw, setShowRaw] = useState(false)
+  const [resizeVals, setResizeVals] = useState({})
+  const [hw, setHw] = useState(null)          // host hardware for the add-device picker
+  const [adding, setAdding] = useState(null)  // {type, sel, name} when the add form is open
+  const [cmd, setCmd] = useState('')
+  const [cmdOut, setCmdOut] = useState(null)
+  const [cmdBusy, setCmdBusy] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -1587,6 +1593,45 @@ function InstanceDrawer({ name, onClose }) {
       setTimeout(load, 1200)
     } catch (e) { setErr(e.message) }
     finally { setBusy(null) }
+  }
+
+  // --- edit mutations (resize / attach / detach / exec) ---
+  const post = async (path, body, method = 'POST') => {
+    const res = await apiFetch(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) })
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`)
+    return res.json().catch(() => ({}))
+  }
+  const doResize = async (dev) => {
+    const size = (resizeVals[dev] || '').trim(); if (!size) return
+    setBusy('resize'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/resize`, { device: dev, size }); setResizeVals(v => ({ ...v, [dev]: '' })); setTimeout(load, 800) }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const removeDevice = async (dev) => {
+    if (!window.confirm(`Remove device "${dev}" from ${name}? This can disrupt the instance.`)) return
+    setBusy('rm'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/device/${encodeURIComponent(dev)}`, null, 'DELETE'); setTimeout(load, 800) }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const openAdd = async () => {
+    setAdding({ type: 'usb', sel: '', name: '' })
+    if (!hw) { try { const res = await apiFetch('/api/incus/host-hardware'); if (res.ok) setHw(await res.json()) } catch { /* ignore */ } }
+  }
+  const addDevice = async () => {
+    const a = adding; if (!a) return
+    let props = {}; let dname = (a.name || '').trim()
+    if (a.type === 'usb') { const [vid, pid] = (a.sel || '').split(':'); if (!vid) return; props = { vendorid: vid, productid: pid }; dname = dname || `usb-${vid}-${pid}` }
+    else if (a.type === 'gpu') { props = a.sel ? { pci: a.sel } : {}; dname = dname || 'gpu' }
+    else if (a.type === 'pci') { if (!a.sel) return; props = { address: a.sel }; dname = dname || `pci-${a.sel.replace(/[:.]/g, '')}` }
+    setBusy('add'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/device`, { name: dname, type: a.type, props }); setAdding(null); setTimeout(load, 800) }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const runCmd = async () => {
+    if (!cmd.trim()) return
+    setCmdBusy(true); setCmdOut(null)
+    try { setCmdOut(await post(`/api/incus/instance/${encodeURIComponent(name)}/exec`, { command: cmd })) }
+    catch (e) { setCmdOut({ stderr: e.message, exit: -1 }) } finally { setCmdBusy(false) }
   }
 
   const cfg = rec?.config || {}
@@ -1645,6 +1690,13 @@ function InstanceDrawer({ name, onClose }) {
                   <span className="dd-name mono">{dn}</span>
                   <span className="dd-meta">{[d.pool && `pool ${d.pool}`, d.path && `at ${d.path}`, d.size].filter(Boolean).join(' · ')}</span>
                   {st.disk?.[dn]?.usage != null && <span className="dd-use mono">{fmtBytes(st.disk[dn].usage)}</span>}
+                  <div className="dd-edit">
+                    <input className="dd-in" placeholder={d.size || 'e.g. 16GiB'} value={resizeVals[dn] || ''}
+                           onChange={e => setResizeVals(v => ({ ...v, [dn]: e.target.value }))} />
+                    <button className="btn-xs" disabled={busy || !(resizeVals[dn] || '').trim()} onClick={() => doResize(dn)}>
+                      {busy === 'resize' ? '…' : 'Resize'}
+                    </button>
+                  </div>
                 </div>
               ))}
           </section>
@@ -1659,15 +1711,44 @@ function InstanceDrawer({ name, onClose }) {
               ))}
           </section>
 
-          <section><h4>Passthrough <span className="cnt">{passth.length}</span></h4>
+          <section>
+            <h4>Passthrough <span className="cnt">{passth.length}</span>
+              <button className="h4-add" onClick={adding ? () => setAdding(null) : openAdd}>{adding ? 'Cancel' : '+ Add'}</button>
+            </h4>
+            {adding && (
+              <div className="dw-add">
+                <select value={adding.type} onChange={e => setAdding(a => ({ ...a, type: e.target.value, sel: '' }))}>
+                  <option value="usb">USB</option><option value="gpu">GPU</option><option value="pci">PCI</option>
+                </select>
+                <select value={adding.sel} onChange={e => setAdding(a => ({ ...a, sel: e.target.value }))}>
+                  <option value="">{hw ? 'Select device…' : 'Loading host hardware…'}</option>
+                  {adding.type === 'usb' && (hw?.usb || []).map(u => <option key={u.id + (u.product || '')} value={u.id}>{(u.product || u.vendor || 'USB')} ({u.id})</option>)}
+                  {adding.type === 'gpu' && (hw?.gpu || []).map(g => <option key={g.address} value={g.address}>{(g.product || g.vendor || 'GPU')} · {g.address}</option>)}
+                  {adding.type === 'pci' && (hw?.pci || []).map(p => <option key={p.address} value={p.address}>{(p.product || p.vendor || 'PCI')} · {p.address}</option>)}
+                </select>
+                <input className="dd-in" placeholder="name (optional)" value={adding.name} onChange={e => setAdding(a => ({ ...a, name: e.target.value }))} />
+                <button className="btn-xs" disabled={busy === 'add' || (adding.type !== 'gpu' && !adding.sel)} onClick={addDevice}>{busy === 'add' ? 'Attaching…' : 'Attach'}</button>
+              </div>
+            )}
             {passth.length === 0 ? <p className="muted sm">No USB / GPU / PCI devices passed through.</p> :
               passth.map(([dn, d]) => (
                 <div className="dw-dev" key={dn}>
                   <span className="dd-name mono">{dn}</span>
-                  <span className={`pill ${d.type === 'gpu' ? 'accent' : 'brand'}`} style={{marginLeft:8}}>{d.type}</span>
+                  <span className={`pill ${d.type === 'gpu' ? 'accent' : 'brand'}`}>{d.type}</span>
                   <span className="dd-meta">{Object.entries(d).filter(([k]) => k !== 'type').map(([k, v]) => `${k}=${v}`).join(' · ')}</span>
+                  <button className="btn-xs danger dd-rm" disabled={busy} onClick={() => removeDevice(dn)}>Remove</button>
                 </div>
               ))}
+          </section>
+
+          <section>
+            <h4>Console <span className="dw-hint" style={{ textTransform: 'none', letterSpacing: 0, marginLeft: 0 }}>run a command — interactive terminal next</span></h4>
+            <div className="dw-cmd">
+              <input className="dd-in cmd mono" placeholder="uptime · ls / · cat /etc/os-release" value={cmd}
+                     onChange={e => setCmd(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runCmd() }} />
+              <button className="btn-xs" disabled={cmdBusy || !cmd.trim()} onClick={runCmd}>{cmdBusy ? 'Running…' : 'Run'}</button>
+            </div>
+            {cmdOut && <pre className="dw-raw mono">{(cmdOut.stdout || '') + (cmdOut.stderr ? '\n' + cmdOut.stderr : '')}{cmdOut.exit != null ? `\n[exit ${cmdOut.exit}]` : ''}</pre>}
           </section>
 
           <section>

@@ -315,6 +315,26 @@ class IncusProvider(Provider):
                 f"{size!r}; compute the target and pass it")
         self._incus("config", "device", "set", self._name(ref), disk, f"size={size}")
 
+    def device_add(self, ref: GuestRef, dev_name: str, dtype: str,
+                   props: Optional[dict] = None) -> None:
+        """Attach a device to an instance: `incus config device add <inst> <name> <type> k=v…`
+        (usb/gpu/pci/disk/unix-char/…). Hot-plugs on a running instance where Incus supports it."""
+        args = ["config", "device", "add", self._name(ref), dev_name, dtype]
+        args += [f"{k}={v}" for k, v in (props or {}).items()]
+        self._incus(*args)
+
+    def device_remove(self, ref: GuestRef, dev_name: str) -> None:
+        self._incus("config", "device", "remove", self._name(ref), dev_name)
+
+    def exec_cmd(self, ref: GuestRef, command: str, timeout: int = 30) -> dict:
+        """Run a one-shot command in the instance; return stdout/stderr/exit without raising on a
+        non-zero exit (the caller renders it). A lightweight console until the interactive terminal."""
+        if not self._has_incus:
+            raise RuntimeError("incus not installed")
+        r = subprocess.run(["incus", "exec", self._name(ref), "--", "sh", "-lc", command],
+                           capture_output=True, text=True, timeout=timeout)
+        return {"stdout": r.stdout, "stderr": r.stderr, "exit": r.returncode}
+
     # -- host hardware discovery (host-level; identical to LibvirtProvider) ---
 
     def list_usb_devices(self) -> list[dict]:

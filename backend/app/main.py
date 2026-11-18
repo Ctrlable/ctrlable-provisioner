@@ -1159,6 +1159,96 @@ async def incus_instance_action(name: str, req: InstanceActionRequest,
     return {"ok": True, "name": name, "action": req.action}
 
 
+@app.get("/api/incus/host-hardware")
+async def incus_host_hardware(_: str | None = Depends(require_auth)) -> dict:
+    """Host USB / PCI / GPU devices over the socket (the REAL host via /1.0/resources, not the
+    orchestrator container) — the menu for attaching passthrough to an instance."""
+    from .incus_rest import IncusError
+    try:
+        res = await _incus_rest().resources()
+    except IncusError as e:
+        raise HTTPException(502, f"incus resources: {e}")
+    usb = [{"id": f"{d.get('vendor_id','')}:{d.get('product_id','')}",
+            "vendor_id": d.get("vendor_id"), "product_id": d.get("product_id"),
+            "vendor": d.get("vendor"), "product": d.get("product")}
+           for d in ((res.get("usb") or {}).get("devices") or [])]
+    pci = [{"address": d.get("pci_address"), "vendor": d.get("vendor"),
+            "product": d.get("product"), "driver": d.get("driver")}
+           for d in ((res.get("pci") or {}).get("devices") or [])]
+    gpu = [{"address": c.get("pci_address"), "vendor": c.get("vendor"),
+            "product": c.get("product"), "driver": c.get("driver")}
+           for c in ((res.get("gpu") or {}).get("cards") or [])]
+    return {"usb": usb, "pci": pci, "gpu": gpu}
+
+
+class DeviceAddRequest(BaseModel):
+    name: str
+    type: str                         # usb | gpu | pci | disk | unix-char | …
+    props: dict[str, str] = {}
+
+
+@app.post("/api/incus/instance/{name}/device")
+async def incus_device_add(name: str, req: DeviceAddRequest,
+                           _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().device_add, ref, req.name, req.type, req.props)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"attach {req.name!r} failed: {e}")
+    return {"ok": True}
+
+
+@app.delete("/api/incus/instance/{name}/device/{dev}")
+async def incus_device_remove(name: str, dev: str,
+                              _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().device_remove, ref, dev)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"remove {dev!r} failed: {e}")
+    return {"ok": True}
+
+
+class ResizeRequest(BaseModel):
+    device: str
+    size: str                         # absolute, e.g. "16GiB"
+
+
+@app.post("/api/incus/instance/{name}/resize")
+async def incus_resize(name: str, req: ResizeRequest,
+                       _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().resize_disk, ref, req.device, req.size)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"resize {req.device!r} failed: {e}")
+    return {"ok": True}
+
+
+class ExecRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/incus/instance/{name}/exec")
+async def incus_exec(name: str, req: ExecRequest,
+                     _: str | None = Depends(require_auth)) -> dict:
+    """Run a one-shot command in the instance (a lightweight console until the interactive
+    terminal lands). Returns stdout/stderr/exit."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        return await asyncio.to_thread(_provider().exec_cmd, ref, req.command)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"exec failed: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Serve built frontend (production)
 # ---------------------------------------------------------------------------
