@@ -90,10 +90,10 @@ if [ -z "\$DISK" ]; then beacon FATAL_no_target_disk; sleep 5; poweroff -f; fi
 if command -v curl >/dev/null 2>&1; then DL="curl -fL \$IMGURL"; else DL="wget -O - \$IMGURL"; fi
 beacon "dl=\$(echo \$DL | tr ' /:.' '____')"
 # decompress smoke-test: pull a little, decompress, count bytes + capture any zstd error
-\$DL 2>/dev/null | head -c 4000000 | zstd -dc --long=31 2>/tmp/z.err | wc -c > /tmp/z.cnt
+\$DL 2>/dev/null | head -c 4000000 | zstd -dc --long=27 2>/tmp/z.err | wc -c > /tmp/z.cnt
 beacon "smoke_out=\$(cat /tmp/z.cnt 2>/dev/null)__err=\$(cat /tmp/z.err 2>/dev/null | tr ' \n/,()' '______' | cut -c1-90)"
 # real write
-\$DL | zstd -dc --long=31 | dd of="\$DISK" bs=4M 2>/tmp/dd.err
+\$DL | zstd -dc --long=27 | dd of="\$DISK" bs=4M 2>/tmp/dd.err
 bytes=\$(awk '/copied|bytes/{print \$1; exit}' /tmp/dd.err)
 beacon "write_bytes=\${bytes:-0}__dderr=\$(cat /tmp/dd.err 2>/dev/null | tr ' \n/,()' '______' | cut -c1-90)"
 if [ "\${bytes:-0}" -gt 1000000000 ]; then
