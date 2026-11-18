@@ -1,0 +1,12 @@
+# Ops/support trust anchor — baked into the appliance image and appended to
+# /root/.ssh/authorized_keys. This is the PUBLIC key of the Ctrlable ops/support identity,
+# the one the portal's Wetty SSH gateway (ssh.ctrlable.com) and operators on the WireGuard VPN
+# use to reach the bare-metal HOST over the tunnel for troubleshooting. Its private half stays
+# with ops / the portal — never on the appliance. Scoped to human recovery and rotatable
+# independently of the orchestrator automation key (that one is for orchestrator->host only).
+#
+# TODO(release): replace the placeholder below with the real ops public key before any
+# production build. Rotate = ship a new image or OTA an authorized_keys update. For dev /
+# boot-test images, build-rootfs.sh also honours an OPS_PUBKEY env var (appended as-is).
+#
+# ssh-ed25519 AAAA...REPLACE-WITH-OPS-PUBKEY... ctrlable-ops

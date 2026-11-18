@@ -1,0 +1,15 @@
+[Unit]
+Description=Ctrlable host VPN enrolment (SSH-over-WireGuard troubleshooting backdoor)
+# Deliberately independent of incus.service / the orchestrator: the host must reach the VPN
+# even when Incus is wedged or the orchestrator container never starts — that is the whole
+# point of a host backdoor. Idempotent + self-retrying, so run-once semantics are not needed.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ctrlable/ctrlable-host-enroll.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

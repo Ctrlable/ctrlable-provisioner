@@ -29,11 +29,20 @@ install -D -m0755 "$repo/poc/branding/apply-branding.sh"   "$root/opt/ctrlable/a
 install -D -m0755 "$here/config/first-boot/ctrlable-firstboot.sh" "$root/opt/ctrlable/ctrlable-firstboot.sh"
 install -D -m0644 "$here/config/first-boot/ctrlable-firstboot.service" "$root/etc/systemd/system/ctrlable-firstboot.service"
 install -D -m0644 "$here/config/first-boot/ctrlable-mark-good.service" "$root/etc/systemd/system/ctrlable-mark-good.service"
+install -D -m0755 "$here/config/first-boot/ctrlable-host-enroll.sh"      "$root/opt/ctrlable/ctrlable-host-enroll.sh"
+install -D -m0644 "$here/config/first-boot/ctrlable-host-enroll.service" "$root/etc/systemd/system/ctrlable-host-enroll.service"
 install -D -m0644 "$here/config/rauc/system.conf"          "$root/etc/rauc/system.conf"
 
-# orchestrator trust anchor (public key)
+# trust anchors in /root/.ssh/authorized_keys:
+#   - orchestrator automation key (orchestrator -> host; zero-touch deploy)
+#   - ops/support key (humans + portal Wetty gateway -> host over the VPN; troubleshooting backdoor)
+#   - optional OPS_PUBKEY injected at build time (dev / boot-test images)
 install -d -m0700 "$root/root/.ssh"
-install -D -m0600 "$here/config/orchestrator/authorized_keys" "$root/root/.ssh/authorized_keys"
+: > "$root/root/.ssh/authorized_keys"
+cat "$here/config/orchestrator/authorized_keys" >> "$root/root/.ssh/authorized_keys"
+[ -f "$here/config/orchestrator/ops_authorized_keys" ] && cat "$here/config/orchestrator/ops_authorized_keys" >> "$root/root/.ssh/authorized_keys"
+[ -n "${OPS_PUBKEY:-}" ] && printf "%s\n" "$OPS_PUBKEY" >> "$root/root/.ssh/authorized_keys"
+chmod 600 "$root/root/.ssh/authorized_keys"
 
 # baked appliance config (placeholders here; CI/flash injects real PROVISIONING_KEY etc.)
 install -D -m0600 "$here/config/orchestrator/appliance.conf.example" "$root/etc/ctrlable/appliance.conf"
@@ -55,7 +64,7 @@ NET
 
 echo "build-rootfs: enable services + apply host branding (in chroot)"
 chroot "$root" systemctl enable systemd-networkd systemd-resolved ssh incus \
-    ctrlable-firstboot ctrlable-mark-good 2>/dev/null || true
+    ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good 2>/dev/null || true
 # branding: issue/motd/ssh banner get written; sshd reload + update-grub no-op in a chroot
 # (our hand-authored A/B grub.cfg from pack-image.sh is authoritative; GRUB_DISTRIBUTOR is cosmetic).
 chroot "$root" /opt/ctrlable/apply-branding.sh || true

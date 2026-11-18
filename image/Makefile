@@ -14,7 +14,7 @@ export WORK SUITE COMPATIBLE VERSION RAUC_CERT RAUC_KEY
 
 STAMP := $(WORK)/.rootfs.stamp
 
-.PHONY: all keys rootfs image bundle clean help
+.PHONY: all keys rootfs image bundle netboot clean help
 help:
 	@echo "targets: keys rootfs image bundle all clean   (run as root on Debian 13)"
 all: image bundle
@@ -33,6 +33,9 @@ image: $(STAMP) ## assemble the flashable GPT A/B image -> $(WORK)/ctrlable-pro-
 
 bundle: $(STAMP) ## build the signed RAUC OTA bundle -> $(WORK)/ctrlable-pro-$(VERSION).raucb
 	scripts/make-bundle.sh
+
+netboot: image ## stage network-install (zstd image + Alpine writer + iPXE) under $(WORK)/netboot; pass BASE_URL=http://<ip>:<port> [SERVE=<port>]
+	scripts/make-netboot.sh "$(BASE_URL)" $(if $(SERVE),--serve $(SERVE),)
 
 clean:
 	rm -rf $(WORK)

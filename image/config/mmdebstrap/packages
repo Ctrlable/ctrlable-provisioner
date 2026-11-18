@@ -30,6 +30,7 @@ nftables
 # (networkd is part of systemd; configured in build-rootfs hooks)
 
 # remote access + handy field tools
+wireguard-tools
 openssh-server
 curl
 jq
