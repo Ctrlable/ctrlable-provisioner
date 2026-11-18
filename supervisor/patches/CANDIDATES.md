@@ -11,8 +11,10 @@ fallback that only triggers when the HAOS-shaped signal is absent), so upstream 
 
 ---
 
-## C1 — connectivity fallback when no NM-managed device is present
-**Only if** Layer-0 NetworkManager-manages-the-veth does NOT clear `host_internet:false`.
+## C1 — connectivity fallback — NOT NEEDED (2026-11-18)
+**Resolved by Layer-0, zero fork.** Masking networkd for the NIC + NM-alone DHCP gave
+`connectivity=full` / `host_internet:true` and add-ons install on a stock Supervisor. No patch.
+Kept here only as a reserve shape if a future upstream changes connectivity detection.
 - **Symptom:** add-on install/store refresh blocked by `JobCondition.INTERNET_HOST`;
   `ha network info` shows `host_internet: false` though the container clearly has egress.
 - **Root cause:** Supervisor derives host connectivity from NetworkManager's connectivity
@@ -25,9 +27,16 @@ fallback that only triggers when the HAOS-shaped signal is absent), so upstream 
   treat success as connected. Inert on HAOS (there, NM always manages a device, so the
   fallback never runs).
 
-## C2 — platform "supported" for the Ctrlable LXC environment + branding
-**Only if** the "unsupported" surface actually impedes a feature (it does **not** block
-installs by itself) OR for owned branding of the supported/healthy state.
+## C2 — platform "supported" for the Ctrlable LXC environment — IMPLEMENTED (2026-11-18)
+**Shipped as `patches/0001-ctrlable-platform-supported-gate-for-Supervised-in-L.patch`** (pinned
+tag 2026.11.0). Gates the `os` and `network_manager` unsupported evaluations behind
+`CTRLABLE_PLATFORM=lxc` (set only by our image; inert on HAOS). Rationale: both are structurally
+unsatisfiable in an Incus LXC (os_agent is not HAOS; the NM-managed veth is not enumerable over
+Supervisor's NM D-Bus) yet neither blocks a feature — so this clears the "unsupported" banner for
+HAOS parity. CAVEAT: silencing `network_manager` does not ADD the NETWORK host-feature, so the
+Supervisor Network UI stays inert until the veth is exposed over D-Bus (follow-up); host/Incus owns
+networking meanwhile. Behavioural validation (supported→true) needs a build of the forked
+Supervisor image (`make build`); the patch applies clean + compiles against 2026.11.0.
 - **Target:** `supervisor/resolution/evaluations/*.py` (the bare-metal-only evaluations, e.g.
   `systemd`, `os_agent`, `docker_configuration`) and the resolution manager that aggregates
   `UnsupportedReason`.

@@ -5,4 +5,4 @@
 UPSTREAM_REPO=https://github.com/home-assistant/supervisor
 # Set to the real tag once the first `make sync` runs on a box with network.
 # Format: a Supervisor release tag, e.g. 2026.11.3  (NOT a Core version).
-UPSTREAM_TAG=UNPINNED
+UPSTREAM_TAG=2026.11.0

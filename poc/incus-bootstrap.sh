@@ -247,8 +247,24 @@ partB(){
   else
     log "partB: WARN supervisor/env/apply-net-parity.sh not found next to bootstrap — skipping NM parity"
   fi
+  # Tell our FORKED Supervisor it is the Ctrlable LXC platform, so the C2 patch
+  # (supervisor/patches/0001-*) clears the structurally-unsatisfiable `os` +
+  # `network_manager` unsupported reasons -> supported:true (HAOS parity). Inert
+  # on a stock Supervisor and on HAOS (flag unset). We add it to the ExecStart of
+  # the Supervised-installer's unit, which is the launch point we control.
+  incus exec "$CPRO" -- bash -c '
+    u=/etc/systemd/system/hassio-supervisor.service
+    if [ -f "$u" ] && ! grep -q "CTRLABLE_PLATFORM" "$u"; then
+      sed -i "s#\(/usr/bin/docker run\)#\1 -e CTRLABLE_PLATFORM=lxc#" "$u" \
+        && systemctl daemon-reload \
+        && echo "partB: CTRLABLE_PLATFORM=lxc wired into hassio-supervisor.service"
+    fi
+  ' </dev/null || log "partB: note - could not wire CTRLABLE_PLATFORM (stock Supervisor ignores it anyway)"
+
   log "partB: Supervisor starting; store + Core pull in background. Verify with: incus exec $CPRO -- ha supervisor info"
-  # Layer-1 fork (only if the above env parity is insufficient): see supervisor/ harness.
+  # Layer-1 fork: supported-banner only (supervisor/patches/0001). Add-on parity is zero-fork.
+  # The C2 'supported:true' effect needs our FORKED Supervisor image (make -C supervisor build);
+  # a stock Supervisor keeps supported:false (harmless — blocks no feature).
 }
 
 # USB coordinator passthrough — run when a Z-Wave/Zigbee stick is plugged into the host.

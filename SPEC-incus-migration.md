@@ -147,7 +147,7 @@ want for an automated appliance build.
 > both pure **environment** set-up the image applies, **no Supervisor fork** (VALIDATED 2026-11-18,
 > §6a: `core_mosquitto` installed on a stock Supervisor; parity survived reboot). A **HAOS VM
 > (Option A)** gets this for free but pays the VM + USB-passthrough cost. Net: **Option B reaches
-> HAOS-equivalent add-on parity with an empty patch stack** — the cadence-safe outcome — so B
+> HAOS-equivalent add-on parity with ZERO fork** — the cadence-safe outcome — so B
 > stands for the USB fleet and A is only the network-coordinator exception.
 
 **Option A (HAOS VM) is retained only as a documented exception** for a site whose radios
@@ -190,7 +190,7 @@ Supervisor only for what no environment can satisfy:
   Target: **add-ons install on a stock Supervisor** with only environment set-up.
   **PROVEN 2026-11-18:** with privileged + NM parity, `ha addons install core_mosquitto`
   completed and the add-on container (`app_core_mosquitto`) came up healthy on a STOCK
-  Supervisor — **patch stack empty, zero fork.** (Note: this Supervisor renamed `addons`→`apps`;
+  Supervisor — **zero fork for add-ons.** (Note: this Supervisor renamed `addons`→`apps`;
   track the terminology in future rebases.)
 - **Layer 1 — thin tracked fork (only the irreducible remainder).** For checks that are
   *physically impossible* in an LXC even with a correct environment (e.g. a kernel/boot check
@@ -219,6 +219,18 @@ cadence-safe outcome — and keeps the single-container host. If Layer 0 on the 
 A for add-on-heavy sites (§6). **RESOLVED 2026-11-18: Layer-0 cleared both gates with zero
 fork and survived reboot — so the Layer-1 patch stack stays empty and B is fully validated for
 add-on parity. A remains only the per-site network-coordinator exception, not an add-on fallback.**
+
+**Fork status (2026-11-18):** the patch stack is **one patch**, and it is OPTIONAL. Add-on parity
+needs **zero fork** (Layer-0 env). The single patch — `supervisor/patches/0001-ctrlable-platform-
+supported-gate-*`, pinned to tag 2026.11.0, applies clean + compiles — only clears the
+**"unsupported" banner**: on Supervised-in-LXC the `os` reason (os_agent is not HAOS) and the
+`network_manager` reason (the NM-managed Incus veth is not enumerable over Supervisor's NM D-Bus)
+are structurally unsatisfiable yet block no feature, so the patch gates both behind
+`CTRLABLE_PLATFORM=lxc` (set by our image's `hassio-supervisor.service`; inert on HAOS) to reach
+`supported:true` for HAOS parity. Caveat: it does not revive the Supervisor Network UI (veth-over-
+D-Bus exposure is a tracked follow-up); host/Incus owns networking. The `supported:true` effect
+needs a build of the forked Supervisor image (`make -C supervisor build`); a stock Supervisor
+ignores the flag.
 
 ## 7. The builder problem (the long pole)
 
