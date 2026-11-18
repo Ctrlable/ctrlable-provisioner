@@ -1,0 +1,20 @@
+# Baked appliance config, read by ctrlable-firstboot.sh and handed to the orchestrator
+# container so it can self-enrol with the portal and deploy this appliance's manifest.
+# Installed to /etc/ctrlable/appliance.conf in the image. Real values are injected at
+# image-build / flash time (CI secrets), NOT committed — this .example ships placeholders.
+#
+# TODO(release): the CI build writes the real values (or a flash-time step does), the same
+# way the orchestrator pubkey is baked into /root/.ssh/authorized_keys.
+
+# Portal the orchestrator enrols against (platform.py).
+PORTAL_URL="https://portal.ctrlable.com"
+
+# Shared appliance-enrol key (config.provisioning_key). Placeholder — replace per build.
+PROVISIONING_KEY=""
+
+# Release channel/manifest this appliance should deploy.
+RELEASE=""
+
+# Incus image the orchestrator container is launched from (baked tarball at
+# /opt/ctrlable/images/<name>.tar.zst, or an alias set at build time).
+ORCHESTRATOR_IMAGE="ctrlable-orchestrator"

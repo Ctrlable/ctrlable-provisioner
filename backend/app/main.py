@@ -65,8 +65,15 @@ app.add_middleware(
 
 def _provider() -> Provider:
     """The virtualization backend. Returns the neutral Provider interface, not a
-    concrete class -- swapping Proxmox for a Debian/libvirt backend later is a
-    change here and in provider construction only. See provider.py."""
+    concrete class -- swapping Proxmox for a Debian/Incus backend is `settings.provider`
+    plus construction here, nothing else. See provider.py."""
+    backend = (settings.provider or "proxmox").lower()
+    if backend == "incus":
+        from .incus_provider import IncusProvider
+        return IncusProvider(remote=settings.incus_remote or None)
+    if backend == "libvirt":
+        from .libvirt_provider import LibvirtProvider
+        return LibvirtProvider()
     return ProxmoxProvider(
         settings.pve_host,
         settings.pve_token_id,

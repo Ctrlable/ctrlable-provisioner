@@ -1,0 +1,42 @@
+# CI STUB — build the Ctrlable Pro appliance image + OTA bundle.
+# Needs a Debian-13 runner with root/loop devices (self-hosted or a privileged container);
+# GitHub's stock ubuntu-latest can run mmdebstrap but loop-mounting for pack-image wants privilege.
+# TODO: wire real runner + secrets, then move to .github/workflows/.
+name: build-appliance-image
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "release version (default: date)"
+        required: false
+  push:
+    tags: ["appliance-*"]
+
+jobs:
+  build:
+    runs-on: [self-hosted, debian13]      # TODO: provision this runner (root + loop devices)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y mmdebstrap gdisk dosfstools e2fsprogs btrfs-progs grub-efi-amd64-bin rauc openssl
+      - name: Signing keys
+        env:
+          RAUC_CERT_B64: ${{ secrets.RAUC_CERT }}   # TODO: add org secrets (prod signing cert+key)
+          RAUC_KEY_B64:  ${{ secrets.RAUC_KEY }}
+        run: |
+          mkdir -p image/keys
+          if [ -n "$RAUC_CERT_B64" ]; then
+            echo "$RAUC_CERT_B64" | base64 -d > image/keys/dev-cert.pem
+            echo "$RAUC_KEY_B64"  | base64 -d > image/keys/dev-key.pem
+          else
+            image/scripts/gen-dev-keys.sh image/keys   # fallback: dev keys (non-release builds)
+          fi
+      - name: Build image + bundle
+        run: sudo -E make -C image all VERSION="${{ github.event.inputs.version || '' }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctrlable-pro-appliance
+          path: |
+            image/work/*.img
+            image/work/*.raucb
+      # TODO: publish the .raucb to the existing OTA channel (portal/store) like the HAOS build does.

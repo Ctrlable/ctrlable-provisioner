@@ -7,11 +7,18 @@ from .manifest import load_all_manifests
 
 
 class Settings(BaseSettings):
+    # Which virtualization backend to drive (see provider.py). "proxmox" today;
+    # "incus" once a box is migrated to plain Debian + Incus (SPEC-incus-migration.md).
+    provider: str = "proxmox"    # proxmox | incus | libvirt
+
     pve_host: str = ""
     pve_token_id: str = ""       # "user@realm!tokenname"
     pve_token_secret: str = ""
     pve_node: str = "pve"
     pve_verify_ssl: bool = False
+
+    # Incus backend: empty remote = the local daemon (the appliance's own Incus).
+    incus_remote: str = ""       # e.g. "prod:" to target a networked Incus remote
 
     # Build plane
     build_key_path: str = "/etc/ctrlable/build_key"   # SSH private key for host trigger

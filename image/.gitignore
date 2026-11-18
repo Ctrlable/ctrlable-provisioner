@@ -1,0 +1,3 @@
+# build output and local dev signing keys — never commit
+work/
+keys/

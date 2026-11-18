@@ -1,0 +1,10 @@
+# Orchestrator trust anchor — baked into the appliance image at /root/.ssh/authorized_keys.
+# This is the PUBLIC key of the provisioning orchestrator; its private half never leaves the
+# orchestrator. Because every image carries it, every fielded appliance trusts the orchestrator
+# over a key from the factory — no per-box password, ever (the whole point of the zero-touch flow).
+#
+# TODO(release): replace the placeholder below with the real orchestrator public key before any
+# production build. Rotating it = ship a new image / push an authorized_keys update via OTA.
+# Multiple lines are fine (e.g. a current + next key during rotation).
+#
+# ssh-ed25519 AAAA...REPLACE-WITH-ORCHESTRATOR-PUBKEY... ctrlable-orchestrator

@@ -1,0 +1,36 @@
+# Packages baked into the Ctrlable Pro HOST image (one per line; # = comment).
+# The host stays LEAN: Incus + btrfs + boot + rauc + ssh + net. Everything HA/Supervisor
+# (docker, network-manager, os-agent, ...) is installed INSIDE the ctrlable-pro container by
+# incus-bootstrap.sh partB — NOT on the host.
+
+# init / base
+systemd-sysv
+udev
+dbus
+ca-certificates
+locales
+
+# kernel + boot + A/B bootloader
+linux-image-amd64
+grub-efi-amd64
+grub-efi-amd64-bin
+efibootmgr
+
+# RAUC (A/B OTA + rollback); grub-editenv ships in grub-common
+rauc
+
+# containers + the data pool
+incus
+btrfs-progs
+
+# networking
+systemd-resolved
+iproute2
+nftables
+# (networkd is part of systemd; configured in build-rootfs hooks)
+
+# remote access + handy field tools
+openssh-server
+curl
+jq
+less
