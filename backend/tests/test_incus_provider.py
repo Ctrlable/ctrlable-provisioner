@@ -165,6 +165,63 @@ check("_parse_bytes: junk -> 0", _parse_bytes("nonsense") == 0, "")
 check("_kind_from_type: virtual-machine -> VM", IncusProvider._kind_from_type("virtual-machine") is GuestKind.VM, "")
 check("_kind_from_type: container -> CONTAINER", IncusProvider._kind_from_type("container") is GuestKind.CONTAINER, "")
 
+# ---- deploy_template: launch a prebuilt alias, wire, start ------------------
+from app.incus_provider import _render_firstboot_conf  # noqa: E402
+
+# no wiring: init from the convention alias, then start (init-not-launch so wiring
+# could land first), no file push.
+f = FakeIncus(); phases = []
+ref = provider(f).deploy_template(template="zwavejs", hostname="ctrlable-site-zwavejs",
+                                  on_phase=lambda n, t, m: phases.append((n, m)))
+check("deploy: init from ctrlable-<template> alias",
+      f.issued("init", "ctrlable-zwavejs", "ctrlable-site-zwavejs", "--profile", "default"), str(f.calls))
+check("deploy: starts the instance", f.issued("start", "ctrlable-site-zwavejs"), str(f.calls))
+check("deploy: no file push when wire_to is empty",
+      not any(c[:2] == ("file", "push") for c in f.calls), str(f.calls))
+check("deploy: returns the hostname as id", ref.id == "ctrlable-site-zwavejs", str(ref))
+check("deploy(no wire): emits 3 consecutive phases of 3",
+      [p[0] for p in phases] == [1, 2, 3], str(phases))
+
+# with wiring: a firstboot.conf is pushed (incl. the provisioning_key the
+# self-updating services enrol with), with --create-dirs, BEFORE start.
+f = FakeIncus()
+provider(f).deploy_template(template="dali-bridge", hostname="ctrlable-site-dali",
+                            wire_to={"mqtt_host": "198.18.0.10", "provisioning_key": "PK123"})
+pushes = [c for c in f.calls if c[:2] == ("file", "push")]
+check("deploy(wire): pushes one firstboot.conf", len(pushes) == 1, str(f.calls))
+wphases = []
+provider(FakeIncus()).deploy_template(template="dali-bridge", hostname="h",
+                                      wire_to={"mqtt_host": "x"},
+                                      on_phase=lambda n, t, m: wphases.append((n, t)))
+check("deploy(wire): 4 phases of 4", [p for p in wphases] == [(1, 4), (2, 4), (3, 4), (4, 4)], str(wphases))
+check("deploy(wire): pushes to /etc/ctrlable/firstboot.conf with --create-dirs",
+      bool(pushes) and pushes[0][-2] == "ctrlable-site-dali/etc/ctrlable/firstboot.conf"
+      and pushes[0][-1] == "--create-dirs", str(pushes))
+# order: init -> file push -> start (wiring before first boot)
+order = [c[0] for c in f.calls]
+check("deploy(wire): order init < file < start",
+      order.index("init") < order.index("file") < order.index("start"), str(order))
+
+# explicit alias + VM flag
+f = FakeIncus()
+provider(f).deploy_template(template="haos", hostname="ctrlable-site-haos",
+                            image_alias="ctrlable-haos-vm", vm=True)
+check("deploy: honours image_alias + --vm",
+      f.issued("init", "ctrlable-haos-vm", "ctrlable-site-haos", "--profile", "default", "--vm"), str(f.calls))
+
+# _render_firstboot_conf: sorted KEY=VALUE, drops None/empty
+conf = _render_firstboot_conf({"mqtt_host": "198.18.0.10", "provisioning_key": "PK", "mqtt_user": "", "x": None})
+check("firstboot.conf: sorted KEY=VALUE, drops empty/None",
+      conf == "mqtt_host=198.18.0.10\nprovisioning_key=PK\n", repr(conf))
+
+# deploy.py synthetic vmid: stable + in the Incus range
+sys.path.insert(0, _BACKEND)
+from app.deploy import _synthetic_vmid  # noqa: E402
+v1 = _synthetic_vmid("ctrlable-site-dali")
+check("_synthetic_vmid: stable", v1 == _synthetic_vmid("ctrlable-site-dali"), str(v1))
+check("_synthetic_vmid: in 100000..999999", 100000 <= v1 <= 999999, str(v1))
+check("_synthetic_vmid: distinct per hostname", v1 != _synthetic_vmid("ctrlable-site-zwavejs"), str(v1))
+
 
 print()
 if failures:

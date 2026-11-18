@@ -30,6 +30,7 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from typing import Optional
 
@@ -186,6 +187,75 @@ class IncusProvider(Provider):
         self._incus("copy", self._name(template), self._name(name))
         return GuestRef(id=name, kind=template.kind)
 
+    def deploy_template(
+        self,
+        *,
+        template: str,
+        hostname: str,
+        image_alias: Optional[str] = None,
+        wire_to: Optional[dict] = None,
+        profile: str = "default",
+        vm: bool = False,
+        on_phase=None,
+    ) -> GuestRef:
+        """Create a fleet instance from a PREBUILT image alias, optionally seed
+        firstboot wiring, and start it — the Incus equivalent of the PVE
+        `ctrlable-build deploy` step (see deploy.py). Images are built ahead of
+        time by incus-bootstrap (build_service / build_zwavejs / partB / the
+        proprietary-service builders) and aliased `ctrlable-<template>`, so a
+        deploy is launch + wire + start, never a build.
+
+        `wire_to` is written to /etc/ctrlable/firstboot.conf so a container can
+        self-configure; the orchestrator-callback model (deploy.py keeps an LXC
+        "pending" until its firstboot calls home) remains the primary wiring
+        path, and this seed carries the same values — including the
+        `provisioning_key` the dali-bridge/hardware-manager `updater.py` enrols
+        with to self-install/update from the Store (no GitHub token on-box).
+
+        init-then-start (not `launch`) so the wiring lands BEFORE first boot.
+        """
+        def phase(n: int, tot: int, msg: str) -> None:
+            if on_phase:
+                on_phase(n, tot, msg)
+
+        name = self._name(hostname)
+        alias = image_alias or ("ctrlable-%s" % template)
+        kind = GuestKind.VM if vm else GuestKind.CONTAINER
+        tot = 4 if wire_to else 3
+        n = 0
+
+        def step(msg: str) -> None:
+            nonlocal n
+            n += 1
+            phase(n, tot, msg)
+
+        step("create %s from %s" % (hostname, alias))
+        init_args = ["init", alias, name, "--profile", profile]
+        if vm:
+            init_args.append("--vm")
+        self._incus(*init_args)
+
+        if wire_to:
+            step("inject firstboot wiring")
+            conf = _render_firstboot_conf(wire_to)
+            tmp = tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False)
+            try:
+                tmp.write(conf)
+                tmp.flush()
+                tmp.close()
+                self._incus("file", "push", tmp.name,
+                            "%s/etc/ctrlable/firstboot.conf" % name, "--create-dirs")
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+
+        step("start")
+        self._incus("start", name)
+        step("deployed")
+        return GuestRef(id=hostname, kind=kind)
+
     def set_fresh_mac(self, ref: GuestRef) -> str:
         mac = self._random_mac()
         # Instance-level override on the primary NIC (eth0 from the default
@@ -302,6 +372,18 @@ class IncusProvider(Provider):
         dest = os.path.join(self.backup_dir, f"{ref.id}.tar.gz")
         self._incus("export", self._name(ref), dest, timeout=3600)
         return dest
+
+
+def _render_firstboot_conf(wire_to: dict) -> str:
+    """KEY=VALUE lines a container's firstboot sources (mqtt_host, coordinator_url,
+    provisioning_key, …). None values are dropped; keys are sorted for a stable,
+    diff-friendly file. Values are emitted verbatim — callers pass trusted wiring."""
+    lines = [
+        "%s=%s" % (k, v)
+        for k, v in sorted(wire_to.items())
+        if v is not None and v != ""
+    ]
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def _parse_bytes(s: str) -> int:
