@@ -278,6 +278,40 @@ service-container split is: **everything unprivileged except frigate, which is p
 GPU.** Driver is **i965** on this Gen8 Braswell (iHD is Broadwell+), selected the same way the
 builder already probes.
 
+### 7b. Private-repo install & update — the shared deploy-token pattern (DECIDED)
+
+Proprietary services (dali-bridge, hardware-manager, the Ctrlable Pro panels, …) live in
+**private** repos, yet appliances in the field must install and update them. The fleet already
+solved this (reference: `dali-bridge/dali_bridge/updater.py`), and the Incus migration reuses it
+unchanged. **Two layers — the appliance only ever needs the first:**
+
+- **Runtime install/update = Ctrlable Store + device token (NO GitHub credential on-box).**
+  Each service enrols as its own `Device` using the **provisioning_key** baked into the
+  appliance (`POST <portal>/v1/auto-enroll-service`, `X-Provisioning-Key`) → gets a
+  **device token** persisted `0600` at `/etc/ctrlable/<svc>.conf`. It then pulls packaged,
+  sha256-verified releases from the Store's **private "bridge lane"** with `X-Device-Token`:
+  `GET /api/v1/store/bridge/latest`, `GET /api/v1/store/download/<product>/<ver>`, and drains
+  portal-queued jobs (`GET/POST /api/v1/store/jobs`) so a version can be pushed to every site at
+  once. Apply is boring-by-design: download, verify, unpack, atomic-swap the package dir, keep
+  `.previous` for a hand rollback, restart. Production services never self-apply unattended —
+  a click or a queued job asks. The bridge lane is kept **out of the HA component catalog** so it
+  can't confuse the add-on installer.
+- **Build/packaging = private clone (CI, or a build host — never the appliance).** The image is
+  built from private source via the shared convention: an SSH **deploy key** at
+  `/etc/ctrlable/<svc>-deploy-key`, **or** `<SVC>_TOKEN` (`x-access-token` HTTPS PAT). CI normally
+  holds the token and also publishes the Store release (`POST /api/v1/store/releases`,
+  `STORE_UPLOAD_KEY`). Obfuscation/licensing happen here, once.
+
+**How it lands in the Incus pipeline:** `deploy.py` already seeds the `provisioning_key` into the
+dali-bridge/hardware-manager containers (`_wire_to_for`), and the Incus backend
+(`IncusProvider.deploy_template`) writes it into `/etc/ctrlable/firstboot.conf` — so a deployed
+service enrols and self-updates with **no token on the appliance**. The build side is
+`poc/incus-bootstrap.sh build_private_service <svc> <repo>` (and `build_dali_bridge` /
+`build_hardware_manager`), which clone via the deploy-key/token convention **at build time only**
+and publish `ctrlable-<svc>`; each service repo supplies a `deploy/provision-incus.sh` (contract)
+or falls back to a venv install. **freepbx is the exception that needs no token at all** — Sangoma
+ships a public installer (`build_freepbx`), which is why it's the easy one.
+
 ## 8. Networking
 
 Adopt the existing `vmbr0` (site/real LAN) and `vmbr1` (internal `198.18.0.0/24`, SPEC §20)

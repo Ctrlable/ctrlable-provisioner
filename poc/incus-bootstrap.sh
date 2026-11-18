@@ -333,13 +333,102 @@ build_service(){
 # proves the generic builder end-to-end.
 build_mosquitto(){ build_service mosquitto 'apt-get install -y -qq mosquitto >/dev/null; systemctl enable mosquitto >/dev/null 2>&1'; }
 
-partD_services(){ ensure_int_net; build_mosquitto; }
-# TODO(P2): the rest port through build_service with the same shape:
-#   go2rtc / matter-server  -> a release binary or pip install (like zwavejs/mosquitto),
-#   dali-bridge             -> host/builders/dali-bridge.sh + partB_usb-style USB passthrough,
-#   hardware-manager        -> host/builders/hardware-manager.sh,
-#   freepbx                 -> host/builders/freepbx.sh; SIP/RTP ports on the site NIC at deploy
-#                              (networking config, not an Incus blocker).
+# ---- FreePBX: the public-installer service (NO token needed) ----------------
+# FreePBX is the easy proprietary-ish one: Sangoma ships a PUBLIC installer, so the build
+# needs no GitHub credential at all. Heavy (~20-30 min: Asterisk + web stack). SIP/RTP port
+# exposure is a deploy-time networking concern on the site NIC, not an Incus build blocker.
+build_freepbx(){
+  local alias=ctrlable-freepbx
+  incus image show "$alias" >/dev/null 2>&1 && { log "image $alias exists"; return 0; }
+  incus delete -f freepbx-build 2>/dev/null || true
+  incus launch "$BASE_IMG" freepbx-build </dev/null; sleep 5
+  for i in $(seq 1 30); do incus exec freepbx-build -- getent hosts deb.debian.org >/dev/null 2>&1 && break; sleep 2; done
+  incus exec freepbx-build -- bash -c '
+    set -e; export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq; apt-get install -y -qq wget ca-certificates >/dev/null
+    # Sangoma public installer — this is WHY freepbx is the easy one (no private repo).
+    wget -qO /tmp/sng.sh https://github.com/FreePBX/sng_freepbx_debian_install/raw/master/sng_freepbx_debian_install.sh
+    bash /tmp/sng.sh 2>&1 | tail -8
+  '
+  incus stop freepbx-build </dev/null
+  incus publish freepbx-build --alias "$alias" </dev/null
+  incus delete -f freepbx-build </dev/null
+  log "built $alias"
+}
+
+# ---- Proprietary, self-updating services (dali-bridge, hardware-manager, …) -
+# These solve the deploy token the SAME way across projects (SPEC §7a):
+#   • APPLIANCE: no GitHub credential. The baked updater enrols with the
+#     provisioning_key handed in at deploy (deploy.py seeds it into the CT) and
+#     pulls releases from the Ctrlable Store by DEVICE TOKEN (the dali-bridge
+#     updater.py reference — catalog/download/jobs under X-Device-Token).
+#   • BUILD (here / CI only): the private source is cloned via the shared
+#     convention — an SSH deploy key at /etc/ctrlable/<svc>-deploy-key, or
+#     <SVC>_TOKEN (x-access-token). CI normally holds the token; a build host can
+#     carry the read-only deploy key. NEVER shipped onto the appliance.
+# The image bakes source + updater and publishes ctrlable-<svc>; deploy_template
+# launches it and the updater takes over install/update from there.
+build_private_service(){
+  local svc="$1" repo="$2" ref="${3:-main}" alias="ctrlable-$1" src="/tmp/${1}-src"
+  incus image show "$alias" >/dev/null 2>&1 && { log "image $alias exists"; return 0; }
+  local key="/etc/ctrlable/${svc}-deploy-key"
+  local tokvar; tokvar="$(printf '%s' "${svc//-/_}" | tr a-z A-Z)_TOKEN"
+  local token="${!tokvar:-}"
+  rm -rf "$src"
+  if [ -f "$key" ]; then
+    local ssh_url="git@github.com:${repo#https://github.com/}"; ssh_url="${ssh_url%.git}.git"
+    log "build_private_service $svc: clone via deploy key $key"
+    GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+      git clone --depth 1 --branch "$ref" "$ssh_url" "$src"
+  elif [ -n "$token" ]; then
+    log "build_private_service $svc: clone via \$$tokvar"
+    git clone --depth 1 --branch "$ref" "https://x-access-token:${token}@${repo#https://}" "$src"
+  else
+    log "build_private_service $svc: SKIP — no $key and no \$$tokvar on this build host."
+    log "  (BUILD-time credential only; the appliance self-updates from the Store, no token.)"
+    return 1
+  fi
+  incus delete -f "$svc-build" 2>/dev/null || true
+  incus launch "$BASE_IMG" "$svc-build" </dev/null; sleep 5
+  for i in $(seq 1 30); do incus exec "$svc-build" -- getent hosts deb.debian.org >/dev/null 2>&1 && break; sleep 2; done
+  tar -C "$src" --exclude=.git -cf - . | incus exec "$svc-build" -- bash -c "mkdir -p /opt/$svc-src && tar -C /opt/$svc-src -xf -"
+  # Prefer the repo's own Incus provisioner (the contract each service adds); else a
+  # venv install of the package. Either way the Store updater is what keeps it current.
+  if incus exec "$svc-build" -- test -x "/opt/$svc-src/deploy/provision-incus.sh"; then
+    incus exec "$svc-build" -- bash -c "cd /opt/$svc-src && SELF_UPDATE=1 deploy/provision-incus.sh"
+  else
+    log "build_private_service $svc: no deploy/provision-incus.sh — venv+updater fallback"
+    incus exec "$svc-build" -- bash -c "
+      set -e; export DEBIAN_FRONTEND=noninteractive
+      apt-get install -y -qq python3 python3-venv git ca-certificates >/dev/null
+      python3 -m venv /opt/$svc/.venv
+      /opt/$svc/.venv/bin/pip install -q -e /opt/$svc-src 2>/dev/null || \
+        /opt/$svc/.venv/bin/pip install -q /opt/$svc-src 2>/dev/null || true
+      mkdir -p /etc/ctrlable"
+  fi
+  incus stop "$svc-build" </dev/null
+  incus publish "$svc-build" --alias "$alias" </dev/null
+  incus delete -f "$svc-build" </dev/null
+  log "built $alias (self-updates from the Store by device token; provisioning_key seeded at deploy)"
+}
+
+build_dali_bridge(){ build_private_service dali-bridge "${DALI_BRIDGE_REPO:-https://github.com/Ctrlable/dali-bridge}" "${DALI_BRIDGE_REF:-main}"; }
+build_hardware_manager(){
+  # Honour the legacy env name the Proxmox builder uses (HW_MANAGER_TOKEN) as well
+  # as the derived HARDWARE_MANAGER_TOKEN, so one token works for both backends.
+  export HARDWARE_MANAGER_TOKEN="${HARDWARE_MANAGER_TOKEN:-${HW_MANAGER_TOKEN:-}}"
+  build_private_service hardware-manager "${HW_MANAGER_REPO:-https://github.com/Ctrlable/ctrlable-hardware-manager-src}" "${HW_MANAGER_REF:-main}"
+}
+
+# Build every mechanical + proprietary service image. The private ones self-skip with a clear
+# message when this build host has no deploy key/token (so a keyless run still builds the rest).
+partD_services(){
+  ensure_int_net
+  build_mosquitto
+  build_dali_bridge || true
+  build_hardware_manager || true
+  [ "${BUILD_FREEPBX:-0}" = 1 ] && build_freepbx || log "partD: freepbx skipped (set BUILD_FREEPBX=1; ~20-30min)"
+}
 
 main(){
   case "${1:-all}" in
@@ -348,8 +437,11 @@ main(){
     partB)  partB ;;
     partC)  partC_frigate ;;
     partD)  partD_services ;;
+    freepbx) ensure_int_net; build_freepbx ;;
+    dali-bridge) ensure_int_net; build_dali_bridge ;;
+    hardware-manager) ensure_int_net; build_hardware_manager ;;
     all)    stage1; partA; partB; partC_frigate; partD_services ;;
-    *) echo "usage: $0 [stage1|partA|partB|partC|partD|all]"; exit 2 ;;
+    *) echo "usage: $0 [stage1|partA|partB|partC|partD|freepbx|dali-bridge|hardware-manager|all]"; exit 2 ;;
   esac
   log "done: ${1:-all}"
 }
