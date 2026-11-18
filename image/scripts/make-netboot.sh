@@ -61,19 +61,18 @@ mkdir -p "$ov/etc/local.d" "$ov/etc/runlevels/default"
 cat > "$ov/etc/local.d/00-ctrlable-write.start" <<WRITER
 #!/bin/sh
 # Ctrlable Pro netboot writer — streams the appliance image to the LARGEST local disk, then
-# reboots INTO it only on a verified write. A failed/short write halts (poweroff) instead of
-# rebooting, so a blank box never falls into a netboot->fail->reboot loop.
-exec >/dev/ttyS0 2>&1
-echo "=============================================="
-echo " Ctrlable Pro network install (writer)"
-echo "=============================================="
+# reboots INTO it only on a verified write (>1GB). A failed/short write halts (poweroff) so a
+# blank box never loops. Progress is beaconed as HTTP GETs to the server (visible in its access
+# log) so the install is observable even when the guest serial console is not captured.
+exec >/dev/console 2>&1
 BASE="$BASE"
 IMGURL="\$BASE/ctrlable-pro.img.zst"
+beacon(){ wget -q -O /dev/null "\$BASE/BEACON/\$1" 2>/dev/null || curl -fs -o /dev/null "\$BASE/BEACON/\$1" 2>/dev/null || true; }
+beacon start
 set -x
-# zstd decompresses the stream; the image is --long compressed so decompress needs --long too.
-command -v zstd >/dev/null 2>&1 || { apk add --no-cache zstd || apk add zstd; }
-if ! command -v zstd >/dev/null 2>&1; then echo "FATAL: zstd unavailable — halting"; sleep 5; poweroff -f; fi
-zstd --version
+command -v zstd >/dev/null 2>&1 || { apk add --no-cache zstd >/dev/null 2>&1 || apk add zstd >/dev/null 2>&1; }
+beacon "zstd_bin=\$(command -v zstd 2>/dev/null | tr '/' '_')__ver=\$(zstd --version 2>&1 | tr ' /,()' '______')"
+if ! command -v zstd >/dev/null 2>&1; then beacon FATAL_no_zstd; sleep 5; poweroff -f; fi
 # Target = the LARGEST block device (by sectors); skip loop/rom/ram and the tiny iPXE boot ESP.
 DISK=""; max=0
 for d in /sys/block/*; do
@@ -83,17 +82,20 @@ for d in /sys/block/*; do
   if [ "\$sz" -gt "\$max" ]; then max=\$sz; DISK="/dev/\$n"; fi
 done
 [ -z "\$DISK" ] && DISK=/dev/vda
-echo "target disk: \$DISK (\$max sectors)"
-echo "streaming \$IMGURL -> \$DISK"
+beacon "disk=\$(echo \$DISK | tr '/' '_')__sectors=\$max"
 if command -v curl >/dev/null 2>&1; then DL="curl -fL \$IMGURL"; else DL="wget -O - \$IMGURL"; fi
+beacon "dl=\$(echo \$DL | tr ' /:.' '____')"
+# decompress smoke-test: pull a little, decompress, count bytes + capture any zstd error
+\$DL 2>/dev/null | head -c 4000000 | zstd -dc --long=31 2>/tmp/z.err | wc -c > /tmp/z.cnt
+beacon "smoke_out=\$(cat /tmp/z.cnt 2>/dev/null)__err=\$(cat /tmp/z.err 2>/dev/null | tr ' \n/,()' '______' | cut -c1-90)"
+# real write
 \$DL | zstd -dc --long=31 | dd of="\$DISK" bs=4M 2>/tmp/dd.err
-cat /tmp/dd.err
 bytes=\$(awk '/copied|bytes/{print \$1; exit}' /tmp/dd.err)
-echo "bytes written: \${bytes:-0}"
+beacon "write_bytes=\${bytes:-0}__dderr=\$(cat /tmp/dd.err 2>/dev/null | tr ' \n/,()' '______' | cut -c1-90)"
 if [ "\${bytes:-0}" -gt 1000000000 ]; then
-  sync; echo "WRITE OK (\$bytes bytes) — rebooting into the appliance in 5s"; sleep 5; reboot -f
+  sync; beacon RESULT_OK; echo "WRITE OK"; sleep 5; reboot -f
 else
-  echo "WRITE FAILED/short — halting (no reboot loop); inspect over serial"; sync; sleep 5; poweroff -f
+  sync; beacon RESULT_FAIL; echo "WRITE FAILED"; sleep 5; poweroff -f
 fi
 WRITER
 chmod +x "$ov/etc/local.d/00-ctrlable-write.start"
@@ -112,7 +114,7 @@ echo
 echo Ctrlable Pro network install — writing image to local disk
 echo base: \${base}
 echo
-kernel \${base}/alpine/vmlinuz-virt initrd=initramfs-virt modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_net quiet \\
+kernel \${base}/alpine/vmlinuz-virt initrd=initramfs-virt modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_net \\
   alpine_repo=$ALPINE_REPO modloop=\${base}/alpine/modloop-virt apkovl=\${base}/ctrlable-writer.apkovl.tar.gz \\
   ip=dhcp console=tty0 console=ttyS0,115200
 initrd \${base}/alpine/initramfs-virt
