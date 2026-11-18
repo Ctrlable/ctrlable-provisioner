@@ -32,14 +32,14 @@ if [ "$selected" = "A" ]; then set slotlabel="root-a"; else set slotlabel="root-
 
 menuentry "Ctrlable Pro ($selected)" {
     search --no-floppy --label --set=root $slotlabel
-    linux  /boot/vmlinuz  root=PARTLABEL=$slotlabel ro quiet systemd.machine_id=firstboot rauc.slot=$selected
-    initrd /boot/initrd.img
+    linux  /vmlinuz  root=PARTLABEL=$slotlabel ro quiet systemd.machine_id=firstboot rauc.slot=$selected
+    initrd /initrd.img
 }
 
 # Recovery: force the other slot (for a field tech at the console).
 menuentry "Ctrlable Pro — boot OTHER slot (recovery)" {
     if [ "$selected" = "A" ]; then set other="root-b"; else set other="root-a"; fi
     search --no-floppy --label --set=root $other
-    linux  /boot/vmlinuz  root=PARTLABEL=$other ro quiet
-    initrd /boot/initrd.img
+    linux  /vmlinuz  root=PARTLABEL=$other ro quiet
+    initrd /initrd.img
 }
