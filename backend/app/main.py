@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from .auth import auth_enabled, create_token, hash_password, require_auth, verify_password
 from .build import trigger_build
 from .config import get_settings
-from .deploy import deploy_instance, deploy_stack_async, deploy_templates_async
+from .deploy import deploy_instance, deploy_stack_async, deploy_templates_async, _synthetic_vmid
 from .drift import Severity
 from .drift_scan import scan_project
 from .manifest import load_all_manifests
@@ -1038,8 +1038,16 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
     guests = []
     for g in raw_guests:
         inst = instances.get(g.name)
+        try:
+            vmid = g.vmid
+        except (ValueError, TypeError):
+            # Incus addresses instances by NAME, so g.vmid (int(ref.id)) raises. Use the stable
+            # numeric id deploy.py records for the row, or synthesize the same one from the name,
+            # so this legacy vmid-keyed payload stays well-formed (the Map is name-driven anyway).
+            vmid = (inst["vmid"] if inst and inst["vmid"] is not None
+                    else _synthetic_vmid(g.name))
         guests.append({
-            "vmid": g.vmid,
+            "vmid": vmid,
             "hostname": g.name,
             "kind": g.kind,
             "status": g.status,
