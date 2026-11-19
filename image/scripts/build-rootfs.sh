@@ -93,9 +93,19 @@ LinkLocalAddressing=ipv6
 RequiredForOnline=routable
 NET
 
-echo "build-rootfs: enable services + apply host branding (in chroot)"
-chroot "$root" systemctl enable systemd-networkd systemd-resolved ssh incus rauc nginx \
-    ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good 2>/dev/null || true
+echo "build-rootfs: enable services + apply host branding"
+# Enable units OFFLINE with `systemctl --root=` (writes the [Install] symlinks against the image
+# tree, no running systemd needed). Do NOT use `chroot "$root" systemctl enable`: in an offline
+# mmdebstrap chroot there is no running PID 1 (and often no /proc), so it silently fails — and the
+# old `|| true` hid that, shipping an image with systemd-networkd AND ctrlable-firstboot DISABLED
+# while ifupdown's networking.service (pulled in as a dependency) won, so the box booted with NO
+# network and NO firstboot. Enable each unit individually so a D-Bus-activated/absent unit (rauc)
+# can't abort the rest, then mask ifupdown so it never fights the systemd-networkd br-lan bridge.
+for u in systemd-networkd systemd-networkd.socket systemd-resolved ssh incus nginx \
+         ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good; do
+  systemctl --root="$root" enable "$u" >/dev/null 2>&1 || echo "build-rootfs: WARN could not enable $u"
+done
+systemctl --root="$root" mask networking.service >/dev/null 2>&1 || true
 # branding: issue/motd/ssh banner get written; sshd reload + update-grub no-op in a chroot
 # (our hand-authored A/B grub.cfg from pack-image.sh is authoritative; GRUB_DISTRIBUTOR is cosmetic).
 chroot "$root" /opt/ctrlable/apply-branding.sh || true
