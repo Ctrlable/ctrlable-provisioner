@@ -16,8 +16,12 @@ grub-efi-amd64
 grub-efi-amd64-bin
 efibootmgr
 
-# RAUC (A/B OTA + rollback); grub-editenv ships in grub-common
+# RAUC (A/B OTA + rollback); grub-editenv ships in grub-common.
+# `rauc` is CLI-only in Debian 13 — the D-Bus service (rauc.service + de.pengutronix.rauc
+# activation) that `rauc status mark-good` and bundle installs go through lives in `rauc-service`.
+# Without it the slot is never marked good (A/B could roll back) and OTA installs fail.
 rauc
+rauc-service
 
 # containers + the data pool
 incus
