@@ -41,3 +41,8 @@ openssh-server
 curl
 jq
 less
+
+# orchestrator (HOST mode): the provisioner runs as a native host service. The venv (FastAPI /
+# uvicorn / deps) is copied in by install-orchestrator-host.sh; the runtime only needs the python3
+# interpreter the venv symlinks to. The container/LXC deployment (build-orchestrator.sh) is separate.
+python3

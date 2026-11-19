@@ -93,6 +93,11 @@ LinkLocalAddressing=ipv6
 RequiredForOnline=routable
 NET
 
+# Install the orchestrator INTO the host rootfs (host mode is the appliance default; firstboot
+# selects it). The container/LXC path (image/builders/build-orchestrator.sh) is separate and
+# unchanged for Proxmox + other appliances.
+"$here/builders/install-orchestrator-host.sh" "$root" "$repo"
+
 echo "build-rootfs: enable services + apply host branding"
 # Enable units OFFLINE with `systemctl --root=` (writes the [Install] symlinks against the image
 # tree, no running systemd needed). Do NOT use `chroot "$root" systemctl enable`: in an offline
@@ -102,7 +107,8 @@ echo "build-rootfs: enable services + apply host branding"
 # network and NO firstboot. Enable each unit individually so a D-Bus-activated/absent unit (rauc)
 # can't abort the rest, then mask ifupdown so it never fights the systemd-networkd br-lan bridge.
 for u in systemd-networkd systemd-networkd.socket systemd-resolved ssh incus nginx \
-         ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good; do
+         ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good ctrlable-orchestrator \
+         data-orchestrator.mount; do
   systemctl --root="$root" enable "$u" >/dev/null 2>&1 || echo "build-rootfs: WARN could not enable $u"
 done
 systemctl --root="$root" mask networking.service >/dev/null 2>&1 || true

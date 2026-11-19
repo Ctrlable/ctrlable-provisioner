@@ -37,7 +37,48 @@ grep -q '^kernel.dmesg_restrict' /etc/sysctl.conf 2>/dev/null || echo 'kernel.dm
 export DATA_POOL=data DATA_SOURCE=/dev/disk/by-partlabel/data
 /opt/ctrlable/incus-bootstrap.sh stage1
 
-# 3. Launch the orchestrator container, which self-enrols + deploys the manifest.
+# 3. Bring up the orchestrator. HOST mode (appliance default): run it as a NATIVE host service,
+#    with all mutable state on the `data` partition so it survives A/B slot swaps while the code
+#    stays in the immutable A/B root. CONTAINER mode (ORCHESTRATOR_MODE=container, e.g. Proxmox or
+#    another appliance): launch it as an LXC — the legacy path, unchanged.
+ORCHESTRATOR_MODE="${ORCHESTRATOR_MODE:-host}"
+if [ "$ORCHESTRATOR_MODE" = host ]; then
+  log "orchestrator: HOST mode (native service; state on /data/orchestrator, survives A/B)"
+  # Dedicated btrfs subvolume on the data partition for orchestrator state (DB, .env, enrol/WG
+  # keys), mounted at /data/orchestrator by data-orchestrator.mount (baked in both slots). The
+  # subvolume lives alongside Incus's own subvolumes on the same `data` filesystem — create it once.
+  if ! btrfs subvolume show /data/orchestrator >/dev/null 2>&1; then
+    tmp=$(mktemp -d)
+    if mount -o subvolid=5 /dev/disk/by-partlabel/data "$tmp" 2>/dev/null; then
+      btrfs subvolume create "$tmp/orchestrator" 2>/dev/null || mkdir -p "$tmp/orchestrator"
+      umount "$tmp"
+    fi
+    rmdir "$tmp" 2>/dev/null || true
+  fi
+  mkdir -p /data/orchestrator
+  systemctl start data-orchestrator.mount 2>/dev/null || \
+    mount -o subvol=orchestrator /dev/disk/by-partlabel/data /data/orchestrator 2>/dev/null || true
+  # The code's backend/.env is a symlink to this file; write it once (jwt_secret persists so logins
+  # survive restarts). platform.py reads it to self-enrol + fetch the release manifest.
+  if [ ! -f /data/orchestrator/.env ]; then
+    cat > /data/orchestrator/.env <<ENV
+provider=incus
+incus_remote=
+db_path=/data/orchestrator/ctrlable.db
+jwt_secret=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+provisioning_key=${PROVISIONING_KEY:-}
+portal_url=${PORTAL_URL:-https://portal.ctrlable.com}
+release=${RELEASE:-}
+ENV
+    chmod 600 /data/orchestrator/.env
+  fi
+  systemctl restart ctrlable-orchestrator 2>/dev/null || \
+    log "note: ctrlable-orchestrator deferred (starts next boot once /data/orchestrator/.env exists)"
+  log "orchestrator up as a host service on :8000; it self-enrols + deploys the manifest"
+
+else
+  # --- CONTAINER / LXC mode (Proxmox + other appliances; legacy path, unchanged) ---
+  log "orchestrator: CONTAINER mode"
 if incus info "$ORCH_NAME" >/dev/null 2>&1; then
   log "orchestrator already present; ensuring it is running"
   incus start "$ORCH_NAME" 2>/dev/null || true
@@ -103,6 +144,7 @@ ENV
   incus exec "$ORCH_NAME" -- systemctl restart ctrlable-provisioner 2>/dev/null || \
       log "note: orchestrator service restart skipped (image may autostart it)"
 fi
+fi   # end ORCHESTRATOR_MODE branch
 
 log "orchestrator up; it now self-enrols + deploys the manifest (platform.py/deploy.py)"
 
