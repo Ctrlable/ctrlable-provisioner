@@ -1101,21 +1101,42 @@ async def incus_events(_: str | None = Depends(require_auth)):
     push and fits StreamingResponse). Each `data:` line is one JSON event. The generator is
     cancelled when the client disconnects, which closes the underlying poll loop.
 
-    TODO(P6.1): also multiplex our deploy `[PHASE] n/tot msg` markers (deploy.py) onto this
-    stream so the UI shows deploy progress as operations. Hook point: have deploy_instance push
-    phase dicts onto an asyncio.Queue that this generator drains alongside rest.events().
+    Multiplexes TWO sources onto one stream: the Incus change feed (rest.events()) and our own
+    deploy progress (`deploy-phase` / `deploy-result` markers from deploy.py, via progress_bus).
+    Both are pumped into a single queue so the UI sees fleet changes and deploy progress in order.
+    The generator is cancelled when the client disconnects, which tears down both pumps.
     """
     rest = _incus_rest()
+    from . import progress_bus
 
     async def gen():
         yield ": ctrlable-orchestrator event stream\n\n"  # SSE comment / preamble
+        q: asyncio.Queue = asyncio.Queue(maxsize=512)
+        sub = progress_bus.subscribe()
+
+        async def pump_incus():
+            try:
+                async for ev in rest.events():
+                    await q.put(ev)
+            except Exception as e:  # noqa: BLE001 — surface, keep the stream alive
+                await q.put({"type": "error", "error": str(e)})
+
+        async def pump_progress():
+            while True:
+                await q.put(await sub.get())
+
+        t_incus = asyncio.create_task(pump_incus())
+        t_prog = asyncio.create_task(pump_progress())
         try:
-            async for ev in rest.events():
+            while True:
+                ev = await q.get()
                 yield f"data: {json.dumps(ev)}\n\n"
         except asyncio.CancelledError:  # client disconnected
             raise
-        except Exception as e:  # noqa: BLE001 — surface, don't 500 the stream
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            for t in (t_incus, t_prog):
+                t.cancel()
+            progress_bus.unsubscribe(sub)
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",
@@ -1295,18 +1316,32 @@ async def incus_console(ws: WebSocket, name: str):
         await ws.send_text(f"\r\n[console connect failed: {e}]\r\n"); await ws.close(); return
 
     async def browser_to_incus():
+        # Protocol: BINARY frames are stdin (keystrokes); TEXT frames are control messages
+        # (JSON). The only control today is {"type":"resize","cols":C,"rows":R}, forwarded to the
+        # Incus 'control' WS as a window-resize so the PTY tracks the browser terminal size.
         try:
             while True:
                 msg = await ws.receive()
                 if msg.get("type") == "websocket.disconnect":
                     break
                 data = msg.get("bytes")
-                if data is None:
-                    t = msg.get("text")
-                    if t is None:
-                        continue
-                    data = t.encode()
-                await iws.send(data)
+                if data is not None:
+                    await iws.send(data)
+                    continue
+                t = msg.get("text")
+                if t is None:
+                    continue
+                try:
+                    ctl = json.loads(t)
+                except (ValueError, TypeError):
+                    await iws.send(t.encode())  # not JSON — treat as stdin (back-compat)
+                    continue
+                if ctl.get("type") == "resize" and ictl is not None:
+                    await ictl.send(json.dumps({
+                        "command": "window-resize",
+                        "args": {"width": str(int(ctl.get("cols", 80))),
+                                 "height": str(int(ctl.get("rows", 24)))},
+                    }))
         except Exception:  # noqa: BLE001 — client gone / stream closed
             pass
 

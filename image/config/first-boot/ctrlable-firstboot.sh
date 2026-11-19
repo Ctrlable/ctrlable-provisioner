@@ -50,8 +50,13 @@ else
     incus image import "$baked" --alias "$ORCHESTRATOR_IMAGE"
   fi
   if incus image alias list 2>/dev/null | grep -q "$ORCHESTRATOR_IMAGE"; then
-    log "launch $ORCH_NAME from $ORCHESTRATOR_IMAGE"
-    incus launch "$ORCHESTRATOR_IMAGE" "$ORCH_NAME"
+    # PRIVILEGED on purpose: the orchestrator is the host CONTROL PLANE. It already holds the host
+    # Incus socket (below) — host-root-equivalent: it can create/configure/destroy every instance
+    # and attach host hardware. Unprivileged adds no real isolation on top of that, while blocking
+    # host-level reads (bind-mounting the host /proc for true host metrics). So run it privileged,
+    # consistent with Ctrlable Pro itself. See SPEC §16.1.
+    log "launch $ORCH_NAME from $ORCHESTRATOR_IMAGE (privileged host control plane)"
+    incus launch "$ORCHESTRATOR_IMAGE" "$ORCH_NAME" -c security.privileged=true
   else
     # The orchestrator image is produced by image/builders/build-orchestrator.sh and baked at
     # /opt/ctrlable/images/<name>.tar.zst (or pulled). Validated 2026-11-17: launched this way it
@@ -80,8 +85,11 @@ else
 
   # Bind the host's /proc (read-only) into the orchestrator so its dashboard host card reflects
   # the PHYSICAL host, not the container (incus_provider.node_health reads /host/proc when present).
+  # Works now that the orchestrator is privileged (an unprivileged container can't mount /proc).
   incus config device add "$ORCH_NAME" hostproc disk source=/proc path=/host/proc readonly=true 2>/dev/null \
       || log "note: could not bind host /proc into the orchestrator (host metrics will show the container)"
+  # (The host's real NAME comes from the Incus API's environment.server_name, read over the socket
+  # by node_health — /proc's hostname is namespace-virtualized, so no mount helps there.)
 
   # Inject enrol config so the orchestrator's platform.py can self-enrol with the portal.
   incus exec "$ORCH_NAME" -- mkdir -p /etc/ctrlable

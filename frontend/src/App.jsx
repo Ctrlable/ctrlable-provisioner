@@ -1477,6 +1477,7 @@ function PlatformTab() {
 // ---------------------------------------------------------------------------
 function FleetTab() {
   const [instances, setInstances] = useState({})
+  const [deploys, setDeploys] = useState({})       // hostname -> {index,total,label} while deploying
   const [live, setLive] = useState(false)
   const [err, setErr]   = useState(null)
   const [selected, setSelected] = useState(null)   // instance name for the detail drawer
@@ -1491,6 +1492,13 @@ function FleetTab() {
         setInstances(p => ({ ...p, [evt.name]: evt.instance }))
       } else if (evt.type === 'instance-removed') {
         setInstances(p => { const n = { ...p }; delete n[evt.name]; return n })
+      } else if (evt.type === 'deploy-phase') {
+        const k = evt.hostname || evt.name
+        setDeploys(p => ({ ...p, [k]: { index: evt.index, total: evt.total, label: evt.label } }))
+      } else if (evt.type === 'deploy-result') {
+        const k = evt.hostname || evt.name
+        setDeploys(p => ({ ...p, [k]: { done: true, ok: evt.ok } }))
+        setTimeout(() => setDeploys(p => { const n = { ...p }; delete n[k]; return n }), 6000)
       } else if (evt.type === 'error') { setErr(evt.error) }
     }
     const run = async () => {
@@ -1534,6 +1542,22 @@ function FleetTab() {
         <p>Instances on this appliance, live over the Incus event stream — {list.length} total, {running} running.</p>
       </div></div>
       {err && !live && <div className="banner error">Live stream: {err} — reconnecting…</div>}
+      {Object.keys(deploys).length > 0 && (
+        <div className="deploy-strip">
+          {Object.entries(deploys).map(([host, d]) => (
+            <div className="deploy-row" key={host}>
+              <span className="dr-host mono">{host}</span>
+              {d.done
+                ? <span className={`pill ${d.ok ? 'ok' : 'crit'}`}>{d.ok ? 'deployed' : 'failed'}</span>
+                : <>
+                    <div className="dr-bar"><div className="dr-fill"
+                      style={{ width: `${d.total ? Math.round((d.index / d.total) * 100) : 0}%` }} /></div>
+                    <span className="dr-label">{d.index}/{d.total} · {d.label}</span>
+                  </>}
+            </div>
+          ))}
+        </div>
+      )}
       {list.length === 0
         ? <div className="loading">{live ? 'No instances yet.' : 'Connecting to the Incus event stream…'}</div>
         : <div className="fleet-grid">
@@ -1776,7 +1800,8 @@ function InstanceDrawer({ name, onClose }) {
 function TerminalPanel({ name }) {
   const ref = useRef(null)
   useEffect(() => {
-    let term, ws, disposed = false
+    let term, ws, ro, disposed = false
+    const enc = new TextEncoder()
     ;(async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
         import('@xterm/xterm'), import('@xterm/addon-fit'),
@@ -1793,13 +1818,25 @@ function TerminalPanel({ name }) {
       u.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
       u.search = `?token=${encodeURIComponent(getToken() || '')}&cols=${term.cols}&rows=${term.rows}`
       ws = new WebSocket(u.toString()); ws.binaryType = 'arraybuffer'
-      ws.onopen = () => term.focus()
+      ws.onopen = () => { term.focus(); try { fit.fit() } catch { /* ignore */ } }
       ws.onmessage = (e) => term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data))
       ws.onclose = () => { if (!disposed) term.write('\r\n\x1b[2m[session closed]\x1b[0m\r\n') }
       ws.onerror = () => { if (!disposed) term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n') }
-      term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d) })
+      // Keystrokes ride as BINARY (stdin); resizes ride as a TEXT control frame.
+      term.onData((d) => { if (ws && ws.readyState === 1) ws.send(enc.encode(d)) })
+      term.onResize(({ cols, rows }) => {
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+      })
+      // Re-fit (and thus re-send size) whenever the drawer/terminal box changes size.
+      ro = new ResizeObserver(() => { try { fit.fit() } catch { /* ignore */ } })
+      ro.observe(ref.current)
     })()
-    return () => { disposed = true; try { ws && ws.close() } catch { /* */ } try { term && term.dispose() } catch { /* */ } }
+    return () => {
+      disposed = true
+      try { ro && ro.disconnect() } catch { /* */ }
+      try { ws && ws.close() } catch { /* */ }
+      try { term && term.dispose() } catch { /* */ }
+    }
   }, [name])
   return <div className="term" ref={ref} />
 }

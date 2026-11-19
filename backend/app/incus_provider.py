@@ -90,6 +90,26 @@ class IncusProvider(Provider):
 
     # -- inventory / health ---------------------------------------------------
 
+    def _incus_server_name(self) -> "str | None":
+        """Host name from the Incus API: environment.server_name defaults to the host's hostname.
+        Blocking GET /1.0 over the unix socket (node_health is sync, so no async REST client here).
+        Returns None on any error — the caller falls back to self.node."""
+        import http.client
+        import socket as _socket
+        try:
+            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s.settimeout(3.0)
+            s.connect("/var/lib/incus/unix.socket")
+            conn = http.client.HTTPConnection("incus")
+            conn.sock = s
+            conn.request("GET", "/1.0")
+            data = json.loads(conn.getresponse().read())
+            conn.close()
+            env = (data.get("metadata") or {}).get("environment") or {}
+            return env.get("server_name") or None
+        except Exception:  # noqa: BLE001 — host name is cosmetic; never fail node_health over it
+            return None
+
     def node_health(self) -> NodeHealth:
         # The orchestrator runs in a container, so /proc here is the CONTAINER's. When the host's
         # /proc is bind-mounted in (firstboot adds `hostproc` -> /host/proc, read-only), read that
@@ -126,11 +146,11 @@ class IncusProvider(Provider):
         disk_total = st.f_blocks * st.f_frsize
         disk_free = st.f_bavail * st.f_frsize
 
-        try:
-            with open(f"{proc}/sys/kernel/hostname") as fh:
-                node = fh.read().strip() or self.node
-        except OSError:
-            node = self.node
+        # Hostname is special: /proc/sys/kernel/hostname is UTS-namespace-virtualized, so a
+        # bind-mounted host /proc still reports the CONTAINER's name (unlike meminfo/uptime, which
+        # are not namespaced and read true). The host's real name is the Incus API's
+        # environment.server_name (defaults to the host hostname), read over the socket.
+        node = self._incus_server_name() or self.node
 
         with open(f"{proc}/uptime") as fh:
             uptime = int(float(fh.readline().split()[0]))

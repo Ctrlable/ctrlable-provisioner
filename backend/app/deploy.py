@@ -11,6 +11,8 @@ import asyncio
 import re
 from typing import TYPE_CHECKING
 
+from .progress_bus import publish as _publish_progress
+
 if TYPE_CHECKING:
     from .config import Settings
     from .state import StateDB
@@ -149,6 +151,11 @@ async def _ssh_deploy(
                 kind = m.group(3)
 
         p = _PHASE_RE.search(line)
+        if p:
+            # Multiplex onto the live SSE stream (works even with no db row behind it).
+            _publish_progress({"type": "deploy-phase", "hostname": hostname, "name": name,
+                               "index": int(p.group(1)), "total": int(p.group(2)),
+                               "label": p.group(3).strip()})
         if p and db is not None:
             # Flush first so the log tail and the phase the UI renders agree.
             await _flush()
@@ -167,9 +174,13 @@ async def _ssh_deploy(
     await _flush()
     await proc.wait()
     if proc.returncode != 0:
+        _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name, "ok": False})
         raise RuntimeError(f"deploy failed for {name!r} (exit {proc.returncode})")
     if vmid is None:
+        _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name, "ok": False})
         raise RuntimeError(f"deploy for {name!r} produced no [RESULT] line")
+    _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name,
+                       "ok": True, "vmid": vmid, "kind": kind})
     return vmid, kind
 
 
@@ -203,6 +214,9 @@ async def _incus_deploy(
 
     def on_phase(n: int, tot: int, msg: str) -> None:
         print(f"[deploy/{name}] [PHASE] {n}/{tot} {msg}", flush=True)
+        # Runs in a worker thread (asyncio.to_thread); publish() hops back to the loop safely.
+        _publish_progress({"type": "deploy-phase", "hostname": hostname, "name": name,
+                           "index": n, "total": tot, "label": msg})
         if db is not None:
             try:
                 db.update_instance_phase(hostname, n, tot, msg)
@@ -218,9 +232,12 @@ async def _incus_deploy(
     except Exception as exc:  # surface the incus error into the log like _ssh_deploy
         if db is not None:
             await asyncio.to_thread(db.append_instance_log, hostname, f"\n[ERROR] {exc}\n")
+        _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name, "ok": False})
         raise RuntimeError(f"incus deploy failed for {name!r}: {exc}") from exc
 
     print(f"[deploy/{name}] [RESULT] name={hostname} vmid={vmid} kind=lxc", flush=True)
+    _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name,
+                       "ok": True, "vmid": vmid, "kind": "lxc"})
     return vmid, "lxc"
 
 
