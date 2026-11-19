@@ -25,6 +25,9 @@ ND="$WORK/netboot"
 # Alpine netboot writer source (override ALPINE_VER / ALPINE_MIRROR for an air-gapped mirror).
 ALPINE_VER="${ALPINE_VER:-3.21}"
 ALPINE_ARCH="${ALPINE_ARCH:-x86_64}"
+# lts = full bare-metal driver set (physical NICs/NVMe/AHCI). virt = VM-only: it hangs on a real
+# mini-PC because the physical NIC driver is absent, so it can never fetch modloop/apkovl.
+ALPINE_FLAVOR="${ALPINE_FLAVOR:-lts}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 ALPINE_NB="$ALPINE_MIRROR/v$ALPINE_VER/releases/$ALPINE_ARCH/netboot"
 ALPINE_REPO="$ALPINE_MIRROR/v$ALPINE_VER/main"
@@ -48,7 +51,7 @@ fi
 log "image: $(du -h "$zimg" | cut -f1) compressed (from $(du -h "$IMG" | cut -f1))"
 
 # 2. Fetch the Alpine netboot writer kernel/initramfs/modloop (cached).
-for f in "vmlinuz-virt" "initramfs-virt" "modloop-virt"; do
+for f in "vmlinuz-$ALPINE_FLAVOR" "initramfs-$ALPINE_FLAVOR" "modloop-$ALPINE_FLAVOR"; do
   if [ ! -s "$ND/alpine/$f" ]; then
     log "fetch $ALPINE_NB/$f"
     curl -fL# "$ALPINE_NB/$f" -o "$ND/alpine/$f"
@@ -118,10 +121,10 @@ echo
 echo Ctrlable Pro network install — writing image to local disk
 echo base: \${base}
 echo
-kernel \${base}/alpine/vmlinuz-virt initrd=initramfs-virt modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_net \\
-  alpine_repo=$ALPINE_REPO modloop=\${base}/alpine/modloop-virt apkovl=\${base}/ctrlable-writer.apkovl.tar.gz \\
-  ip=dhcp console=tty0 console=ttyS0,115200
-initrd \${base}/alpine/initramfs-virt
+kernel \${base}/alpine/vmlinuz-$ALPINE_FLAVOR initrd=initramfs-$ALPINE_FLAVOR modules=loop,squashfs,sd-mod,usb-storage,nvme,ahci,ata_piix,virtio_blk,virtio_net,virtio_scsi \\
+  alpine_repo=$ALPINE_REPO modloop=\${base}/alpine/modloop-$ALPINE_FLAVOR apkovl=\${base}/ctrlable-writer.apkovl.tar.gz \\
+  ip=dhcp console=ttyS0,115200 console=tty0
+initrd \${base}/alpine/initramfs-$ALPINE_FLAVOR
 boot
 IPXE
 log "ipxe: $ND/boot.ipxe"
