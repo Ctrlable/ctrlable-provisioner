@@ -1978,7 +1978,9 @@ export default function App() {
       </div>
 
       {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
-      {configGuest   && <GuestConfigDrawer guest={configGuest} onClose={() => setConfigGuest(null)} onRefresh={loadDashboard} />}
+      {configGuest   && (dashboard?.provider === 'incus'
+        ? <InstanceDrawer name={configGuest.hostname} onClose={() => { setConfigGuest(null); loadDashboard() }} />
+        : <GuestConfigDrawer guest={configGuest} onClose={() => setConfigGuest(null)} onRefresh={loadDashboard} />)}
     </>
   )
 }

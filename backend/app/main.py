@@ -1062,6 +1062,7 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
 
     return {
         "configured": True,
+        "provider": (settings.provider or "proxmox").lower(),
         "host": {
             "node": host_health.node,
             "cpu": host_health.cpu,
