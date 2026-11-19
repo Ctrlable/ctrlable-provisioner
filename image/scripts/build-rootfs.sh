@@ -61,12 +61,36 @@ else
   echo "build-rootfs: WARN no keys/dev-cert.pem -> /etc/rauc/keyring.pem missing (run 'make keys' or supply prod cert)"
 fi
 
-# primary NIC: DHCP via systemd-networkd
+# LAN bridge (the Proxmox vmbr0 equivalent): enslave the physical NIC to br-lan so the fleet's
+# bridged NICs are first-class on the SITE LAN — instances pull 172.16.x from LAN DHCP instead of
+# sitting behind incusbr0 NAT (Ctrlable Pro needs LAN visibility for mDNS/SSDP/HomeKit/Matter +
+# direct device access). The HOST itself DHCPs on the bridge. STP/forward-delay off: a single-uplink
+# appliance, so skip the ~30 s listening delay before carrier. The bridge inherits the enslaved
+# NIC's MAC (kernel default) → stable DHCP lease.
+install -D -m0644 /dev/stdin "$root/etc/systemd/network/05-br-lan.netdev" <<'NETDEV'
+[NetDev]
+Name=br-lan
+Kind=bridge
+[Bridge]
+STP=false
+ForwardDelaySec=0
+NETDEV
+# physical NIC: no IP of its own — it is a bridge port
 install -D -m0644 /dev/stdin "$root/etc/systemd/network/10-wan.network" <<'NET'
 [Match]
 Name=en* eth*
 [Network]
+Bridge=br-lan
+NET
+# the bridge carries the host's LAN address (DHCP)
+install -D -m0644 /dev/stdin "$root/etc/systemd/network/20-br-lan.network" <<'NET'
+[Match]
+Name=br-lan
+[Network]
 DHCP=yes
+LinkLocalAddressing=ipv6
+[Link]
+RequiredForOnline=routable
 NET
 
 echo "build-rootfs: enable services + apply host branding (in chroot)"

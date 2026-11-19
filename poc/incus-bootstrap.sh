@@ -66,6 +66,23 @@ stage1(){
   incus profile device set default root pool="$DATA_POOL" </dev/null 2>/dev/null \
     || incus profile device add default root disk path=/ pool="$DATA_POOL" </dev/null
   log "stage1: default root pool = $(incus profile device get default root pool)"
+
+  # Fleet primary NIC on the LAN BRIDGE (br-lan), NOT incusbr0 NAT: instances become first-class
+  # on the site LAN (172.16.x via LAN DHCP) — the Proxmox vmbr0 model that Ctrlable Pro needs for
+  # mDNS/SSDP/HomeKit/Matter discovery + direct device access. `incus admin init --minimal` leaves
+  # the default eth0 on incusbr0; br-lan is created by systemd-networkd at boot (05-br-lan.netdev),
+  # so wait for it, then repoint. (incusbr-int stays the separate internal backplane; incusbr0
+  # remains defined but unused.)
+  LAN_BRIDGE="${LAN_BRIDGE:-br-lan}"
+  for _ in $(seq 1 30); do ip link show "$LAN_BRIDGE" >/dev/null 2>&1 && break; sleep 1; done
+  if ip link show "$LAN_BRIDGE" >/dev/null 2>&1; then
+    log "stage1: default eth0 -> bridged $LAN_BRIDGE (site LAN, not incusbr0 NAT)"
+    incus profile device remove default eth0 </dev/null 2>/dev/null || true
+    incus profile device add default eth0 nic nictype=bridged parent="$LAN_BRIDGE" name=eth0 </dev/null \
+      || log "stage1: WARN could not attach default eth0 to $LAN_BRIDGE — fleet stays NAT'd"
+  else
+    log "stage1: WARN $LAN_BRIDGE absent — fleet stays on incusbr0 NAT (no LAN addresses)"
+  fi
 }
 
 # ---- internal backplane network --------------------------------------------
