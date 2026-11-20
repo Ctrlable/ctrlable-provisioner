@@ -45,10 +45,14 @@ openssl req -newkey rsa:4096 -nodes \
   -keyout "$dir/signing-key.pem" -out "$dir/signing.csr" \
   -subj "/O=$ORG/CN=Ctrlable Pro OTA Signer" >/dev/null 2>&1
 chmod 600 "$dir/signing-key.pem"
-# Leaf: NOT a CA, extendedKeyUsage=codeSigning (RAUC/CMS). Signed by the root above.
+# Leaf: NOT a CA. extendedKeyUsage = codeSigning (intent) + emailProtection. The emailProtection is
+# REQUIRED, not cosmetic: RAUC verifies bundles with OpenSSL CMS, whose default purpose is S/MIME
+# signing — a codeSigning-ONLY leaf is rejected as "unsuitable certificate purpose". Including
+# emailProtection (non-critical EKU) makes the leaf pass RAUC's DEFAULT verification everywhere
+# (box install + `rauc info`) with no per-host check-purpose config. Signed by the root above.
 openssl x509 -req -in "$dir/signing.csr" -days "$LEAF_DAYS" \
   -CA "$dir/ca-cert.pem" -CAkey "$dir/ca-key.pem" -CAcreateserial \
-  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n') \
+  -extfile <(printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning,emailProtection\n') \
   -out "$dir/signing-leaf.pem" >/dev/null 2>&1
 # RAUC_CERT must carry the full chain (leaf THEN ca) so verification works even without intermediates on the box.
 cat "$dir/signing-leaf.pem" "$dir/ca-cert.pem" > "$dir/signing-cert.pem"
