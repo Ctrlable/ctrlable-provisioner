@@ -31,6 +31,9 @@ install -D -m0644 "$here/config/first-boot/ctrlable-firstboot.service" "$root/et
 install -D -m0644 "$here/config/first-boot/ctrlable-mark-good.service" "$root/etc/systemd/system/ctrlable-mark-good.service"
 install -D -m0755 "$here/config/first-boot/ctrlable-host-enroll.sh"      "$root/opt/ctrlable/ctrlable-host-enroll.sh"
 install -D -m0644 "$here/config/first-boot/ctrlable-host-enroll.service" "$root/etc/systemd/system/ctrlable-host-enroll.service"
+# self-heal: a timer that re-enrols when the WG handshake goes stale (portal migration resilience)
+install -D -m0644 "$here/config/first-boot/ctrlable-host-enroll-heal.service" "$root/etc/systemd/system/ctrlable-host-enroll-heal.service"
+install -D -m0644 "$here/config/first-boot/ctrlable-host-enroll-heal.timer"   "$root/etc/systemd/system/ctrlable-host-enroll-heal.timer"
 # dealer claim code display (CLI + login banner)
 install -D -m0755 "$here/config/first-boot/ctrlable-claim"               "$root/usr/local/bin/ctrlable-claim"
 install -D -m0644 "$here/config/first-boot/ctrlable-claim-profile.sh"    "$root/etc/profile.d/ctrlable-claim.sh"
@@ -154,7 +157,7 @@ echo "build-rootfs: enable services + apply host branding"
 # network and NO firstboot. Enable each unit individually so a D-Bus-activated/absent unit (rauc)
 # can't abort the rest, then mask ifupdown so it never fights the systemd-networkd br-lan bridge.
 for u in systemd-networkd systemd-networkd.socket systemd-resolved ssh incus nginx \
-         ctrlable-firstboot ctrlable-host-enroll ctrlable-mark-good ctrlable-orchestrator \
+         ctrlable-firstboot ctrlable-host-enroll ctrlable-host-enroll-heal.timer ctrlable-mark-good ctrlable-orchestrator \
          data-orchestrator.mount; do
   systemctl --root="$root" enable "$u" >/dev/null 2>&1 || echo "build-rootfs: WARN could not enable $u"
 done

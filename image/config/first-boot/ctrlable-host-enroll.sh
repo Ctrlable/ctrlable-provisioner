@@ -10,6 +10,24 @@
 set -uo pipefail
 log(){ echo "[host-enroll] $*"; }
 
+# MODE: "boot" (default, run once at boot) or "heal" (periodic timer). In heal mode a tunnel that is
+# merely "interface up" is NOT trusted — we check the WireGuard HANDSHAKE age and re-enrol if it has
+# gone stale. This is what lets a fielded box self-heal onto a MIGRATED portal (new WG endpoint/key):
+# the portal's /v1/auto-enroll hands back a fresh wg_config, which we rewrite + bring up. Boot mode
+# keeps the cheap "iface up = good" check (a fresh boot may not have handshaked yet; the timer heals).
+MODE="${1:-boot}"
+STALE_SECS="${CTRLABLE_WG_STALE_SECS:-180}"   # no handshake within this window (heal mode) => re-enrol
+
+# handshake_fresh <iface>: 0 (true) iff some peer handshaked within STALE_SECS. `wg show … latest-
+# handshakes` prints "<pubkey>\t<epoch>"; 0 = never.
+handshake_fresh(){
+  local ifc="$1" now newest=0 _pk hs
+  now=$(date +%s)
+  while read -r _pk hs; do [ "${hs:-0}" -gt "$newest" ] && newest="$hs"; done \
+    < <(wg show "$ifc" latest-handshakes 2>/dev/null)
+  [ "$newest" -gt 0 ] && [ $((now - newest)) -le "$STALE_SECS" ]
+}
+
 CONF=/etc/ctrlable/appliance.conf
 # shellcheck disable=SC1090
 [ -f "$CONF" ] && . "$CONF" || { log "no $CONF — skipping host VPN enrol"; exit 0; }
@@ -23,15 +41,29 @@ STATE_DIR=/var/lib/ctrlable
 STATE="$STATE_DIR/host-enroll.conf"
 install -d -m0700 "$WG_DIR"; install -d -m0755 "$STATE_DIR"
 
-# Already enrolled? Ensure the tunnel is up, then exit.
+# Already enrolled? Ensure the tunnel is healthy, then exit. In heal mode "healthy" means a fresh
+# handshake; a stale one (dead endpoint after a portal migration) falls through to re-enrol below.
 if [ -f "$STATE" ]; then
   # shellcheck disable=SC1090
   . "$STATE"
   if ip link show "${WG_IFACE:-}" >/dev/null 2>&1; then
-    log "already enrolled on ${WG_IFACE} (${TUNNEL_IP:-?}); tunnel up"; exit 0
-  fi
-  if [ -n "${WG_IFACE:-}" ] && wg-quick up "$WG_IFACE" >/dev/null 2>&1; then
-    log "already enrolled; brought ${WG_IFACE} back up (${TUNNEL_IP:-?})"; exit 0
+    if [ "$MODE" = heal ]; then
+      if handshake_fresh "$WG_IFACE"; then
+        log "heal: ${WG_IFACE} (${TUNNEL_IP:-?}) handshake fresh (<=${STALE_SECS}s) — healthy"; exit 0
+      fi
+      log "heal: ${WG_IFACE} up but handshake STALE (>${STALE_SECS}s) — re-enrolling to refresh endpoint/config"
+      # fall through to re-enrol (portal may have moved / rotated its WG key)
+    else
+      log "already enrolled on ${WG_IFACE} (${TUNNEL_IP:-?}); tunnel up"; exit 0
+    fi
+  elif [ -n "${WG_IFACE:-}" ] && wg-quick up "$WG_IFACE" >/dev/null 2>&1; then
+    if [ "$MODE" != heal ]; then
+      log "already enrolled; brought ${WG_IFACE} back up (${TUNNEL_IP:-?})"; exit 0
+    fi
+    sleep 3
+    if handshake_fresh "$WG_IFACE"; then log "heal: ${WG_IFACE} back up + handshaking"; exit 0; fi
+    log "heal: ${WG_IFACE} up but not handshaking — re-enrolling"
+    # fall through to re-enrol
   fi
 fi
 
@@ -40,7 +72,8 @@ MAC=$(cat "/sys/class/net/$IFACE/address" 2>/dev/null | tr '[:lower:]' '[:upper:
 HN=$(hostname 2>/dev/null || echo ctrlable-host)
 req=$(printf '{"mac_address":"%s","platform":"debian-host","hostname":"%s","device_name":"%s (host)"}' "$MAC" "$HN" "$HN")
 
-attempt=0; max=20; resp=""
+# boot: persist through a slow network (up to ~5min). heal: bail fast — the timer retries soon.
+attempt=0; resp=""; [ "$MODE" = heal ] && max=3 || max=20
 while :; do
   attempt=$((attempt+1))
   if resp=$(curl -fsSk --max-time 30 -X POST "$PORTAL_URL/v1/auto-enroll" \
