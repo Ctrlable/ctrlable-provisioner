@@ -1360,6 +1360,38 @@ function ProvisionerCard() {
 }
 
 // ---------------------------------------------------------------------------
+// Dealer claim — shows this appliance's claim code + a QR that deep-links the
+// portal claim page, so a dealer can claim it to their client without console access.
+// ---------------------------------------------------------------------------
+function ClaimCard() {
+  const [c, setC] = useState(null)
+  useEffect(() => {
+    apiFetch('/api/appliance/claim').then(r => r.json()).then(setC).catch(() => setC({ available: false }))
+  }, [])
+  if (!c || !c.available) return null
+  return (
+    <div className="card">
+      <div className="hd"><h2>Dealer claim</h2>
+        <div className="right"><a className="btn-xs primary" href={c.claim_url} target="_blank" rel="noreferrer">Claim in portal →</a></div>
+      </div>
+      <div className="bd" style={{ display: 'flex', gap: 22, alignItems: 'center', flexWrap: 'wrap' }}>
+        {c.qr_svg
+          ? <div style={{ width: 168, height: 168, flex: '0 0 auto', background: '#fff', padding: 8, borderRadius: 10 }}
+                 dangerouslySetInnerHTML={{ __html: c.qr_svg }} />
+          : null}
+        <div style={{ minWidth: 220 }}>
+          <p className="form-note">Scan to claim this appliance to a dealer/client in the portal — or enter the code + MAC at <b>Portal → Appliances → Claim</b>.</p>
+          <dl className="kv">
+            <dt>Claim code</dt><dd><code style={{ fontSize: 19, letterSpacing: 2 }}>{c.claim_code}</code></dd>
+            <dt>MAC</dt><dd><code>{c.mac}</code></dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Platform tab
 // ---------------------------------------------------------------------------
 function PlatformTab() {
@@ -1419,6 +1451,8 @@ function PlatformTab() {
               </dl>
             </div>
           </div>
+
+          <ClaimCard />
 
           <div className="card">
             <div className="hd"><h2>Site LAN</h2>
@@ -1600,6 +1634,8 @@ function InstanceDrawer({ name, onClose }) {
   const [cmdOut, setCmdOut] = useState(null)
   const [cmdBusy, setCmdBusy] = useState(false)
   const [termOpen, setTermOpen] = useState(false)
+  const [snaps, setSnaps] = useState(null)      // snapshot list (null = loading)
+  const [snapName, setSnapName] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -1653,6 +1689,35 @@ function InstanceDrawer({ name, onClose }) {
     try { await post(`/api/incus/instance/${encodeURIComponent(name)}/device`, { name: dname, type: a.type, props }); setAdding(null); setTimeout(load, 800) }
     catch (e) { setErr(e.message) } finally { setBusy(null) }
   }
+  // --- snapshots / backup ---
+  const loadSnaps = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/incus/instance/${encodeURIComponent(name)}/snapshots`)
+      if (res.ok) setSnaps((await res.json()).snapshots || [])
+      else setSnaps([])
+    } catch { setSnaps([]) }
+  }, [name])
+  useEffect(() => { loadSnaps() }, [loadSnaps])
+  const createSnap = async () => {
+    const sn = (snapName || '').trim() ||
+      `snap-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`
+    setBusy('snap'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/snapshots`, { name: sn }); setSnapName(''); loadSnaps() }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const restoreSnap = async (sn) => {
+    if (!window.confirm(`Restore ${name} to snapshot "${sn}"?\n\nThis DISCARDS all changes since the snapshot and cannot be undone.`)) return
+    setBusy('snap'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/snapshots/${encodeURIComponent(sn)}/restore`); setTimeout(load, 1200); loadSnaps() }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const deleteSnap = async (sn) => {
+    if (!window.confirm(`Delete snapshot "${sn}" of ${name}?`)) return
+    setBusy('snap'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/snapshots/${encodeURIComponent(sn)}`, null, 'DELETE'); loadSnaps() }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+
   const runCmd = async () => {
     if (!cmd.trim()) return
     setCmdBusy(true); setCmdOut(null)
@@ -1763,6 +1828,24 @@ function InstanceDrawer({ name, onClose }) {
                   <span className={`pill ${d.type === 'gpu' ? 'accent' : 'brand'}`}>{d.type}</span>
                   <span className="dd-meta">{Object.entries(d).filter(([k]) => k !== 'type').map(([k, v]) => `${k}=${v}`).join(' · ')}</span>
                   <button className="btn-xs danger dd-rm" disabled={busy} onClick={() => removeDevice(dn)}>Remove</button>
+                </div>
+              ))}
+          </section>
+
+          <section><h4>Snapshots <span className="cnt">{snaps?.length ?? '…'}</span></h4>
+            <div className="dw-snap-new">
+              <input className="dd-in" placeholder="snapshot name (optional)" value={snapName}
+                     onChange={e => setSnapName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') createSnap() }} />
+              <button className="btn-xs" disabled={busy === 'snap'} onClick={createSnap}>{busy === 'snap' ? '…' : 'Snapshot now'}</button>
+            </div>
+            {snaps == null ? <p className="muted sm">Loading…</p>
+              : snaps.length === 0 ? <p className="muted sm">No snapshots yet — take one before risky changes.</p>
+              : snaps.map(s => (
+                <div className="dw-dev" key={s.name}>
+                  <span className="dd-name mono">{s.name}</span>
+                  <span className="dd-meta">{[s.created_at && new Date(s.created_at).toLocaleString(), s.stateful && 'stateful', s.size && fmtBytes(s.size)].filter(Boolean).join(' · ')}</span>
+                  <button className="btn-xs" disabled={busy === 'snap'} onClick={() => restoreSnap(s.name)}>Restore</button>
+                  <button className="btn-xs danger dd-rm" disabled={busy === 'snap'} onClick={() => deleteSnap(s.name)}>Delete</button>
                 </div>
               ))}
           </section>

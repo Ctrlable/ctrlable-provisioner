@@ -21,7 +21,7 @@ from .manifest import load_all_manifests
 from . import internal_net as inet
 from . import selfupdate
 from .lan import setup_lan_access, resolve_orchestrator_url
-from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
+from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat, PORTAL_BASE
 from .provision import complete_provisioning, get_assignment
 from .provider import GuestKind, GuestRef, Provider
 from .proxmox import ProxmoxProvider
@@ -808,6 +808,41 @@ def platform_status(_: str | None = Depends(require_auth)) -> dict:
     return _platform_get_status(db)
 
 
+@app.get("/api/appliance/claim")
+def appliance_claim(_: str | None = Depends(require_auth)) -> dict:
+    """This appliance's dealer claim code + a QR that deep-links the portal claim page.
+
+    The code is minted by the portal at enrolment and written to /etc/ctrlable/claim-code by
+    ctrlable-host-enroll (the host-mode orchestrator can read it directly). A dealer scans the QR
+    (or reads the code + MAC) and claims the appliance to their client in the portal — no console
+    access needed. Plaintext lives only here on the box; the portal stores only its hash.
+    """
+    import io
+    import urllib.parse
+
+    def _read(p: str) -> str:
+        try:
+            return Path(p).read_text().strip()
+        except Exception:
+            return ""
+
+    code = _read("/etc/ctrlable/claim-code")
+    mac = _read("/etc/ctrlable/appliance-mac")
+    if not code:
+        return {"available": False}
+    portal = PORTAL_BASE.rstrip("/")
+    claim_url = f"{portal}/devices?claim_code={urllib.parse.quote(code)}&mac={urllib.parse.quote(mac)}"
+    qr_svg = ""
+    try:
+        import segno
+        buf = io.StringIO()
+        segno.make(claim_url, error="m").save(buf, kind="svg", scale=4, border=2, xmldecl=False, dark="#0b1220")
+        qr_svg = buf.getvalue()
+    except Exception:
+        qr_svg = ""
+    return {"available": True, "claim_code": code, "mac": mac, "portal_url": portal, "claim_url": claim_url, "qr_svg": qr_svg}
+
+
 class PlatformEnrollRequest(BaseModel):
     token: str
 
@@ -1277,6 +1312,66 @@ async def incus_exec(name: str, req: ExecRequest,
         return await asyncio.to_thread(_provider().exec_cmd, ref, req.command)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"exec failed: {e}")
+
+
+class SnapshotCreateRequest(BaseModel):
+    name: str
+    stateful: bool = False
+
+
+@app.get("/api/incus/instance/{name}/snapshots")
+async def incus_snapshots(name: str, _: str | None = Depends(require_auth)) -> dict:
+    """Snapshots of an instance (newest first) — the backup list for the drawer."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        return {"snapshots": await asyncio.to_thread(_provider().snapshot_list, ref)}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"list snapshots failed: {e}")
+
+
+@app.post("/api/incus/instance/{name}/snapshots")
+async def incus_snapshot_create(name: str, req: SnapshotCreateRequest,
+                                _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    snap = (req.name or "").strip()
+    if not snap:
+        raise HTTPException(400, "snapshot name required")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().snapshot_create, ref, snap, req.stateful)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"create snapshot {snap!r} failed: {e}")
+    return {"ok": True, "name": snap}
+
+
+@app.post("/api/incus/instance/{name}/snapshots/{snap}/restore")
+async def incus_snapshot_restore(name: str, snap: str,
+                                 _: str | None = Depends(require_auth)) -> dict:
+    """Roll the instance back to a snapshot — DESTRUCTIVE (discards changes since it)."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().snapshot_restore, ref, snap)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"restore {snap!r} failed: {e}")
+    return {"ok": True}
+
+
+@app.delete("/api/incus/instance/{name}/snapshots/{snap}")
+async def incus_snapshot_delete(name: str, snap: str,
+                                _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().snapshot_delete, ref, snap)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"delete {snap!r} failed: {e}")
+    return {"ok": True}
 
 
 @app.websocket("/api/incus/instance/{name}/console")
