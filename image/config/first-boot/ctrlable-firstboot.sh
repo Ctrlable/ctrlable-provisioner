@@ -33,6 +33,34 @@ ORCH_NAME="ctrlable-orchestrator"
 sysctl -w kernel.dmesg_restrict=0 || true
 grep -q '^kernel.dmesg_restrict' /etc/sysctl.conf 2>/dev/null || echo 'kernel.dmesg_restrict=0' >> /etc/sysctl.conf
 
+# 2a. Grow the `data` partition to fill the disk. The flashed .img ships `data` at a fixed small
+#     size (keeps the image ~650M); on real hardware everything past it is unused until we extend
+#     it. Done HERE, on first boot in the full rootfs (growpart + btrfs present) and BEFORE the
+#     pool is created below, so Incus makes the btrfs pool at FULL size — no live fs resize needed.
+#     growpart relocates the GPT backup header to the disk end + grows the last partition; it is a
+#     no-op when the image was flashed to an exactly-sized disk, so this is safe either way.
+grow_data_partition(){
+  local dp disk part
+  dp="$(readlink -f /dev/disk/by-partlabel/data 2>/dev/null)" || return 0
+  [ -b "$dp" ] || { log "grow: no data partition at /dev/disk/by-partlabel/data — skip"; return 0; }
+  case "$dp" in
+    *p[0-9]) disk="${dp%p[0-9]}";  part="${dp##*p}" ;;   # nvme/mmc: /dev/nvme0n1p4
+    *p[0-9][0-9]) disk="${dp%p[0-9][0-9]}"; part="${dp##*p}" ;;
+    *) part="${dp##*[!0-9]}"; disk="${dp%"$part"}" ;;     # sata/usb: /dev/sda4
+  esac
+  [ -b "$disk" ] && [ -n "$part" ] || { log "grow: could not parse disk/part from $dp — skip"; return 0; }
+  if command -v growpart >/dev/null 2>&1; then
+    log "grow: growpart $disk $part (extend data to fill disk)"
+    growpart "$disk" "$part" 2>&1 | sed 's/^/[ctrlable-firstboot]   grow: /' \
+      || log "grow: growpart made no change (disk already full-size?)"
+    partprobe "$disk" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+  else
+    log "grow: growpart not installed — data stays image-sized"
+  fi
+}
+grow_data_partition
+
 # 2. Incus + the persistent `data` btrfs pool on its OWN partition (never an OS slot).
 export DATA_POOL=data DATA_SOURCE=/dev/disk/by-partlabel/data
 /opt/ctrlable/incus-bootstrap.sh stage1

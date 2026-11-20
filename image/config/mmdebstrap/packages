@@ -27,6 +27,11 @@ rauc-service
 incus
 btrfs-progs
 dnsmasq-base
+# grow the `data` partition to fill the target disk on first boot (the .img ships data small so the
+# file stays ~650M; on real hardware the rest of the SSD must become usable). growpart relocates the
+# GPT backup header + extends the last partition; gdisk/sgdisk is the backend it prefers + a field tool.
+cloud-guest-utils
+gdisk
 
 # networking
 systemd-resolved

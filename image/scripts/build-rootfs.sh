@@ -90,11 +90,22 @@ else
   install -D -m0600 "$here/config/orchestrator/appliance.conf.example" "$root/etc/ctrlable/appliance.conf"
 fi
 
-# RAUC keyring = the cert used to VERIFY bundles (dev cert if built; prod cert supplied in CI)
-if [ -f "$here/keys/dev-cert.pem" ]; then
-  install -D -m0644 "$here/keys/dev-cert.pem" "$root/etc/rauc/keyring.pem"
+# RAUC keyring = the cert baked in to VERIFY every future OTA bundle (the PERMANENT trust anchor;
+# changing it later means reflashing the box). Dev = the self-signed cert; prod = the CA cert, so
+# the signer (a leaf) can rotate without touching fielded boxes. Selected by RAUC_KEYRING (Makefile);
+# resolve it relative to cwd (make runs in image/) then fall back to the legacy dev cert path.
+KR="${RAUC_KEYRING:-}"
+# RAUC_KEYRING may be given relative to cwd (image/, where make runs) — also try under $here.
+if [ -n "$KR" ] && [ ! -f "$KR" ] && [ -f "$here/$KR" ]; then KR="$here/$KR"; fi
+# Fall back to the legacy dev cert when RAUC_KEYRING is unset or points nowhere.
+if { [ -z "$KR" ] || [ ! -f "$KR" ]; } && [ -f "$here/keys/dev-cert.pem" ]; then
+  KR="$here/keys/dev-cert.pem"
+fi
+if [ -n "$KR" ] && [ -f "$KR" ]; then
+  echo "build-rootfs: RAUC keyring <- $KR"
+  install -D -m0644 "$KR" "$root/etc/rauc/keyring.pem"
 else
-  echo "build-rootfs: WARN no keys/dev-cert.pem -> /etc/rauc/keyring.pem missing (run 'make keys' or supply prod cert)"
+  echo "build-rootfs: WARN no RAUC keyring (RAUC_KEYRING unset + no keys/dev-cert.pem) -> /etc/rauc/keyring.pem missing (run 'make keys' or 'make prod-ca')"
 fi
 
 # LAN bridge (the Proxmox vmbr0 equivalent): enslave the physical NIC to br-lan so the fleet's

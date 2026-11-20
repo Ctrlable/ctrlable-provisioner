@@ -18,3 +18,8 @@ backend/ctrlable.db
 # Editor
 .vscode/
 *.swp
+
+# RAUC signing material — NEVER commit private keys or CA roots.
+# Dev keys (make keys) and prod CA/leaf (make prod-ca) both land here.
+keys/
+image/keys/
