@@ -38,9 +38,14 @@ cp -a "$SRC/backend" "$APP/backend"
 cp -a "$SRC/deploy"  "$APP/deploy" 2>/dev/null || true
 
 log "frontend SPA -> $APP/frontend/dist"
-if [ -f "$SRC/frontend/dist/index.html" ]; then
+# Reuse a prebuilt dist ONLY if it is newer than the sources — a STALE dev dist would otherwise be
+# shipped instead of the current src (this silently dropped the claim UI once). Else build fresh.
+if [ -f "$SRC/frontend/dist/index.html" ] && \
+   [ -z "$(find "$SRC/frontend/src" -newer "$SRC/frontend/dist/index.html" -print -quit 2>/dev/null)" ]; then
+  log "using prebuilt frontend/dist (newer than src)"
   mkdir -p "$APP/frontend"; cp -a "$SRC/frontend/dist" "$APP/frontend/dist"
 else
+  log "building frontend SPA (npm — src changed or no prebuilt dist)"
   ( cd "$SRC/frontend" && npm ci --silent && npm run build --silent )
   mkdir -p "$APP/frontend"; cp -a "$SRC/frontend/dist" "$APP/frontend/dist"
 fi
