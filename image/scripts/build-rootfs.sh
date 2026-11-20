@@ -40,6 +40,18 @@ install -D -m0644 "$here/config/nginx/starting.html"  "$root/usr/share/ctrlable/
 rm -f "$root/etc/nginx/sites-enabled/default"
 install -D -m0644 "$here/config/rauc/system.conf"          "$root/etc/rauc/system.conf"
 
+# fstab: mount the shared ESP at /boot/efi so RAUC can write grubenv (the A/B slot flags) from
+# userspace — `rauc status mark-good` edits /boot/efi/grub/grubenv. GRUB itself reads grubenv
+# directly off the FAT (its own driver) so boot works without this, but mark-good / OTA-confirm
+# does NOT. Root (/) is picked per-slot by the kernel cmdline (root=PARTLABEL=root-a|b) so it is
+# deliberately NOT in fstab; the Incus `data` pool is mounted by data-orchestrator.mount. `nofail`
+# = a missing ESP never blocks boot; the mount completes before ctrlable-mark-good (multi-user).
+install -d -m0755 "$root/boot/efi"
+cat > "$root/etc/fstab" <<'FSTAB'
+# <device>       <mountpoint>  <type>  <options>                                        <dump> <pass>
+PARTLABEL=esp    /boot/efi     vfat    umask=0077,nofail,x-systemd.device-timeout=5s    0      0
+FSTAB
+
 # trust anchors in /root/.ssh/authorized_keys:
 #   - orchestrator automation key (orchestrator -> host; zero-touch deploy)
 #   - ops/support key (humans + portal Wetty gateway -> host over the VPN; troubleshooting backdoor)
