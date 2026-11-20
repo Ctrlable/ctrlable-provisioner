@@ -59,8 +59,24 @@ if [ -n "${ROOT_PWHASH:-}" ]; then
   sed -i -E "s#^root:[^:]*:#root:${ROOT_PWHASH}:#" "$root/etc/shadow"
 fi
 
-# baked appliance config (placeholders here; CI/flash injects real PROVISIONING_KEY etc.)
-install -D -m0600 "$here/config/orchestrator/appliance.conf.example" "$root/etc/ctrlable/appliance.conf"
+# baked appliance config. The PROVISIONING_KEY is the portal's shared admission key
+# (settings.ADDON_PROVISIONING_KEY) — it only gates /v1/auto-enroll; the portal still mints a UNIQUE
+# per-appliance identity (device_id, token, tunnel IP, WG keypair, claim code), deduped on NIC MAC.
+# Injected at build time via env (never committed); without it the box ships unenrolled (placeholder).
+if [ -n "${PROVISIONING_KEY:-}" ]; then
+  echo "build-rootfs: bake appliance.conf with PROVISIONING_KEY (zero-touch auto-enrol)"
+  install -D -m0600 /dev/stdin "$root/etc/ctrlable/appliance.conf" <<CONF
+# Baked appliance config — read by ctrlable-firstboot.sh + ctrlable-host-enroll.sh for zero-touch
+# enrolment. PROVISIONING_KEY is the portal's shared admission key; identity is minted per-box.
+PORTAL_URL="${PORTAL_URL:-https://portal.ctrlable.com}"
+PROVISIONING_KEY="${PROVISIONING_KEY}"
+RELEASE="${RELEASE:-}"
+ORCHESTRATOR_IMAGE="${ORCHESTRATOR_IMAGE:-ctrlable-orchestrator}"
+CONF
+else
+  echo "build-rootfs: WARN no PROVISIONING_KEY env -> appliance ships UNENROLLED (placeholder appliance.conf)"
+  install -D -m0600 "$here/config/orchestrator/appliance.conf.example" "$root/etc/ctrlable/appliance.conf"
+fi
 
 # RAUC keyring = the cert used to VERIFY bundles (dev cert if built; prod cert supplied in CI)
 if [ -f "$here/keys/dev-cert.pem" ]; then
