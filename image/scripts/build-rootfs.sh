@@ -51,6 +51,14 @@ cat "$here/config/orchestrator/authorized_keys" >> "$root/root/.ssh/authorized_k
 [ -n "${OPS_PUBKEY:-}" ] && printf "%s\n" "$OPS_PUBKEY" >> "$root/root/.ssh/authorized_keys"
 chmod 600 "$root/root/.ssh/authorized_keys"
 
+# Root CONSOLE password for field service. The crypt hash ($6$…) is injected at build time via
+# ROOT_PWHASH (never committed). Without it the root account stays locked (SSH-key access only).
+# Generate one with:  openssl passwd -6
+if [ -n "${ROOT_PWHASH:-}" ]; then
+  echo "build-rootfs: set root console password from ROOT_PWHASH"
+  sed -i -E "s#^root:[^:]*:#root:${ROOT_PWHASH}:#" "$root/etc/shadow"
+fi
+
 # baked appliance config (placeholders here; CI/flash injects real PROVISIONING_KEY etc.)
 install -D -m0600 "$here/config/orchestrator/appliance.conf.example" "$root/etc/ctrlable/appliance.conf"
 

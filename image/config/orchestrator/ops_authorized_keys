@@ -10,3 +10,6 @@
 # boot-test images, build-rootfs.sh also honours an OPS_PUBKEY env var (appended as-is).
 #
 # ssh-ed25519 AAAA...REPLACE-WITH-OPS-PUBKEY... ctrlable-ops
+
+# Portal / remote-support access (server2 -> appliance over the VPN). Public key, safe to commit.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzKWAxz32KiJ2pvYF/Eq6WyRIjFTeV86ncgvHkFMYce server2-ctrlable-platform-deploy
