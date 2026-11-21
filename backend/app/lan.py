@@ -219,7 +219,12 @@ def setup_netmap(proxy_subnet: str, lan_subnet: str, wg_iface: str) -> None:
     Enables remote users to reach 192.168.x.y by hitting 10.20.x.y.
     """
     if _nft_ok():
-        # Modern syntax (nft 0.9.3+ / kernel 5.2+)
+        # Idempotent: drop any previous mapping in our prerouting chain first, so a
+        # stale rule (e.g. a /24 from an earlier registration) can't linger beside
+        # or instead of the new one.
+        subprocess.run(["nft", "flush", "chain", "ip", NFT_TABLE, "prerouting"], capture_output=True)
+
+        # Modern syntax (nft 0.9.3+ / kernel 5.2+). Prefix-correct for any size.
         rule = (f'add rule ip {NFT_TABLE} prerouting '
                 f'iifname "{wg_iface}" ip daddr {proxy_subnet} '
                 f'dnat ip prefix to {lan_subnet}')
@@ -228,16 +233,17 @@ def setup_netmap(proxy_subnet: str, lan_subnet: str, wg_iface: str) -> None:
             log.info("NETMAP (nft prefix): %s → %s", proxy_subnet, lan_subnet)
             return
 
-        # Older nft: hex bitwise NETMAP
+        # Older nft: hex bitwise NETMAP. new_daddr = (daddr & hostmask) | lan_net.
+        # Use the HOSTMASK (not the netmask) so subnets larger than /24 map their
+        # full host range instead of collapsing onto a single address.
         try:
-            proxy_net = ipaddress.ip_network(proxy_subnet, strict=False)
-            lan_net   = ipaddress.ip_network(lan_subnet,   strict=False)
-            mask_hex  = f"0x{int(proxy_net.netmask):08x}"
+            lan_net   = ipaddress.ip_network(lan_subnet, strict=False)
+            mask_hex  = f"0x{int(lan_net.hostmask):08x}"
             lan_hex   = f"0x{int(lan_net.network_address):08x}"
             rule_compat = (
                 f'add rule ip {NFT_TABLE} prerouting '
                 f'iifname "{wg_iface}" ip daddr {proxy_subnet} '
-                f'dnat to ip daddr and {mask_hex} xor {lan_hex}'
+                f'dnat to ip daddr and {mask_hex} or {lan_hex}'
             )
             r2 = subprocess.run(["nft"] + rule_compat.split(), capture_output=True, text=True)
             if r2.returncode == 0:
@@ -246,7 +252,12 @@ def setup_netmap(proxy_subnet: str, lan_subnet: str, wg_iface: str) -> None:
         except Exception as e:
             log.warning("nft compat NETMAP error: %s", e)
 
-    # iptables NETMAP fallback
+    # iptables NETMAP fallback (prefix-correct). Delete any prior rule first so
+    # re-running doesn't stack duplicates.
+    subprocess.run([
+        "iptables", "-t", "nat", "-D", "PREROUTING",
+        "-i", wg_iface, "-d", proxy_subnet, "-j", "NETMAP", "--to", lan_subnet,
+    ], capture_output=True)
     subprocess.run([
         "iptables", "-t", "nat", "-A", "PREROUTING",
         "-i", wg_iface, "-d", proxy_subnet, "-j", "NETMAP", "--to", lan_subnet,
@@ -283,19 +294,22 @@ def _ping_sweep(subnet: str) -> None:
             return
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    # Parallel ping fallback
+    # Parallel ping fallback. Sweep the WHOLE subnet (not just the first /24), in
+    # bounded batches so a /23 upper half is covered without forking thousands of
+    # pings at once.
     try:
-        hosts = list(ipaddress.ip_network(subnet, strict=False).hosts())[:254]
-        procs = [
-            subprocess.Popen(["ping", "-c1", "-W1", str(h)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for h in hosts
-        ]
-        for p in procs:
-            try:
-                p.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                p.kill()
+        hosts = [str(h) for h in ipaddress.ip_network(subnet, strict=False).hosts()][:1024]
+        for start in range(0, len(hosts), 128):
+            procs = [
+                subprocess.Popen(["ping", "-c1", "-W1", h],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for h in hosts[start:start + 128]
+            ]
+            for p in procs:
+                try:
+                    p.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    p.kill()
     except Exception:
         pass
 
