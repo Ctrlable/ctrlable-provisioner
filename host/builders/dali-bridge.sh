@@ -26,7 +26,7 @@ REPO="${DALI_BRIDGE_REPO:-https://github.com/Ctrlable/dali-bridge.git}"
 # DALI_BRIDGE_REF still wins when set explicitly. Before this, the manifest's
 # app_version was ignored and every appliance got this file's default.
 REF="${DALI_BRIDGE_REF:-${APP_VERSION:+v$APP_VERSION}}"
-REF="${REF:-v0.5.8}"
+REF="${REF:-v0.6.2}"
 KEY="${DALI_BRIDGE_SSH_KEY:-/etc/ctrlable/dali-bridge-deploy-key}"  # read-only deploy key
 TOKEN="${DALI_BRIDGE_TOKEN:-}"                         # HTTPS PAT fallback
 
