@@ -11,6 +11,8 @@ import asyncio
 import re
 from typing import TYPE_CHECKING
 
+from .progress_bus import publish as _publish_progress
+
 if TYPE_CHECKING:
     from .config import Settings
     from .state import StateDB
@@ -149,6 +151,11 @@ async def _ssh_deploy(
                 kind = m.group(3)
 
         p = _PHASE_RE.search(line)
+        if p:
+            # Multiplex onto the live SSE stream (works even with no db row behind it).
+            _publish_progress({"type": "deploy-phase", "hostname": hostname, "name": name,
+                               "index": int(p.group(1)), "total": int(p.group(2)),
+                               "label": p.group(3).strip()})
         if p and db is not None:
             # Flush first so the log tail and the phase the UI renders agree.
             await _flush()
@@ -167,10 +174,71 @@ async def _ssh_deploy(
     await _flush()
     await proc.wait()
     if proc.returncode != 0:
+        _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name, "ok": False})
         raise RuntimeError(f"deploy failed for {name!r} (exit {proc.returncode})")
     if vmid is None:
+        _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name, "ok": False})
         raise RuntimeError(f"deploy for {name!r} produced no [RESULT] line")
+    _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name,
+                       "ok": True, "vmid": vmid, "kind": kind})
     return vmid, kind
+
+
+def _synthetic_vmid(hostname: str) -> int:
+    """Incus addresses instances by NAME, but the DB schema (shared with the PVE
+    backend) keys on an int vmid. Derive a stable, collision-unlikely id from the
+    hostname so a row is reproducible and distinct from PVE's small vmids."""
+    import zlib
+    return 100000 + (zlib.crc32(hostname.encode()) % 900000)
+
+
+async def _incus_deploy(
+    release: str,
+    name: str,
+    hostname: str,
+    wire_to: dict,
+    settings: "Settings",
+    db: "StateDB | None" = None,
+) -> tuple[int, str]:
+    """Deploy one fleet instance via the host Incus — the Incus analogue of
+    `_ssh_deploy`. The orchestrator drives the host daemon over the proxied
+    `/var/lib/incus/unix.socket` (SPEC §4), so this needs no SSH to a hypervisor:
+    it launches a PREBUILT image alias (`ctrlable-<template>`) and seeds
+    firstboot wiring — including the provisioning_key the self-updating services
+    enrol with. Same contract as the PVE path (emit phases + a [RESULT] line,
+    LXC settles 'pending' until its firstboot calls back)."""
+    from .incus_provider import IncusProvider
+
+    prov = IncusProvider(remote=(getattr(settings, "incus_remote", "") or None))
+    vmid = _synthetic_vmid(hostname)
+
+    def on_phase(n: int, tot: int, msg: str) -> None:
+        print(f"[deploy/{name}] [PHASE] {n}/{tot} {msg}", flush=True)
+        # Runs in a worker thread (asyncio.to_thread); publish() hops back to the loop safely.
+        _publish_progress({"type": "deploy-phase", "hostname": hostname, "name": name,
+                           "index": n, "total": tot, "label": msg})
+        if db is not None:
+            try:
+                db.update_instance_phase(hostname, n, tot, msg)
+            except Exception:  # noqa: BLE001 — phase display is best-effort
+                pass
+
+    def _do() -> None:
+        prov.deploy_template(template=name, hostname=hostname,
+                             wire_to=wire_to, on_phase=on_phase)
+
+    try:
+        await asyncio.to_thread(_do)
+    except Exception as exc:  # surface the incus error into the log like _ssh_deploy
+        if db is not None:
+            await asyncio.to_thread(db.append_instance_log, hostname, f"\n[ERROR] {exc}\n")
+        _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name, "ok": False})
+        raise RuntimeError(f"incus deploy failed for {name!r}: {exc}") from exc
+
+    print(f"[deploy/{name}] [RESULT] name={hostname} vmid={vmid} kind=lxc", flush=True)
+    _publish_progress({"type": "deploy-result", "hostname": hostname, "name": name,
+                       "ok": True, "vmid": vmid, "kind": "lxc"})
+    return vmid, "lxc"
 
 
 async def deploy_instance(
@@ -200,7 +268,11 @@ async def deploy_instance(
 
     try:
         async with _get_lock():
-            vmid, kind = await _ssh_deploy(release, template_name, hostname, settings, db)
+            if getattr(settings, "provider", "proxmox") == "incus":
+                vmid, kind = await _incus_deploy(
+                    release, template_name, hostname, wire_to, settings, db)
+            else:
+                vmid, kind = await _ssh_deploy(release, template_name, hostname, settings, db)
     except Exception as exc:
         await asyncio.to_thread(db.append_instance_log, hostname, f"\n[ERROR] {exc}\n")
         await asyncio.to_thread(db.set_instance_status, hostname, "error")

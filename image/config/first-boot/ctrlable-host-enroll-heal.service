@@ -1,0 +1,12 @@
+[Unit]
+Description=Ctrlable Pro host VPN self-heal (re-enrol if the WireGuard handshake is stale)
+# Periodic re-check (driven by the .timer). Runs the enrol script in "heal" mode: a tunnel that is
+# merely "interface up" but has NOT handshaked within CTRLABLE_WG_STALE_SECS is treated as dead and
+# re-enrolled, so a fielded box self-heals onto a MIGRATED portal (new WG endpoint / rotated key)
+# without a field visit. A healthy tunnel is a cheap no-op.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ctrlable/ctrlable-host-enroll.sh heal

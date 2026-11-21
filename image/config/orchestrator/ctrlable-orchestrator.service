@@ -1,0 +1,26 @@
+[Unit]
+Description=Ctrlable Orchestrator (host-mode provisioner)
+Documentation=SPEC-incus-migration.md
+# Needs the host Incus daemon (it drives it over the LOCAL /var/lib/incus/unix.socket — no proxy
+# device in host mode) and the network up to reach the portal. Will not start until firstboot has
+# created the on-data state dir + .env (ConditionPathExists), so the immutable A/B root ships the
+# code while all mutable state lives on the `data` partition and survives slot swaps.
+After=network-online.target incus.service data-orchestrator.mount
+Wants=network-online.target
+Requires=incus.service
+RequiresMountsFor=/data/orchestrator
+ConditionPathExists=/data/orchestrator/.env
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ctrlable-provisioner/backend
+# app reads /opt/ctrlable-provisioner/backend/.env, which is a symlink to /data/orchestrator/.env
+ExecStart=/opt/ctrlable-provisioner/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

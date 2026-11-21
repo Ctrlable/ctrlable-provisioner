@@ -1,0 +1,14 @@
+[Unit]
+Description=Ctrlable Pro first-boot provisioning (zero-touch)
+After=network-online.target incus.service
+Wants=network-online.target
+# runs once; the script also self-guards with its stamp file
+ConditionPathExists=!/var/lib/ctrlable/.firstboot-done
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ctrlable/ctrlable-firstboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

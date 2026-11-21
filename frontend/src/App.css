@@ -323,3 +323,80 @@ td .svccell{display:flex;align-items:center;gap:10px}
   main{padding:18px 16px 50px}
   .drawer{width:100%}
 }
+
+/* Fleet (Live) tab — SPEC §16.1 P6.1: live instances over the Incus event stream */
+.livedot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--idle);vertical-align:middle;margin-left:8px}
+.livedot.on{background:var(--ok);animation:livepulse 1.8s ease-out infinite}
+@keyframes livepulse{0%{box-shadow:0 0 0 0 var(--ok-weak)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion:reduce){.livedot.on{animation:none}}
+.fleet-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:14px}
+.fleet-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:15px 16px 14px;box-shadow:var(--shadow)}
+.fc-head{display:flex;align-items:center;gap:10px;justify-content:space-between;min-width:0}
+.fc-name{font-size:14px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fc-type{color:var(--faint);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;margin-top:3px}
+.fc-metrics{display:flex;flex-direction:column;gap:6px;margin:12px 0 0}
+.fc-metrics>div{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.fc-metrics dt{color:var(--muted);font-size:12px}
+.fc-metrics dd{margin:0;font-size:12.5px;color:var(--text);font-variant-numeric:tabular-nums}
+
+/* Fleet card interactive + instance detail drawer (P6.2/P6.4) */
+.fleet-card{cursor:pointer;transition:border-color .12s,transform .12s}
+.fleet-card:hover{border-color:var(--accent-line)}
+.fleet-card:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px}
+.fleet-card:active{transform:translateY(1px)}
+.drawer-wrap{position:fixed;inset:0;z-index:50;background:#0008;display:flex;justify-content:flex-end;animation:dwfade .12s ease-out}
+@keyframes dwfade{from{opacity:0}to{opacity:1}}
+.drawer{width:min(560px,94vw);height:100%;overflow-y:auto;background:var(--panel);border-left:1px solid var(--border);
+  box-shadow:-12px 0 40px #0005;padding:20px 22px calc(28px + env(safe-area-inset-bottom,0px));
+  padding-right:max(22px,env(safe-area-inset-right,0px))}
+.dw-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.dw-name{font-size:16px;font-weight:650;color:var(--text)}
+.dw-sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+.dw-head-right{display:flex;align-items:center;gap:10px;flex:none}
+.dw-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:14px 0}
+.dw-hint{color:var(--faint);font-size:11.5px;margin-left:4px}
+.btn-xs.danger{color:var(--crit);border-color:var(--crit-weak)}
+.btn-xs.danger:hover:not(:disabled){background:var(--crit-weak)}
+.dw-body section{padding:14px 0;border-bottom:1px solid var(--border-2)}
+.dw-body h4{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px;display:flex;align-items:center;gap:8px}
+.dw-body h4 .cnt{color:var(--faint);font-weight:600;font-variant-numeric:tabular-nums}
+.dw-rawtoggle{cursor:pointer;user-select:none}
+.dw-kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}
+.dw-kv dt{color:var(--muted);font-size:13px}
+.dw-kv dd{margin:0;color:var(--text);font-size:13px;text-align:right}
+.dw-dev{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;padding:7px 0;border-top:1px solid var(--border-2)}
+.dw-dev:first-of-type{border-top:0}
+.dd-name{font-size:13px;color:var(--text);font-weight:600}
+.dd-meta{color:var(--muted);font-size:12px;min-width:0;word-break:break-word}
+.dd-use{margin-left:auto;color:var(--text);font-size:12px}
+.muted.sm{color:var(--muted);font-size:12.5px;margin:0}
+.dw-raw{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:11.5px;
+  white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;margin:0}
+
+/* Drawer edit controls (resize / attach / detach / exec) */
+.dd-edit{display:flex;gap:6px;align-items:center;width:100%;margin-top:5px}
+.dd-in{background:var(--surface-2);border:1px solid var(--border);border-radius:6px;color:var(--text);
+  padding:4px 8px;font-size:12px;font-family:inherit;width:120px;min-width:0}
+.dd-in.cmd{flex:1;width:auto}
+.dd-in:focus{outline:none;border-color:var(--accent-line)}
+.h4-add{margin-left:auto;background:none;border:1px solid var(--border);border-radius:6px;color:var(--accent);
+  font-size:11px;padding:2px 9px;cursor:pointer;text-transform:none;letter-spacing:0;font-weight:600}
+.h4-add:hover{background:var(--accent-weak)}
+.dw-add{display:flex;flex-wrap:wrap;gap:6px;align-items:center;background:var(--surface-2);
+  border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px}
+.dw-add select{background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);
+  padding:4px 6px;font-size:12px;max-width:100%}
+.dd-rm{margin-left:auto}
+.dw-cmd{display:flex;gap:6px;align-items:center}
+
+/* Interactive terminal (xterm) */
+.term{height:320px;background:#0b0e14;border:1px solid var(--border);border-radius:8px;padding:6px 8px;overflow:hidden}
+.term .xterm,.term .xterm-viewport,.term .xterm-screen{height:100%!important}
+
+/* Deploy progress strip (live, multiplexed onto the Incus event stream) */
+.deploy-strip{display:flex;flex-direction:column;gap:8px;margin:0 0 16px}
+.deploy-row{display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--panel);border:1px solid var(--border);border-radius:8px}
+.dr-host{font-size:13px;font-weight:600;min-width:160px}
+.dr-bar{flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden}
+.dr-fill{height:100%;background:var(--brand);border-radius:3px;transition:width .4s ease}
+.dr-label{font-size:12px;color:var(--muted);white-space:nowrap;max-width:46%;overflow:hidden;text-overflow:ellipsis}

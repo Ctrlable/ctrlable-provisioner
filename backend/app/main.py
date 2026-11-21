@@ -5,23 +5,23 @@ import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .auth import auth_enabled, create_token, hash_password, require_auth, verify_password
 from .build import trigger_build
 from .config import get_settings
-from .deploy import deploy_instance, deploy_stack_async, deploy_templates_async
+from .deploy import deploy_instance, deploy_stack_async, deploy_templates_async, _synthetic_vmid
 from .drift import Severity
 from .drift_scan import scan_project
 from .manifest import load_all_manifests
 from . import internal_net as inet
 from . import selfupdate
 from .lan import setup_lan_access, resolve_orchestrator_url
-from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat
+from .platform import enroll as _platform_enroll, ensure_tunnel_up, get_status as _platform_get_status, start_auto_enroll, start_heartbeat, PORTAL_BASE
 from .provision import complete_provisioning, get_assignment
 from .provider import GuestKind, GuestRef, Provider
 from .proxmox import ProxmoxProvider
@@ -65,8 +65,15 @@ app.add_middleware(
 
 def _provider() -> Provider:
     """The virtualization backend. Returns the neutral Provider interface, not a
-    concrete class -- swapping Proxmox for a Debian/libvirt backend later is a
-    change here and in provider construction only. See provider.py."""
+    concrete class -- swapping Proxmox for a Debian/Incus backend is `settings.provider`
+    plus construction here, nothing else. See provider.py."""
+    backend = (settings.provider or "proxmox").lower()
+    if backend == "incus":
+        from .incus_provider import IncusProvider
+        return IncusProvider(remote=settings.incus_remote or None)
+    if backend == "libvirt":
+        from .libvirt_provider import LibvirtProvider
+        return LibvirtProvider()
     return ProxmoxProvider(
         settings.pve_host,
         settings.pve_token_id,
@@ -801,6 +808,41 @@ def platform_status(_: str | None = Depends(require_auth)) -> dict:
     return _platform_get_status(db)
 
 
+@app.get("/api/appliance/claim")
+def appliance_claim(_: str | None = Depends(require_auth)) -> dict:
+    """This appliance's dealer claim code + a QR that deep-links the portal claim page.
+
+    The code is minted by the portal at enrolment and written to /etc/ctrlable/claim-code by
+    ctrlable-host-enroll (the host-mode orchestrator can read it directly). A dealer scans the QR
+    (or reads the code + MAC) and claims the appliance to their client in the portal — no console
+    access needed. Plaintext lives only here on the box; the portal stores only its hash.
+    """
+    import io
+    import urllib.parse
+
+    def _read(p: str) -> str:
+        try:
+            return Path(p).read_text().strip()
+        except Exception:
+            return ""
+
+    code = _read("/etc/ctrlable/claim-code")
+    mac = _read("/etc/ctrlable/appliance-mac")
+    if not code:
+        return {"available": False}
+    portal = PORTAL_BASE.rstrip("/")
+    claim_url = f"{portal}/devices?claim_code={urllib.parse.quote(code)}&mac={urllib.parse.quote(mac)}"
+    qr_svg = ""
+    try:
+        import segno
+        buf = io.StringIO()
+        segno.make(claim_url, error="m").save(buf, kind="svg", scale=4, border=2, xmldecl=False, dark="#0b1220")
+        qr_svg = buf.getvalue()
+    except Exception:
+        qr_svg = ""
+    return {"available": True, "claim_code": code, "mac": mac, "portal_url": portal, "claim_url": claim_url, "qr_svg": qr_svg}
+
+
 class PlatformEnrollRequest(BaseModel):
     token: str
 
@@ -1031,8 +1073,16 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
     guests = []
     for g in raw_guests:
         inst = instances.get(g.name)
+        try:
+            vmid = g.vmid
+        except (ValueError, TypeError):
+            # Incus addresses instances by NAME, so g.vmid (int(ref.id)) raises. Use the stable
+            # numeric id deploy.py records for the row, or synthesize the same one from the name,
+            # so this legacy vmid-keyed payload stays well-formed (the Map is name-driven anyway).
+            vmid = (inst["vmid"] if inst and inst["vmid"] is not None
+                    else _synthetic_vmid(g.name))
         guests.append({
-            "vmid": g.vmid,
+            "vmid": vmid,
             "hostname": g.name,
             "kind": g.kind,
             "status": g.status,
@@ -1047,6 +1097,7 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
 
     return {
         "configured": True,
+        "provider": (settings.provider or "proxmox").lower(),
         "host": {
             "node": host_health.node,
             "cpu": host_health.cpu,
@@ -1058,6 +1109,373 @@ def dashboard(_: str | None = Depends(require_auth)) -> dict:
         },
         "guests": guests,
     }
+
+
+# ---------------------------------------------------------------------------
+# Live management surface (P6.1, SPEC §16.1) — direct Incus REST over the proxied
+# unix socket. The CLI provider can't stream; this is what powers a live fleet
+# view + a push event stream without the browser polling.
+# ---------------------------------------------------------------------------
+
+def _incus_rest():
+    """A per-request Incus REST client (cheap — just holds the socket path).
+    Live endpoints require the incus backend; other providers have no socket here."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "live fleet requires the incus backend (settings.provider=incus)")
+    from .incus_rest import IncusREST
+    return IncusREST(socket_path=getattr(settings, "incus_socket", None)
+                     or "/var/lib/incus/unix.socket")
+
+
+@app.get("/api/fleet/live")
+async def fleet_live(_: str | None = Depends(require_auth)) -> list[dict]:
+    """Snapshot of every instance with live state (status, cpu, mem, net, disk) — the live
+    fleet view's initial render + fallback. Served straight from the Incus REST API."""
+    from .incus_rest import IncusError
+    rest = _incus_rest()
+    try:
+        return await rest.fleet_snapshot()
+    except IncusError as e:
+        raise HTTPException(502, f"incus unreachable: {e}")
+
+
+@app.get("/api/incus/events")
+async def incus_events(_: str | None = Depends(require_auth)):
+    """Server-Sent Events relay of the Incus change stream (SSE is simpler than WS for one-way
+    push and fits StreamingResponse). Each `data:` line is one JSON event. The generator is
+    cancelled when the client disconnects, which closes the underlying poll loop.
+
+    Multiplexes TWO sources onto one stream: the Incus change feed (rest.events()) and our own
+    deploy progress (`deploy-phase` / `deploy-result` markers from deploy.py, via progress_bus).
+    Both are pumped into a single queue so the UI sees fleet changes and deploy progress in order.
+    The generator is cancelled when the client disconnects, which tears down both pumps.
+    """
+    rest = _incus_rest()
+    from . import progress_bus
+
+    async def gen():
+        yield ": ctrlable-orchestrator event stream\n\n"  # SSE comment / preamble
+        q: asyncio.Queue = asyncio.Queue(maxsize=512)
+        sub = progress_bus.subscribe()
+
+        async def pump_incus():
+            try:
+                async for ev in rest.events():
+                    await q.put(ev)
+            except Exception as e:  # noqa: BLE001 — surface, keep the stream alive
+                await q.put({"type": "error", "error": str(e)})
+
+        async def pump_progress():
+            while True:
+                await q.put(await sub.get())
+
+        t_incus = asyncio.create_task(pump_incus())
+        t_prog = asyncio.create_task(pump_progress())
+        try:
+            while True:
+                ev = await q.get()
+                yield f"data: {json.dumps(ev)}\n\n"
+        except asyncio.CancelledError:  # client disconnected
+            raise
+        finally:
+            for t in (t_incus, t_prog):
+                t.cancel()
+            progress_bus.unsubscribe(sub)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",   # don't let a reverse proxy buffer the stream
+        "Connection": "keep-alive",
+    })
+
+
+@app.get("/api/incus/instance/{name}")
+async def incus_instance(name: str, _: str | None = Depends(require_auth)) -> dict:
+    """Full instance record (config, devices incl. disk/nic/usb/pci passthrough, inline state)
+    for the detail drawer — name-keyed to match the live fleet view."""
+    from .incus_rest import IncusError
+    rest = _incus_rest()
+    try:
+        return await rest.instance(name)
+    except IncusError as e:
+        raise HTTPException(404, f"instance {name!r}: {e}")
+
+
+class InstanceActionRequest(BaseModel):
+    action: str   # start | stop | restart
+
+
+@app.post("/api/incus/instance/{name}/action")
+async def incus_instance_action(name: str, req: InstanceActionRequest,
+                                _: str | None = Depends(require_auth)) -> dict:
+    """Lifecycle a live instance by name (start/stop/restart). Incus addresses instances by
+    name, so the provider acts on a name GuestRef — no vmid round-trip."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "live instance actions require the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)  # kind only labels; Incus acts by name
+    p = _provider()
+    fn = {"start": p.start, "stop": p.stop, "restart": p.reboot, "reboot": p.reboot}.get(req.action)
+    if not fn:
+        raise HTTPException(400, f"unknown action {req.action!r}")
+    try:
+        await asyncio.to_thread(fn, ref)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"{req.action} {name!r} failed: {e}")
+    return {"ok": True, "name": name, "action": req.action}
+
+
+@app.get("/api/incus/host-hardware")
+async def incus_host_hardware(_: str | None = Depends(require_auth)) -> dict:
+    """Host USB / PCI / GPU devices over the socket (the REAL host via /1.0/resources, not the
+    orchestrator container) — the menu for attaching passthrough to an instance."""
+    from .incus_rest import IncusError
+    try:
+        res = await _incus_rest().resources()
+    except IncusError as e:
+        raise HTTPException(502, f"incus resources: {e}")
+    usb = [{"id": f"{d.get('vendor_id','')}:{d.get('product_id','')}",
+            "vendor_id": d.get("vendor_id"), "product_id": d.get("product_id"),
+            "vendor": d.get("vendor"), "product": d.get("product")}
+           for d in ((res.get("usb") or {}).get("devices") or [])]
+    pci = [{"address": d.get("pci_address"), "vendor": d.get("vendor"),
+            "product": d.get("product"), "driver": d.get("driver")}
+           for d in ((res.get("pci") or {}).get("devices") or [])]
+    gpu = [{"address": c.get("pci_address"), "vendor": c.get("vendor"),
+            "product": c.get("product"), "driver": c.get("driver")}
+           for c in ((res.get("gpu") or {}).get("cards") or [])]
+    return {"usb": usb, "pci": pci, "gpu": gpu}
+
+
+class DeviceAddRequest(BaseModel):
+    name: str
+    type: str                         # usb | gpu | pci | disk | unix-char | …
+    props: dict[str, str] = {}
+
+
+@app.post("/api/incus/instance/{name}/device")
+async def incus_device_add(name: str, req: DeviceAddRequest,
+                           _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().device_add, ref, req.name, req.type, req.props)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"attach {req.name!r} failed: {e}")
+    return {"ok": True}
+
+
+@app.delete("/api/incus/instance/{name}/device/{dev}")
+async def incus_device_remove(name: str, dev: str,
+                              _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().device_remove, ref, dev)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"remove {dev!r} failed: {e}")
+    return {"ok": True}
+
+
+class ResizeRequest(BaseModel):
+    device: str
+    size: str                         # absolute, e.g. "16GiB"
+
+
+@app.post("/api/incus/instance/{name}/resize")
+async def incus_resize(name: str, req: ResizeRequest,
+                       _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().resize_disk, ref, req.device, req.size)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"resize {req.device!r} failed: {e}")
+    return {"ok": True}
+
+
+class ExecRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/incus/instance/{name}/exec")
+async def incus_exec(name: str, req: ExecRequest,
+                     _: str | None = Depends(require_auth)) -> dict:
+    """Run a one-shot command in the instance (a lightweight console until the interactive
+    terminal lands). Returns stdout/stderr/exit."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        return await asyncio.to_thread(_provider().exec_cmd, ref, req.command)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"exec failed: {e}")
+
+
+class SnapshotCreateRequest(BaseModel):
+    name: str
+    stateful: bool = False
+
+
+@app.get("/api/incus/instance/{name}/snapshots")
+async def incus_snapshots(name: str, _: str | None = Depends(require_auth)) -> dict:
+    """Snapshots of an instance (newest first) — the backup list for the drawer."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        return {"snapshots": await asyncio.to_thread(_provider().snapshot_list, ref)}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"list snapshots failed: {e}")
+
+
+@app.post("/api/incus/instance/{name}/snapshots")
+async def incus_snapshot_create(name: str, req: SnapshotCreateRequest,
+                                _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    snap = (req.name or "").strip()
+    if not snap:
+        raise HTTPException(400, "snapshot name required")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().snapshot_create, ref, snap, req.stateful)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"create snapshot {snap!r} failed: {e}")
+    return {"ok": True, "name": snap}
+
+
+@app.post("/api/incus/instance/{name}/snapshots/{snap}/restore")
+async def incus_snapshot_restore(name: str, snap: str,
+                                 _: str | None = Depends(require_auth)) -> dict:
+    """Roll the instance back to a snapshot — DESTRUCTIVE (discards changes since it)."""
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().snapshot_restore, ref, snap)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"restore {snap!r} failed: {e}")
+    return {"ok": True}
+
+
+@app.delete("/api/incus/instance/{name}/snapshots/{snap}")
+async def incus_snapshot_delete(name: str, snap: str,
+                                _: str | None = Depends(require_auth)) -> dict:
+    if (settings.provider or "").lower() != "incus":
+        raise HTTPException(501, "requires the incus backend")
+    ref = GuestRef(id=name, kind=GuestKind.CONTAINER)
+    try:
+        await asyncio.to_thread(_provider().snapshot_delete, ref, snap)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"delete {snap!r} failed: {e}")
+    return {"ok": True}
+
+
+@app.websocket("/api/incus/instance/{name}/console")
+async def incus_console(ws: WebSocket, name: str):
+    """Interactive terminal into an instance (SPEC §16.1, P6.2). Bridges the browser WebSocket to
+    an Incus `exec` websocket over the unix socket: POST /exec (wait-for-websocket) → attach the
+    fd0 WS over the UDS (via websockets.unix_connect) → relay bytes both ways. Auth is the ?token=
+    query param (a browser can't set an Authorization header on a WebSocket)."""
+    from .auth import validate_token
+    try:
+        validate_token(ws.query_params.get("token", ""))
+    except Exception:
+        await ws.close(code=1008); return
+    if (settings.provider or "").lower() != "incus":
+        await ws.close(code=1011); return
+    try:
+        cols = int(ws.query_params.get("cols", "80")); rows = int(ws.query_params.get("rows", "24"))
+    except ValueError:
+        cols, rows = 80, 24
+
+    import websockets
+    from .incus_rest import IncusREST, IncusError
+    rest = IncusREST(socket_path=getattr(settings, "incus_socket", None) or "/var/lib/incus/unix.socket")
+    await ws.accept()
+    try:
+        op = await rest.exec_setup(name, width=cols, height=rows)
+    except IncusError as e:
+        await ws.send_text(f"\r\n[exec failed: {e}]\r\n"); await ws.close(); return
+    opid = (op.get("operation") or "").rstrip("/").split("/")[-1]
+    md = op.get("metadata") or {}
+    fds = (md.get("metadata") or {}).get("fds") or md.get("fds") or {}
+    secret0 = fds.get("0") or fds.get("1")
+    secret_ctl = fds.get("control")
+    if not opid or not secret0:
+        await ws.send_text("\r\n[exec: no websocket fds returned]\r\n"); await ws.close(); return
+
+    base = f"ws://unix/1.0/operations/{opid}/websocket?secret="
+    ictl = None
+    try:
+        iws = await websockets.unix_connect(rest.socket_path, uri=base + secret0)
+        # Incus only STARTS streaming once the 'control' WS is also attached — attach + keep it
+        # open for the session (it also carries window-resize, a later refinement).
+        if secret_ctl:
+            ictl = await websockets.unix_connect(rest.socket_path, uri=base + secret_ctl)
+    except Exception as e:  # noqa: BLE001
+        await ws.send_text(f"\r\n[console connect failed: {e}]\r\n"); await ws.close(); return
+
+    async def browser_to_incus():
+        # Protocol: BINARY frames are stdin (keystrokes); TEXT frames are control messages
+        # (JSON). The only control today is {"type":"resize","cols":C,"rows":R}, forwarded to the
+        # Incus 'control' WS as a window-resize so the PTY tracks the browser terminal size.
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                data = msg.get("bytes")
+                if data is not None:
+                    await iws.send(data)
+                    continue
+                t = msg.get("text")
+                if t is None:
+                    continue
+                try:
+                    ctl = json.loads(t)
+                except (ValueError, TypeError):
+                    await iws.send(t.encode())  # not JSON — treat as stdin (back-compat)
+                    continue
+                if ctl.get("type") == "resize" and ictl is not None:
+                    await ictl.send(json.dumps({
+                        "command": "window-resize",
+                        "args": {"width": str(int(ctl.get("cols", 80))),
+                                 "height": str(int(ctl.get("rows", 24)))},
+                    }))
+        except Exception:  # noqa: BLE001 — client gone / stream closed
+            pass
+
+    async def incus_to_browser():
+        try:
+            async for chunk in iws:
+                if isinstance(chunk, (bytes, bytearray)):
+                    await ws.send_bytes(bytes(chunk))
+                else:
+                    await ws.send_text(chunk)
+        except Exception:  # noqa: BLE001
+            pass
+
+    t1 = asyncio.create_task(browser_to_incus())
+    t2 = asyncio.create_task(incus_to_browser())
+    try:
+        await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in (t1, t2):
+            t.cancel()
+        for w in (iws, ictl):
+            if w is not None:
+                try:
+                    await w.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------

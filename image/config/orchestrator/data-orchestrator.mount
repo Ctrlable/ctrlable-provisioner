@@ -1,0 +1,18 @@
+# Mounts the orchestrator's persistent state (a dedicated btrfs subvolume on the `data` partition)
+# at /data/orchestrator. State therefore survives every A/B OS slot swap while the code stays in
+# the immutable root. The subvolume is created once by firstboot; this unit (baked in both slots)
+# brings it up on every boot. Non-blocking (WantedBy, not Requires) so a missing subvol on the very
+# first boot can't stall multi-user — firstboot then creates it and starts this unit.
+[Unit]
+Description=Ctrlable orchestrator state (data-partition subvolume)
+After=incus.service
+ConditionPathExists=/dev/disk/by-partlabel/data
+
+[Mount]
+What=/dev/disk/by-partlabel/data
+Where=/data/orchestrator
+Type=btrfs
+Options=subvol=orchestrator,noatime
+
+[Install]
+WantedBy=multi-user.target

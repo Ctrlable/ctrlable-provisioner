@@ -45,13 +45,17 @@ HAOS VM are where the real work and risk live.
 ## 4. Target architecture
 
 ```
-  Debian 13 (trixie) host
-    └─ Incus (system containers + QEMU VMs)
+  Debian 13 (trixie) host  — image-based A/B root (§14), one persistent Incus data pool
+    └─ Incus (system containers; QEMU VMs only as a documented exception)
          ├─ ctrlable-orchestrator      (system container — our provisioner, this repo)
-         ├─ ctrlable-pro               (QEMU VM — rebranded HAOS; add-on store + RAUC OTA)
+         ├─ ctrlable-pro               (system container — rebranded HA Supervised; add-on store + our OTA)
          ├─ zwavejs / zigbee2mqtt / …  (system containers — services)
          └─ incusbr-site / incusbr-internal  (networks; or adopt existing vmbr0/vmbr1)
   Provisioner UI/API  ──Incus REST API (unix socket / https+token)──▶ host
+
+**Design intent (decided):** run everything — Ctrlable Pro included — as a **system
+container (LXC)**, and avoid VMs wherever we can. A QEMU VM is now the *exception* (a
+specific site whose radios are network-attached, see §6/§13), not the default.
 ```
 
 The orchestrator talks to the **Incus API** instead of `pct`/`qm`/`pvesh`. The manifest,
@@ -114,13 +118,135 @@ The clean escape that keeps Option A **and** kills the USB problem is **network-
 coordinators** (TCP/PoE Zigbee, Z-Wave-over-IP, ser2net) — no passthrough of any kind — which is
 why A regains the edge as sites move that way. See §13; host-OS update safety is separate (§14).
 
-**Recommendation (updated): coordinator-driven, not fixed.** For the **current USB-only fleet,
-Option B (Supervised-in-LXC)** is now the leaning choice — trivial USB passthrough, equivalent
-per-component rollback via LXC snapshots, and a "supported" status we control. **Option A (HAOS
-VM)** remains preferred for sites on **network-attached coordinators**, where its clean `.img`
-deploy and intact RAUC path win with zero USB passthrough. The PoC validates both before any
-commit. (C is excluded by the store req.) **Host-OS update safety is a separate, higher-value
-axis — see §14.**
+**Decision (2026-11-17): Option B (Supervised-in-LXC) is the default — avoid VMs.**
+Ctrlable Pro runs as a **system container**, not a VM. The reasons above hold for the
+whole current fleet (USB-only): trivial `/dev/serial/by-id` passthrough, per-component
+rollback via LXC snapshots, a "supported" status we control, and no VM RAM/boot overhead.
+Beyond those, a **single-container-model host is simpler to provision, snapshot, back up,
+and move** than one that mixes containers and a VM disk image — which is the direction we
+want for an automated appliance build.
+
+> **PoC-validated 2026-11-17** (`SPEC-incus-poc.md` §3): HA Supervised came up in an LXC on
+> Debian 13 — Supervisor + the **97-add-on store** loaded, and full Core 2026.11.2 serves on
+> `:80`+`:8123`.
+>
+> **Corrected 2026-11-17 (do not repeat the earlier "banner is cosmetic" claim):** the store
+> *loads*, but stock Supervisor **gates add-on _installs_** behind a STACK of environment checks,
+> which is the concrete "own the Debian+Docker base compat" cost — **real, not small**:
+> 1. host `kernel.dmesg_restrict=0` (installer writes it; unpriv CT can't) — fixed host-side.
+> 2. `/var/lib/homeassistant/audio/external` must pre-exist or Core stays on landingpage — fixed.
+> 3. `healthy:false → [privileged]` **blocks installs** until the CT is **privileged**. Flipping
+>    Ctrlable Pro to a privileged LXC cleared it (so it joins frigate as privileged, OR the fork
+>    patches the health check to keep it unprivileged).
+> 4. `host_internet:false` blocks installs because Supervisor derives connectivity from a
+>    **NetworkManager-managed** interface. **CLEARED 2026-11-18:** mask networkd for the NIC and
+>    let NM alone DHCP the Incus-bridge veth → `connectivity=full`, `host_internet:true` (persists
+>    across reboot). Zero fork — see §6a. (Earlier "not cleared" was a networkd/NM conflict.)
+>
+> So add-on *installation* in Supervised-LXC needs **privileged + a NetworkManager-managed NIC** —
+> both pure **environment** set-up the image applies, **no Supervisor fork** (VALIDATED 2026-11-18,
+> §6a: `core_mosquitto` installed on a stock Supervisor; parity survived reboot). A **HAOS VM
+> (Option A)** gets this for free but pays the VM + USB-passthrough cost. Net: **Option B reaches
+> HAOS-equivalent add-on parity with ZERO fork** — the cadence-safe outcome — so B
+> stands for the USB fleet and A is only the network-coordinator exception.
+
+**Option A (HAOS VM) is retained only as a documented exception** for a site whose radios
+are **network-attached** (no USB to pass through), where the clean `.img` deploy and intact
+in-image RAUC are a genuine win and the VM cost is justified. Even there, prefer B unless
+that specific win applies. The PoC still boots A once to keep the escape hatch proven, but
+B is what the bootstrap builds by default. (C is excluded by the store req.) **Host-OS
+update safety is a separate, higher-value axis — see §14; the host's own A/B is where the
+"A/B model" lives now, since Ctrlable Pro no longer carries HAOS's A/B.**
+
+### 6a. Supervisor parity & fork-tracking strategy (DECIDED 2026-11-18)
+
+**Directive (owner, 2026-11-18):** Ctrlable Pro must behave **as close to HAOS as possible,
+without sacrificing any feature HAOS offers** — if that means modifying Supervisor, we modify
+it. But our Supervisor must **stay continuously rebaseable on vanilla**, tracking upstream
+**STABLE releases only** (never dev/beta/`:latest`), and keep shipping at the **same cadence
+Home Assistant ships today.** We do not invent a new tracker: Supervisor is already owned by
+**rebrand-tools**, which rebrands the official upstream Supervisor (brand strings, Core-image
+redirect, version endpoint, and it already neutralises `virtualization_image`) and publishes
+`ghcr.io/ctrlable/<arch>-hassio-supervisor` — the image the WHOLE fleet runs (Proxmox HAOS-in-VM
+*and* the Incus LXC appliance), pinned via the version endpoint's `images.supervisor`. Its model
+is reset-to-upstream forks + **build-time programmatic patches** (not committed diffs), stable-only
+by rule (PR #18 fixed a `:latest`→dev regression). So the cadence rule is satisfied by keeping the
+LXC delta a tiny patch *in that pipeline*, not by a second tracker.
+
+**Consequence — minimise the fork by reproducing the HAOS _environment_ first.** Most of the
+add-on-install gate stack (§6 corrected note) is **not** a Supervisor bug; it is Supervisor
+correctly detecting that the LXC does not look like HAOS. So we clear it in layers, patching
+Supervisor only for what no environment can satisfy:
+
+- **Layer 0 — environment parity (ZERO fork, the HAOS-faithful path). Do this first.**
+  Make the Ctrlable Pro container present the same environment HAOS gives Supervisor, so stock
+  checks pass unmodified:
+    - **privileged container** → clears `healthy:false → [privileged]` (PoC-confirmed).
+    - **NetworkManager owns the NIC** (install NM, MASK systemd-networkd for the NIC,
+      `unmanaged-devices=none`, one persistent NM DHCP connection) → this is how HAOS does
+      networking and is the fix for `host_internet:false`. **VALIDATED 2026-11-18 on the box:**
+      with networkd fully out of the way and NM alone doing DHCP on the Incus-bridge veth,
+      `nmcli networking connectivity` = `full` and Supervisor reports `host_internet:true` /
+      `supervisor_internet:true` — **persisting across a container reboot.** The connectivity
+      gate needs **no fork at all.** (The earlier "live hack didn't stick" was networkd and NM
+      fighting over `eth0`, which broke DHCP; the clean NM-only config is the fix.)
+    - **os-agent + a Supervisor-expected Docker daemon** (overlay2, correct cgroup, AppArmor
+      profile loaded) → clears the Docker/os-agent evaluations.
+  Target: **add-ons install on a stock Supervisor** with only environment set-up.
+  **PROVEN 2026-11-18:** with privileged + NM parity, `ha addons install core_mosquitto`
+  completed and the add-on container (`app_core_mosquitto`) came up healthy on a STOCK
+  Supervisor — **zero fork for add-ons.** (Note: this Supervisor renamed `addons`→`apps`;
+  track the terminology in future rebases.)
+- **Layer 1 — thin tracked fork (only the irreducible remainder).** For checks that are
+  *physically impossible* in an LXC even with a correct environment (e.g. a kernel/boot check
+  that assumes bare-metal HAOS) and for the **"unsupported" / branding** surface we own anyway,
+  carry a **small, isolated patch stack** (in rebrand-tools — see below). Each patch:
+  one concern, heavily commented with *why LXC needs it*, and ideally gated behind a config/env
+  flag so it is inert on real HAOS and trivial to re-apply. **No broad "rip out all the checks"
+  rewrite** — that would make upstream merges impossible, violating the cadence rule.
+
+**Where the fork lives (corrected 2026-11-18): rebrand-tools, not a second harness.** The
+Ctrlable "Ctrlable Supervisor" is built by **rebrand-tools** (`server/patch_supervisor.py` +
+`.github/workflows/build-supervisor.yml`): it pulls the official upstream Supervisor for the
+**stable** release, applies the brand patches, and pushes `ghcr.io/ctrlable/<arch>-hassio-supervisor`.
+The LXC supported-gate is just one more patch there — `patch_supervisor.py::_patch_lxc_supported_gate`
+— next to the `virtualization_image` suppression it already does, idempotent and loud-on-miss per
+that repo's conventions. The provisioner does **not** vendor or track Supervisor a second time
+(that would duplicate rebrand-tools' upstream tracking, against the cadence rule); `supervisor/`
+here holds only the **LXC deployment delta** — setting `CTRLABLE_PLATFORM=lxc` on the Supervisor
+container and the Layer-0 `env/` network parity. rebrand-tools' weekly `sync-upstream.yml` + brand
+verification are the "see every release" mechanism.
+
+**Why this still beats Option A for the USB fleet:** Option A (HAOS VM) gets all of Layer 0
+for free, but pays the VM + USB-passthrough cost the whole fleet wants to avoid. With Layer 0
+done in the image, Option B reaches add-on parity with a **near-empty** Layer-1 fork — the
+cadence-safe outcome — and keeps the single-container host. If Layer 0 on the box turns out to
+*not* clear connectivity without an unacceptably large patch, that is the signal to fall back to
+A for add-on-heavy sites (§6). **RESOLVED 2026-11-18: Layer-0 cleared both gates with zero
+fork and survived reboot — so the Layer-1 patch stack stays empty and B is fully validated for
+add-on parity. A remains only the per-site network-coordinator exception, not an add-on fallback.**
+
+**Fork status (2026-11-18, corrected):** the LXC delta is **one env-gated patch** in rebrand-tools
+(`_patch_lxc_supported_gate`) and it is OPTIONAL — add-on parity needs **zero** Supervisor change
+(Layer-0 env). The patch only clears the **"unsupported" banner**: the `os` reason (os_agent isn't
+HAOS) and `network_manager` reason (the NM-managed Incus veth isn't enumerable over Supervisor's NM
+D-Bus) are structurally unsatisfiable in an LXC yet block no feature, so it gates both behind
+`CTRLABLE_PLATFORM=lxc`. **ISOLATION:** the flag is set ONLY by the Incus appliance deployment
+(incus-bootstrap wires it into `hassio-supervisor.service`); the Proxmox HAOS-in-VM path never sets
+it, so the *same* branded image is inert there (and on real HAOS os_agent IS HAOS + the NIC is real,
+so the VM is genuinely supported anyway). **VALIDATED on ctrlable-pro-1 (2026-11-18):** the branded
+Supervisor image + the two gated evaluations + the flag → **healthy:true + supported:true,
+unsupported:[]**, add-ons install, Core healthy. Non-vacuous + idempotent proven against vanilla
+2026.11.0. Caveat: it does not revive the Supervisor Network UI (veth-over-D-Bus exposure is a
+tracked follow-up); host/Incus owns networking. PRODUCTION: a rebrand-tools build carries the gate;
+pin it fleet-wide via the version endpoint's `images.supervisor` (a deliberate fleet deploy).
+
+**Supervisor naming (DECIDED 2026-11-18):** keep the shared **"Ctrlable Pro Supervisor"** label on
+both the Proxmox-VM and Incus-LXC boxes — it is accurate (it *is* the Ctrlable Pro Supervisor on
+both), and the label is composed in `ha-core`'s `hassio` integration, not the Supervisor image, so a
+per-platform name would be a cross-component core patch. The two boxes are already distinguished by
+the **site/sidebar identity** (which follows the site's own name), so no forked core string per
+platform. One image, one brand; platform shows through the flag at the `supported`/behaviour layer, not the name.
 
 ## 7. The builder problem (the long pole)
 
@@ -130,6 +256,89 @@ frigate, freepbx, hardware-manager, dali-bridge). Approach: distro-agnostic inst
 inside a base Incus container, then `incus publish` to a local image — reusing the *pinned app
 version + `var_*`* intent we already encode, minus the Proxmox plumbing. This is new code **and**
 permanent maintenance we currently get upstream for free — the single biggest cost line.
+
+### 7a. Service inventory & porting difficulty (so P2's scope is explicit)
+
+The PoC built **one** service (zwavejs) to prove the path + size this cost — not the catalog.
+What actually has to be ported, and how hard each is:
+
+| Service | Source today | Hardware / nesting | Incus difficulty | PoC status |
+|---|---|---|---|---|
+| zwavejs (zwave-js-ui) | community-scripts | USB coordinator | **easy** (static binary) | ✅ built + deployed |
+| zigbee2mqtt (z2m) | community-scripts | **USB coordinator** | easy–moderate | path ✅; **USB passthrough ✅** (SONOFF MG24, B3) |
+| mosquitto / MQTT | community-scripts | none | easy | ✅ built via generic `build_service` |
+| matter-server | community-scripts | none (host net) | easy–moderate | follows the recipe |
+| go2rtc | community-scripts | none | easy | follows the recipe |
+| dali-bridge | `host/builders/dali-bridge.sh` | USB (hasseb DALI) | moderate | USB path ✅ (B3-style) |
+| hardware-manager | `host/builders/hardware-manager.sh` | host introspection | moderate | — |
+| freepbx | `host/builders/freepbx.sh` | SIP/RTP networking | moderate–hard | — (networking quirks) |
+| **frigate** | `host/builders/frigate-docker.sh` | **privileged + Docker-in-LXC + `/dev/dri` iGPU VAAPI** | **hard** | ✅ VAAPI **H264 dec+enc** in a *privileged* Incus CT (render node + i965) |
+| Ctrlable Pro | HAOS → Supervised-LXC | Docker-in-LXC + USB | hardest overall | ✅ Part B (store + Core) |
+
+**Net:** the zwavejs-likes all share one recipe shape (proven) and z2m's scary part — USB
+coordinator passthrough — is already retired by the B3 test. The genuine remaining service-level
+risk is **frigate**: iGPU `/dev/dri` passthrough + VAAPI transcode inside an Incus container,
+which, like Supervised, is where Incus semantics could fight. That is why it gets its own PoC
+item rather than being assumed mechanical. freepbx's SIP/RTP is a lesser, networking-shaped risk.
+The easy tier is now a **generic `build_service`** (`poc/incus-bootstrap.sh partD`), proven by
+building `ctrlable-mosquitto`; the remaining mechanical services port through it with the same shape.
+
+**Architecture correction (2026-11-17): most of these are HA ADD-ONS, not separate Incus
+containers.** zwavejs, zigbee2mqtt, mosquitto, matter-server, go2rtc, esphome, whisper, piper are
+all in the add-on store (`core_zwave_js`, `core_mosquitto`, `core_matter_server`, …) and should run
+as **Supervisor-managed add-ons INSIDE Ctrlable Pro**, exactly like HAOS — *not* as hand-built Incus
+service containers. That **collapses most of §7's builder burden**: the only things that genuinely
+need their own Incus container/builder are the **orchestrator** (ours), the **proprietary** services
+(`dali-bridge`, `hardware-manager` — not in the HA store, private source), **freepbx** (not an
+add-on), and **frigate** (by the GPU/privileged exception, though it is also an add-on). The catch:
+this depends on Supervised-LXC being **add-on-capable**, which per §6 needs the privileged + NM gate
+work — or on using the HAOS **VM** (Option A), where add-ons install for free. Either way, the old
+"port every community-script to Incus" framing of §7 is largely retired by running them as add-ons.
+
+**Frigate PoC result (2026-11-17), the one surprise worth pinning:** iGPU VAAPI transcode works
+in an Incus container — the box's Braswell N3700 render node passed through, `vainfo` enumerating
+H264 `VAEntrypointVLD`+`VAEntrypointEncSlice` both directly and from the real frigate image. But it
+**requires a *privileged* container**: the unprivileged `/dev/dri` node mount fails at Incus's
+forkmount layer, where privileged succeeds (Supervised, by contrast, ran unprivileged). This matches
+`frigate-docker.sh`'s existing privileged model, and only the **render node** (`renderD128`) is
+needed — `card0` is display-only and its mount is what broke the `gpu`-device attempt. So the
+service-container split is: **everything unprivileged except frigate, which is privileged for the
+GPU.** Driver is **i965** on this Gen8 Braswell (iHD is Broadwell+), selected the same way the
+builder already probes.
+
+### 7b. Private-repo install & update — the shared deploy-token pattern (DECIDED)
+
+Proprietary services (dali-bridge, hardware-manager, the Ctrlable Pro panels, …) live in
+**private** repos, yet appliances in the field must install and update them. The fleet already
+solved this (reference: `dali-bridge/dali_bridge/updater.py`), and the Incus migration reuses it
+unchanged. **Two layers — the appliance only ever needs the first:**
+
+- **Runtime install/update = Ctrlable Store + device token (NO GitHub credential on-box).**
+  Each service enrols as its own `Device` using the **provisioning_key** baked into the
+  appliance (`POST <portal>/v1/auto-enroll-service`, `X-Provisioning-Key`) → gets a
+  **device token** persisted `0600` at `/etc/ctrlable/<svc>.conf`. It then pulls packaged,
+  sha256-verified releases from the Store's **private "bridge lane"** with `X-Device-Token`:
+  `GET /api/v1/store/bridge/latest`, `GET /api/v1/store/download/<product>/<ver>`, and drains
+  portal-queued jobs (`GET/POST /api/v1/store/jobs`) so a version can be pushed to every site at
+  once. Apply is boring-by-design: download, verify, unpack, atomic-swap the package dir, keep
+  `.previous` for a hand rollback, restart. Production services never self-apply unattended —
+  a click or a queued job asks. The bridge lane is kept **out of the HA component catalog** so it
+  can't confuse the add-on installer.
+- **Build/packaging = private clone (CI, or a build host — never the appliance).** The image is
+  built from private source via the shared convention: an SSH **deploy key** at
+  `/etc/ctrlable/<svc>-deploy-key`, **or** `<SVC>_TOKEN` (`x-access-token` HTTPS PAT). CI normally
+  holds the token and also publishes the Store release (`POST /api/v1/store/releases`,
+  `STORE_UPLOAD_KEY`). Obfuscation/licensing happen here, once.
+
+**How it lands in the Incus pipeline:** `deploy.py` already seeds the `provisioning_key` into the
+dali-bridge/hardware-manager containers (`_wire_to_for`), and the Incus backend
+(`IncusProvider.deploy_template`) writes it into `/etc/ctrlable/firstboot.conf` — so a deployed
+service enrols and self-updates with **no token on the appliance**. The build side is
+`poc/incus-bootstrap.sh build_private_service <svc> <repo>` (and `build_dali_bridge` /
+`build_hardware_manager`), which clone via the deploy-key/token convention **at build time only**
+and publish `ctrlable-<svc>`; each service repo supplies a `deploy/provision-incus.sh` (contract)
+or falls back to a venv install. **freepbx is the exception that needs no token at all** — Sangoma
+ships a public installer (`build_freepbx`), which is why it's the easy one.
 
 ## 8. Networking
 
@@ -178,7 +387,11 @@ If #2 fights us, that materially changes the plan (and reopens Option B as a fal
 - **P3 — Ctrlable Pro.** HAOS as an Incus VM **or** Supervised-in-LXC per the §6/§13 outcome; carry over rebrand + firstboot (+ RAUC OTA if VM, LXC-snapshot rollback if LXC).
 - **P4 — Networking & storage.** Adopt `vmbr0/1`; storage pool; backup/restore.
 - **P5 — Bootstrap.** `bootstrap-appliance.sh` installs Incus on plain Debian instead of
-  standing up Proxmox. Per-box cutover with Proxmox rollback retained.
+  standing up Proxmox. Per-box cutover with Proxmox rollback retained. **Zero-touch path built +
+  validated (2026-11-17):** the RAUC image (`image/`) bakes Incus + first-boot + the orchestrator
+  image (`image/builders/build-orchestrator.sh`); first boot brings up the btrfs pool and launches
+  `ctrlable-orchestrator`, which — proven on the box — drives the host Incus over a proxied socket
+  and serves the provisioner API, then self-enrols + deploys the fleet. No human input.
 
 ## 13. Radio coordinators & service topology (what actually drives the host choice)
 
@@ -203,10 +416,12 @@ co-location already works in the current HAOS **VM** — it is **not** an LXC-on
 thing LXC specifically buys is the easier USB passthrough in (a). Consolidation trades isolation for
 simpler maintenance; it does not require choosing Option B.
 
-> **Net:** fleet is USB-only now → **Option B leans ahead** at those sites (trivial USB, snapshot ≈ RAUC
-> per-component, a "supported" status we control). As sites adopt **network coordinators**, **Option A
-> (HAOS VM)** regains the edge (clean `.img`, intact RAUC, zero passthrough). **Host-OS atomic rollback
-> (§14) is the higher-value, orthogonal prize either way.**
+> **Net (decided §6):** **Option B (Supervised-LXC) is the default** — Ctrlable Pro is a container, no VM.
+> It fits the whole USB-only fleet (trivial USB, snapshot ≈ RAUC per-component, a "supported" status we
+> control) **and** keeps the host a uniform all-container box that is simpler to provision/snapshot/move.
+> **Option A (HAOS VM)** is kept only as a per-site exception for **network-attached coordinators** (clean
+> `.img`, intact in-image RAUC, zero passthrough). **Host-OS atomic rollback (§14) is now where the A/B
+> model lives — the higher-value prize either way.**
 
 ## 14. Host OS update safety (atomic rollback) — orthogonal, highest-value
 
@@ -231,12 +446,198 @@ runtime wedges in our history (memory-reclaim livelock, USB-URB storms) — thos
 failures and need watchdog/kdump, not A/B. Do not let host A/B be sold as a cure for boxes going
 unreachable in general.
 
+### 14a. Disk & partition layout — disposable OS, one persistent data pool
+
+Now that Ctrlable Pro is a **container** (§6) and no longer ships HAOS's own A/B, the A/B
+model moves **to the Debian host**. The layout that makes an appliance easy to **update,
+snapshot, back up, and move** separates two things that today live on one root:
+
+```
+  /dev/sdX
+   ├─ ESP (FAT32, ~512M)            boot loader + both kernels
+   ├─ root-A  (OS slot A)   ─┐      the Debian host OS — disposable, swappable
+   ├─ root-B  (OS slot B)   ─┘      (image-based A/B, or snapshot pair)
+   └─ data    (the rest)           ONE persistent pool: the Incus storage pool
+                                    (all containers incl. ctrlable-pro + their
+                                    /config, service data, snapshots)
+```
+
+- **The host OS is disposable.** An update writes the *inactive* slot and flips a boot
+  pointer; a failed boot falls back to the known-good slot (boot-counting, §14). Nothing
+  an operator cares about lives on the OS slot, so re-imaging it is safe.
+- **All state lives in the `data` pool**, which is **never touched by an OS update**. This
+  is the single artifact to back up and the single artifact to move: `incus export` of each
+  instance, or a pool-level `btrfs send` / `zfs send` snapshot stream, carries the *entire*
+  appliance (Ctrlable Pro + every service, with their data) to another box regardless of
+  the host OS version on either side. "Move the appliance" becomes "move the data pool."
+- **Why this beats HAOS-style A/B for the whole disk:** HAOS keeps OS *and* `/config` on
+  the same A/B image, so a restore couples OS version to data. Splitting them lets us roll
+  the OS back and forward independently of the data, which is exactly what multi-service
+  appliance migration needs.
+
+**DECIDED 2026-11-17 — image-based A/B via RAUC-for-host.** We build a purpose-built Debian
+appliance OS image with RAUC A/B slots, the same way we already build the HAOS `ctrlable-pro`
+image (rebrand-tools pipeline, RAUC OTA) — so this **reuses existing RAUC/image muscle** rather
+than inventing a new rollback scheme. The host root becomes immutable and swappable; the
+`data`/Incus pool is a separate btrfs filesystem the OS image never touches. (We considered a
+btrfs-subvolume `@`/`@_prev` + grub-btrfs approach as a ship-fast alternative; rejected in favor
+of true image A/B because it matches our pipeline and gives real slot-level rollback, not just a
+GRUB snapshot pick.)
+
+### 14b. RAUC-for-host build stack (x86 Debian) — concrete shape
+
+> **VALIDATED end-to-end 2026-11-18** on the box (Debian 13, mmdebstrap/rauc/grub present): `make keys rootfs image bundle` produced a **flashable `ctrlable-pro-2026.11.18.img`** (17.7 GB) with the designed GPT A/B layout — `esp 512M · root-a 4G · root-b 4G · data 8G` — EFI GRUB installed, `PRETTY_NAME="Ctrlable Pro (Debian 13)"`, and `ctrlable-firstboot` + `incus` enabled to boot zero-touch; and a **signed verity RAUC bundle `*.raucb`** (336 MB) that **verifies against the keyring** (`Verified inline signature by 'O = Ctrlable, CN = ctrlable-pro-dev'`, compatible `ctrlable-pro-x86-64`). Two chroot-only warnings (`sshd -t`, `grub-probe`) are expected and harmless (the A/B `grub.cfg` comes from `pack-image`, not chroot `update-grub`). Remaining: boot-test the `.img` in a UEFI VM to watch first-boot run stage1→orchestrator→deploy; wire prod RAUC keys (CI secrets) in place of the dev keys.
+
+
+```
+  Build pipeline (CI, mirrors rebrand-tools HAOS build):
+    mmdebstrap/mkosi → sealed Debian rootfs (Incus + orchestrator key baked in)
+      → RAUC bundle (.raucb, signed) → OTA via our existing release channel
+  On-box slots:
+    ESP (FAT32) ──GRUB + grubenv (RAUC `grub` backend: ORDER + boot-try counter)
+    root-A / root-B  ── RAUC writes the inactive slot, flips grubenv, reboots
+    data (btrfs)     ── Incus pool; untouched by slot writes; holds all state
+```
+
+- **Bootloader slot-select backend is the one real wrinkle.** RAUC on x86 Debian typically
+  drives **GRUB via `grubenv`** (`rauc` flips `ORDER`/`_TRY`, GRUB counts boot attempts and
+  falls back) — this is the proven path and gives the **automatic rollback on failed boot** a
+  no-IPMI box needs. The alternative is a systemd-boot/`bootctl` backend. **Leaning GRUB+grubenv**
+  (best-documented RAUC x86 story, boot-counting built in). This is the next sub-decision (§15).
+- **Reuse, don't reinvent:** the RAUC key/signing, the bundle format, and the OTA delivery
+  channel already exist for the HAOS appliance — the host bundle is a *second* RAUC target on the
+  same machinery, not a parallel system.
+- **First-boot contract:** the image bakes the orchestrator pubkey into `/root/.ssh/authorized_keys`
+  and ships Incus pre-installed; first boot creates/attaches the `data` btrfs Incus pool if absent,
+  then registers with the orchestrator — **zero hand-typed setup**, which is the whole point.
+- **The `data`/Incus pool being a separate filesystem from the OS is the non-negotiable invariant**
+  — it is what lets an OS slot be wiped/rolled without touching appliance state, and what makes
+  "move the appliance" = "`btrfs send` the data pool."
+
+### 14c. Host identity / branding (GRUB + console + SSH)
+
+A fielded Ctrlable appliance should *look* like a Ctrlable appliance everywhere an operator or
+field tech lands, not like a stock Debian box. In scope for the image build / first-boot
+(implemented in `poc/branding/apply-branding.sh`, idempotent):
+
+- **GRUB** — `GRUB_DISTRIBUTOR="Ctrlable Pro"` so the boot menu entries read *Ctrlable Pro
+  GNU/Linux* (plus room for a GRUB theme/background later). Applied only where grub exists.
+- **Console (getty) `/etc/issue`** — a Ctrlable ASCII banner shown at the local login prompt.
+  Uses a `#`-block art because getty runs backslash escapes (`\n`=host, `\l`=tty, `\m`, `\t`) —
+  a slash-based art would be mangled; the `#` art is escape-safe, with the dynamic host/tty line
+  appended after it.
+- **SSH** — pre-auth `Banner /etc/ctrlable/banner` (via an `sshd_config.d` drop-in, validated with
+  `sshd -t` before any reload so a bad edit can never lock the box out) **and** a post-login
+  `/etc/motd`, both carrying the Ctrlable ASCII.
+- **OS identity** — `PRETTY_NAME` in `/etc/os-release` set to "Ctrlable Pro (Debian 13)".
+
+Note this is **host** branding, distinct from the Ctrlable Pro *application* rebrand (the HA
+frontend "Home Assistant"→"Ctrlable Pro" work) and from flipping Supervisor's supported/healthy
+banner — those live in the app layer / Supervisor fork, not here.
+
 ## 15. Open decisions
 
-- [ ] Ctrlable Pro host: **Option B (Supervised-LXC)** for USB-only sites vs **Option A (HAOS VM)** for network-coordinator sites — PoC both (§6, §13).
-- [ ] Host OS atomic rollback (§14): btrfs+snapper+grub-btrfs vs ZFS boot envs vs image-based A/B — and whether to wire boot-counting auto-rollback.
-- [ ] Per-site: USB-local (tilts B) vs commit to **network coordinators** (keeps A) — drives the host choice (§13).
+- [x] **DECIDED 2026-11-17 — Ctrlable Pro host: Option B (Supervised-in-LXC), avoid VMs.** Container by default; Option A (HAOS VM) retained only as a per-site exception for network-attached-coordinator sites (§6, §13).
+- [x] **DECIDED 2026-11-18 — Supervisor parity: match HAOS behaviour with no feature loss; fork Supervisor where needed but keep it continuously rebaseable on vanilla at upstream cadence (§6a).** Strategy: clear the add-on-install gates with **environment parity first (Layer 0, zero fork)** — privileged CT + NetworkManager-managed NIC + os-agent — and carry only an irreducible, isolated patch stack (Layer 1) as one env-gated patch in **rebrand-tools** `patch_supervisor.py` (the existing, stable-only Supervisor rebrand pipeline — NOT a second tracker); the provisioner only sets `CTRLABLE_PLATFORM=lxc` + the Layer-0 `env/` parity. VALIDATED: supported:true on the box.
+- [x] **DECIDED 2026-11-17 — disk layout: disposable OS slot(s) + ONE persistent Incus data pool on a separate filesystem (§14a).** The data pool is the single backup/move artifact and is never touched by an OS update.
+- [x] **DECIDED 2026-11-17 — OS A/B mechanism: image-based A/B via RAUC-for-host (§14a/§14b)**, reusing the HAOS/rebrand-tools RAUC+image pipeline. btrfs-subvolume alternative rejected.
+- [ ] **OPEN — RAUC bootloader slot-select backend (§14b): GRUB + grubenv** (leaning; best x86 RAUC story + built-in boot-counting auto-rollback) **vs systemd-boot/`bootctl`**.
+- [x] **DECIDED 2026-11-17 — data-pool / storage backend: btrfs** (in-tree, no out-of-tree DKMS to break on a fielded no-IPMI box; native `send`/`receive` for off-box backup/move).
+- [ ] Per-site: USB-local (B, the default) vs **network coordinators** (the only case that re-opens A) — drives the per-site exception (§13).
 - [ ] Networks: **adopt existing `vmbrN`** vs Incus-managed networks.
-- [ ] Storage backend: zfs vs btrfs.
 - [ ] Builders: fork/adapt community-scripts logic vs write clean distro-agnostic recipes.
 - [ ] Target Debian base: 13 (trixie) + Incus from Debian repo vs Zabbly packages.
+- [x] **RESOLVED 2026-11-18 (§16.1): BUILD into our orchestrator; borrow incus-ui-canonical's techniques over a direct Incus REST client.** Native Incus UI rejected — it is version-coupled to Zabbly's Incus (Debian 6.0.4 serves `/ui/`→404), so adopting it would reverse the §15 Debian-native decision. It's open source, so we reimplement its live-API techniques (events/console/exec/metrics websockets) ourselves, in one branded surface that also owns our provisioning/fleet/OTA/claim flows.
+- [x] **RESOLVED 2026-11-18 — Layer-0 environment parity clears both add-on gates with ZERO fork, persistently.** Masking networkd for the NIC + NM-alone DHCP on the Incus-bridge veth gives `connectivity=full` / `host_internet:true`; `ha addons install core_mosquitto` then succeeded on a **stock** Supervisor and the state survived a container reboot. Patch stack stays empty; B validated for add-on parity.
+
+## 16. Provisioner / orchestrator web UI — management roadmap
+
+Today the provisioner UI (`frontend/`, `backend/`) is largely a **provisioning/deploy** surface. On
+Incus we lose the Proxmox web console entirely, so the orchestrator UI must grow into the day-2
+**management** surface operators would otherwise get from Proxmox. Scope to add (post-migration,
+tracked here so it isn't forgotten):
+
+**Per-appliance (what Proxmox's node/guest views gave us):**
+- Instance lifecycle: start / stop / restart / freeze, **snapshot + restore** (LXC snapshot ≈ our
+  per-component rollback), clone, delete — across containers *and* any VM exception.
+- **Console/terminal** access in-browser (Incus exposes an exec/console websocket).
+- Live **metrics** (CPU/mem/disk/net per instance + host) — Incus has a metrics endpoint
+  (Prometheus format) we can scrape instead of Proxmox's rrd.
+- **Storage** view: the `data` btrfs pool usage, per-instance volumes, snapshots.
+- **Network** view: `incusbr-*` / adopted bridges, the internal backplane, per-instance NICs + the
+  USB/`by-id` device bindings (coordinators).
+- **Host OS / RAUC** panel: current A/B slot, health, pending OTA bundle, trigger update + rollback.
+
+**Fleet (what Proxmox never gave us — our differentiator):**
+- Multi-appliance roster, health, versions, "update N boxes", per-site grouping.
+
+**The decision: build vs adopt vs hybrid.** Either we keep investing in our own orchestrator UI, or
+we adopt a tool better suited to Incus — but note the hard constraint: **our provisioning, firstboot,
+manifest/release, fleet, call-home, and RAUC-OTA flows, plus the Ctrlable-specific surfaces, have no
+off-the-shelf equivalent.** A generic Incus tool can own **day-2 instance management**; it cannot own
+what makes us us. So full replacement is unlikely — the realistic axis is how much day-2 to reuse.
+
+Candidates to evaluate (all speak the same Incus REST API our `HostDriver` targets):
+- **Incus built-in UI** (`incus-ui-canonical`; daemon serves it at `core.https_address`, usually
+  `:8443`) — modern SPA (LXD-UI lineage): instances, snapshots, console, metrics, storage, networks.
+  *PoC note (2026-11-17): the HTTPS API serves (`:8443`→200) but the built-in UI is **version-
+  coupled to Zabbly's Incus**. `incus-ui-canonical` is not in Debian's repo; Zabbly ships it (even
+  for trixie), but the assets are built for Zabbly's Incus **7.6** and **Debian's Incus 6.0.4 does
+  not serve them** (`/ui/`→404 even with the assets dropped at `/opt/incus/ui`). So the built-in UI
+  effectively requires **adopting Zabbly's Incus wholesale** — which is exactly the §15 Debian-repo-
+  vs-Zabbly decision, now with teeth: "want the native Incus UI" ⇒ "run Zabbly's Incus."*
+- **LXConsole** — open-source multi-server web UI for LXD/Incus; closer to a Proxmox-style fleet view.
+- **Our provisioner UI, extended** — build the day-2 panels in, for one branded, coherent surface.
+- **Proxmox UI** — the familiarity benchmark for field techs (node tree, guest tabs, console, task log).
+
+Likely answer = **hybrid**: reuse a generic UI (Incus UI / LXConsole) for raw instance day-2 while we
+keep + grow our orchestrator for provisioning, fleet, OTA, and Ctrlable flows — single sign-on / link
+between them. Decide after hands-on evaluation.
+
+> **Action:** stand up `incus-ui-canonical` (and try LXConsole) against the PoC box to evaluate
+> reuse-vs-build-vs-hybrid, then scope the chosen management surface as a **P6** phase.
+
+### 16.1 DECISION + design (2026-11-18): build it ourselves, borrow incus-ui's techniques
+
+**Decision:** build the day-2 management surface **into our own orchestrator UI**; do NOT adopt a
+generic tool. The PoC note above is decisive — `incus-ui-canonical` is version-coupled to Zabbly's
+Incus and won't serve on Debian's 6.0.4, so "adopt it" ⇒ "run Zabbly's Incus," reversing §15. It is
+open source (LXD-UI lineage), so we **learn from its techniques** and reimplement over the same Incus
+REST API, inside one branded surface that also owns the flows no generic tool can.
+
+**Keystone — a direct Incus REST client** over the proxied `/var/lib/incus/unix.socket`, alongside
+today's CLI-shelling `IncusProvider`. The CLI is request/response only and cannot stream; the REST
+path is what unlocks the live events websocket, console/exec websockets, the operations model, and
+the metrics endpoint. Everything below depends on this.
+
+**Borrow (reimplemented our way):**
+- `/1.0/events` websocket → push-based fleet + instance state; map our deploy `[PHASE]` markers into
+  the same operations stream (kills polling — the biggest UX win).
+- `/1.0/instances/<n>/console` + `/exec` websockets → in-browser VGA console + shell (pairs with the
+  host VPN backdoor for true remote field support).
+- operations model → deploy / OTA / clone surface as tracked operations with progress, not spinners.
+- `/1.0/metrics` (Prometheus) → per-instance + host CPU/mem/disk/net cards + sparklines.
+
+**Our moat (primary surface, no off-the-shelf equivalent):** appliance/site/fleet model,
+provision-from-manifest, clone-to-deploy, RAUC OTA + A/B rollback, dealer claim, enrollment +
+VPN/backdoor status, internal-net wiring, Ctrlable-Pro health (Core :8123, Supervisor
+`supported:true`, add-ons). The borrowed Incus day-2 is folded in as a tab — one interface, no second tool.
+
+**Deployment:** keep the orchestrator **containerized** (OTA-updatable via image/Store) + a thin
+**host reverse-proxy front door** that fronts the SPA and stays up even when the orchestrator
+container is down (same philosophy as the host VPN backdoor). Reachable on one host address behind
+the VPN/LAN.
+
+**Frontend stack:** upgrade from today's bare React (`react`+`react-dom`, single `App.jsx`) to the
+portal's stack (react-query + router + a component system + a ws client) and **share the portal's
+design system**, for one coherent Ctrlable surface across portal + appliance.
+
+**Phases (P6):**
+- **P6.1 spike:** REST client + `/1.0/events` → live fleet/instance view + operations (deploy phases). *(Prove the approach before the full rebuild.)*
+- **P6.2:** in-browser console + exec.
+- **P6.3:** metrics + Ctrlable-Pro health probes.
+- **P6.4:** domain flows — provision wizard, OTA/rollback, claim/dealer, network/storage views.
+
+**Open sub-decisions:** (a) confirm shared-vs-own design system (recommended: shared with portal);
+(b) folds in the §14b data-persistence item (Incus DB on the data partition) since the OTA/rollback
+panel depends on it.

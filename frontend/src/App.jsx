@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react'
 import './App.css'
+import '@xterm/xterm/css/xterm.css'
 
 // ---------------------------------------------------------------------------
 // Auth helpers
@@ -1359,6 +1360,38 @@ function ProvisionerCard() {
 }
 
 // ---------------------------------------------------------------------------
+// Dealer claim — shows this appliance's claim code + a QR that deep-links the
+// portal claim page, so a dealer can claim it to their client without console access.
+// ---------------------------------------------------------------------------
+function ClaimCard() {
+  const [c, setC] = useState(null)
+  useEffect(() => {
+    apiFetch('/api/appliance/claim').then(r => r.json()).then(setC).catch(() => setC({ available: false }))
+  }, [])
+  if (!c || !c.available) return null
+  return (
+    <div className="card">
+      <div className="hd"><h2>Dealer claim</h2>
+        <div className="right"><a className="btn-xs primary" href={c.claim_url} target="_blank" rel="noreferrer">Claim in portal →</a></div>
+      </div>
+      <div className="bd" style={{ display: 'flex', gap: 22, alignItems: 'center', flexWrap: 'wrap' }}>
+        {c.qr_svg
+          ? <div style={{ width: 168, height: 168, flex: '0 0 auto', background: '#fff', padding: 8, borderRadius: 10 }}
+                 dangerouslySetInnerHTML={{ __html: c.qr_svg }} />
+          : null}
+        <div style={{ minWidth: 220 }}>
+          <p className="form-note">Scan to claim this appliance to a dealer/client in the portal — or enter the code + MAC at <b>Portal → Appliances → Claim</b>.</p>
+          <dl className="kv">
+            <dt>Claim code</dt><dd><code style={{ fontSize: 19, letterSpacing: 2 }}>{c.claim_code}</code></dd>
+            <dt>MAC</dt><dd><code>{c.mac}</code></dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Platform tab
 // ---------------------------------------------------------------------------
 function PlatformTab() {
@@ -1419,6 +1452,8 @@ function PlatformTab() {
             </div>
           </div>
 
+          <ClaimCard />
+
           <div className="card">
             <div className="hd"><h2>Site LAN</h2>
               <span className={`pill ${lan?.configured ? 'ok' : 'warn'}`}>{lan?.configured ? 'routed' : 'pending'}</span></div>
@@ -1469,6 +1504,427 @@ function PlatformTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Fleet (Live) tab — instances streamed over the Incus event relay (SPEC §16.1, P6.1).
+// Loads nothing up front: it follows /api/incus/events (SSE), whose first frame is a full
+// snapshot, then live changes. The SSE endpoint is Bearer-authed and EventSource can't set
+// headers, so we consume it with fetch + a stream reader (auto-reconnecting).
+// ---------------------------------------------------------------------------
+function FleetTab() {
+  const [instances, setInstances] = useState({})
+  const [deploys, setDeploys] = useState({})       // hostname -> {index,total,label} while deploying
+  const [live, setLive] = useState(false)
+  const [err, setErr]   = useState(null)
+  const [selected, setSelected] = useState(null)   // instance name for the detail drawer
+
+  useEffect(() => {
+    const ac = new AbortController()
+    let stopped = false
+    const apply = (evt) => {
+      if (evt.type === 'snapshot') {
+        const m = {}; for (const i of evt.instances || []) m[i.name] = i; setInstances(m)
+      } else if (evt.type === 'instance-added' || evt.type === 'instance-changed') {
+        setInstances(p => ({ ...p, [evt.name]: evt.instance }))
+      } else if (evt.type === 'instance-removed') {
+        setInstances(p => { const n = { ...p }; delete n[evt.name]; return n })
+      } else if (evt.type === 'deploy-phase') {
+        const k = evt.hostname || evt.name
+        setDeploys(p => ({ ...p, [k]: { index: evt.index, total: evt.total, label: evt.label } }))
+      } else if (evt.type === 'deploy-result') {
+        const k = evt.hostname || evt.name
+        setDeploys(p => ({ ...p, [k]: { done: true, ok: evt.ok } }))
+        setTimeout(() => setDeploys(p => { const n = { ...p }; delete n[k]; return n }), 6000)
+      } else if (evt.type === 'error') { setErr(evt.error) }
+    }
+    const run = async () => {
+      while (!stopped) {
+        try {
+          const res = await fetch(rel('/api/incus/events'),
+            { headers: { Authorization: `Bearer ${getToken()}` }, signal: ac.signal })
+          if (res.status === 401) { clearToken(); window.location.reload(); return }
+          if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+          setLive(true); setErr(null)
+          const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''
+          while (!stopped) {
+            const { value, done } = await reader.read(); if (done) break
+            buf += dec.decode(value, { stream: true })
+            let idx
+            while ((idx = buf.indexOf('\n\n')) >= 0) {
+              const frame = buf.slice(0, idx); buf = buf.slice(idx + 2)
+              const dl = frame.split('\n').find(l => l.startsWith('data:'))
+              if (dl) { try { apply(JSON.parse(dl.slice(5).trim())) } catch { /* partial frame */ } }
+            }
+          }
+        } catch (e) {
+          if (stopped || ac.signal.aborted) return
+          setLive(false); setErr(e.message || 'stream lost')
+        }
+        if (!stopped) await new Promise(r => setTimeout(r, 3000))   // reconnect backoff
+      }
+    }
+    run()
+    return () => { stopped = true; ac.abort() }
+  }, [])
+
+  const list = Object.values(instances).sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+  const running = list.filter(i => (i.status || '').toLowerCase() === 'running').length
+  const b = (v) => (v != null ? fmtBytes(v) : '—')
+
+  return (
+    <>
+      <div className="head"><div>
+        <h1>Fleet <span className={`livedot ${live ? 'on' : ''}`} title={live ? 'live' : 'reconnecting…'} /></h1>
+        <p>Instances on this appliance, live over the Incus event stream — {list.length} total, {running} running.</p>
+      </div></div>
+      {err && !live && <div className="banner error">Live stream: {err} — reconnecting…</div>}
+      {Object.keys(deploys).length > 0 && (
+        <div className="deploy-strip">
+          {Object.entries(deploys).map(([host, d]) => (
+            <div className="deploy-row" key={host}>
+              <span className="dr-host mono">{host}</span>
+              {d.done
+                ? <span className={`pill ${d.ok ? 'ok' : 'crit'}`}>{d.ok ? 'deployed' : 'failed'}</span>
+                : <>
+                    <div className="dr-bar"><div className="dr-fill"
+                      style={{ width: `${d.total ? Math.round((d.index / d.total) * 100) : 0}%` }} /></div>
+                    <span className="dr-label">{d.index}/{d.total} · {d.label}</span>
+                  </>}
+            </div>
+          ))}
+        </div>
+      )}
+      {list.length === 0
+        ? <div className="loading">{live ? 'No instances yet.' : 'Connecting to the Incus event stream…'}</div>
+        : <div className="fleet-grid">
+            {list.map(i => (
+              <div className="fleet-card" key={i.name} role="button" tabIndex={0}
+                   onClick={() => setSelected(i.name)}
+                   onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(i.name) } }}>
+                <div className="fc-head">
+                  <span className="fc-name mono">{i.name}</span>
+                  <span className={`pill ${variantFor((i.status || '').toLowerCase())}`}>{i.status || 'unknown'}</span>
+                </div>
+                <div className="fc-type">{i.type === 'virtual-machine' ? 'virtual machine' : 'container'}{i.project && i.project !== 'default' ? ` · ${i.project}` : ''}</div>
+                <dl className="fc-metrics">
+                  <div><dt>Memory</dt><dd className="mono">{b(i.memory_usage)}</dd></div>
+                  <div><dt>Net ↓/↑</dt><dd className="mono">{b(i.network_rx)} / {b(i.network_tx)}</dd></div>
+                  <div><dt>Disk</dt><dd className="mono">{b(i.disk_usage)}</dd></div>
+                </dl>
+              </div>
+            ))}
+          </div>}
+      {selected && <InstanceDrawer name={selected} onClose={() => setSelected(null)} />}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Instance detail drawer — full config/devices/state + lifecycle (SPEC §16.1, P6.2/P6.4).
+// Fetches the name-keyed Incus record; shows compute, storage (disks), network (NICs), and
+// passthrough (USB/GPU/PCI) devices + raw config, with Start/Stop/Restart.
+// ---------------------------------------------------------------------------
+function InstanceDrawer({ name, onClose }) {
+  const [rec, setRec] = useState(null)
+  const [err, setErr] = useState(null)
+  const [busy, setBusy] = useState(null)      // action in flight
+  const [showRaw, setShowRaw] = useState(false)
+  const [resizeVals, setResizeVals] = useState({})
+  const [hw, setHw] = useState(null)          // host hardware for the add-device picker
+  const [adding, setAdding] = useState(null)  // {type, sel, name} when the add form is open
+  const [cmd, setCmd] = useState('')
+  const [cmdOut, setCmdOut] = useState(null)
+  const [cmdBusy, setCmdBusy] = useState(false)
+  const [termOpen, setTermOpen] = useState(false)
+  const [snaps, setSnaps] = useState(null)      // snapshot list (null = loading)
+  const [snapName, setSnapName] = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/incus/instance/${encodeURIComponent(name)}`)
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`)
+      setRec(await res.json()); setErr(null)
+    } catch (e) { setErr(e.message) }
+  }, [name])
+  useEffect(() => { load() }, [load])
+
+  const act = async (action) => {
+    setBusy(action); setErr(null)
+    try {
+      const res = await apiFetch(`/api/incus/instance/${encodeURIComponent(name)}/action`,
+        { method: 'POST', body: JSON.stringify({ action }) })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`)
+      setTimeout(load, 1200)
+    } catch (e) { setErr(e.message) }
+    finally { setBusy(null) }
+  }
+
+  // --- edit mutations (resize / attach / detach / exec) ---
+  const post = async (path, body, method = 'POST') => {
+    const res = await apiFetch(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) })
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`)
+    return res.json().catch(() => ({}))
+  }
+  const doResize = async (dev) => {
+    const size = (resizeVals[dev] || '').trim(); if (!size) return
+    setBusy('resize'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/resize`, { device: dev, size }); setResizeVals(v => ({ ...v, [dev]: '' })); setTimeout(load, 800) }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const removeDevice = async (dev) => {
+    if (!window.confirm(`Remove device "${dev}" from ${name}? This can disrupt the instance.`)) return
+    setBusy('rm'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/device/${encodeURIComponent(dev)}`, null, 'DELETE'); setTimeout(load, 800) }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const openAdd = async () => {
+    setAdding({ type: 'usb', sel: '', name: '' })
+    if (!hw) { try { const res = await apiFetch('/api/incus/host-hardware'); if (res.ok) setHw(await res.json()) } catch { /* ignore */ } }
+  }
+  const addDevice = async () => {
+    const a = adding; if (!a) return
+    let props = {}; let dname = (a.name || '').trim()
+    if (a.type === 'usb') { const [vid, pid] = (a.sel || '').split(':'); if (!vid) return; props = { vendorid: vid, productid: pid }; dname = dname || `usb-${vid}-${pid}` }
+    else if (a.type === 'gpu') { props = a.sel ? { pci: a.sel } : {}; dname = dname || 'gpu' }
+    else if (a.type === 'pci') { if (!a.sel) return; props = { address: a.sel }; dname = dname || `pci-${a.sel.replace(/[:.]/g, '')}` }
+    setBusy('add'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/device`, { name: dname, type: a.type, props }); setAdding(null); setTimeout(load, 800) }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  // --- snapshots / backup ---
+  const loadSnaps = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/incus/instance/${encodeURIComponent(name)}/snapshots`)
+      if (res.ok) setSnaps((await res.json()).snapshots || [])
+      else setSnaps([])
+    } catch { setSnaps([]) }
+  }, [name])
+  useEffect(() => { loadSnaps() }, [loadSnaps])
+  const createSnap = async () => {
+    const sn = (snapName || '').trim() ||
+      `snap-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`
+    setBusy('snap'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/snapshots`, { name: sn }); setSnapName(''); loadSnaps() }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const restoreSnap = async (sn) => {
+    if (!window.confirm(`Restore ${name} to snapshot "${sn}"?\n\nThis DISCARDS all changes since the snapshot and cannot be undone.`)) return
+    setBusy('snap'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/snapshots/${encodeURIComponent(sn)}/restore`); setTimeout(load, 1200); loadSnaps() }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+  const deleteSnap = async (sn) => {
+    if (!window.confirm(`Delete snapshot "${sn}" of ${name}?`)) return
+    setBusy('snap'); setErr(null)
+    try { await post(`/api/incus/instance/${encodeURIComponent(name)}/snapshots/${encodeURIComponent(sn)}`, null, 'DELETE'); loadSnaps() }
+    catch (e) { setErr(e.message) } finally { setBusy(null) }
+  }
+
+  const runCmd = async () => {
+    if (!cmd.trim()) return
+    setCmdBusy(true); setCmdOut(null)
+    try { setCmdOut(await post(`/api/incus/instance/${encodeURIComponent(name)}/exec`, { command: cmd })) }
+    catch (e) { setCmdOut({ stderr: e.message, exit: -1 }) } finally { setCmdBusy(false) }
+  }
+
+  const cfg = rec?.config || {}
+  const st  = rec?.state || {}
+  const devices = rec?.expanded_devices || rec?.devices || {}
+  const ofType = (...types) => Object.entries(devices).filter(([, d]) => types.includes(d.type))
+  const disks = ofType('disk'), nics = ofType('nic')
+  const passth = ofType('usb', 'gpu', 'pci', 'unix-char', 'unix-block', 'infiniband', 'tpm')
+  const status = (rec?.status || st.status || '').toLowerCase()
+  const running = status === 'running'
+  const ips = []
+  for (const nd of Object.values(st.network || {})) for (const a of (nd.addresses || []))
+    if (a.scope === 'global') ips.push(`${a.address}/${a.netmask}`)
+
+  return (
+    <div className="drawer-wrap" onClick={onClose}>
+      <aside className="drawer" onClick={e => e.stopPropagation()} role="dialog" aria-label={`Instance ${name}`}>
+        <div className="dw-head">
+          <div>
+            <div className="dw-name mono">{name}</div>
+            <div className="dw-sub">{rec?.type === 'virtual-machine' ? 'virtual machine' : 'container'}
+              {rec?.project && rec.project !== 'default' ? ` · ${rec.project}` : ''}
+              {cfg['image.description'] ? ` · ${cfg['image.description']}` : ''}</div>
+          </div>
+          <div className="dw-head-right">
+            <span className={`pill ${variantFor(status)}`}>{rec?.status || st.status || '…'}</span>
+            <button className="icon-btn" onClick={onClose} title="Close">✕</button>
+          </div>
+        </div>
+
+        <div className="dw-actions">
+          <button className="btn-xs" disabled={busy || running} onClick={() => act('start')}>{busy==='start'?'Starting…':'Start'}</button>
+          <button className="btn-xs" disabled={busy || !running} onClick={() => act('restart')}>{busy==='restart'?'Restarting…':'Restart'}</button>
+          <button className="btn-xs danger" disabled={busy || !running} onClick={() => act('stop')}>{busy==='stop'?'Stopping…':'Stop'}</button>
+          <span className="dw-hint">Console &amp; device editing (resize / USB / PCI) land next — P6.2.</span>
+        </div>
+
+        {err && <div className="banner error" style={{margin:'0 0 14px'}}>{err}</div>}
+        {!rec && !err && <div className="loading">Loading…</div>}
+
+        {rec && <div className="dw-body">
+          <section><h4>Compute</h4>
+            <dl className="dw-kv">
+              <dt>vCPUs</dt><dd>{cfg['limits.cpu'] || 'unlimited'}</dd>
+              <dt>Memory limit</dt><dd>{cfg['limits.memory'] || 'unlimited'}</dd>
+              <dt>Mem used</dt><dd className="mono">{st.memory?.usage != null ? fmtBytes(st.memory.usage) : '—'}</dd>
+              <dt>PID</dt><dd className="mono">{st.pid || '—'}</dd>
+              {ips.length > 0 && <><dt>Addresses</dt><dd className="mono">{ips.join(', ')}</dd></>}
+            </dl>
+          </section>
+
+          <section><h4>Storage <span className="cnt">{disks.length}</span></h4>
+            {disks.length === 0 ? <p className="muted sm">No disk devices.</p> :
+              disks.map(([dn, d]) => (
+                <div className="dw-dev" key={dn}>
+                  <span className="dd-name mono">{dn}</span>
+                  <span className="dd-meta">{[d.pool && `pool ${d.pool}`, d.path && `at ${d.path}`, d.size].filter(Boolean).join(' · ')}</span>
+                  {st.disk?.[dn]?.usage != null && <span className="dd-use mono">{fmtBytes(st.disk[dn].usage)}</span>}
+                  <div className="dd-edit">
+                    <input className="dd-in" placeholder={d.size || 'e.g. 16GiB'} value={resizeVals[dn] || ''}
+                           onChange={e => setResizeVals(v => ({ ...v, [dn]: e.target.value }))} />
+                    <button className="btn-xs" disabled={busy || !(resizeVals[dn] || '').trim()} onClick={() => doResize(dn)}>
+                      {busy === 'resize' ? '…' : 'Resize'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+          </section>
+
+          <section><h4>Network <span className="cnt">{nics.length}</span></h4>
+            {nics.length === 0 ? <p className="muted sm">No NICs.</p> :
+              nics.map(([dn, d]) => (
+                <div className="dw-dev" key={dn}>
+                  <span className="dd-name mono">{dn}</span>
+                  <span className="dd-meta">{[d.network || d.parent, d.nictype, d['ipv4.address']].filter(Boolean).join(' · ')}</span>
+                </div>
+              ))}
+          </section>
+
+          <section>
+            <h4>Passthrough <span className="cnt">{passth.length}</span>
+              <button className="h4-add" onClick={adding ? () => setAdding(null) : openAdd}>{adding ? 'Cancel' : '+ Add'}</button>
+            </h4>
+            {adding && (
+              <div className="dw-add">
+                <select value={adding.type} onChange={e => setAdding(a => ({ ...a, type: e.target.value, sel: '' }))}>
+                  <option value="usb">USB</option><option value="gpu">GPU</option><option value="pci">PCI</option>
+                </select>
+                <select value={adding.sel} onChange={e => setAdding(a => ({ ...a, sel: e.target.value }))}>
+                  <option value="">{hw ? 'Select device…' : 'Loading host hardware…'}</option>
+                  {adding.type === 'usb' && (hw?.usb || []).map(u => <option key={u.id + (u.product || '')} value={u.id}>{(u.product || u.vendor || 'USB')} ({u.id})</option>)}
+                  {adding.type === 'gpu' && (hw?.gpu || []).map(g => <option key={g.address} value={g.address}>{(g.product || g.vendor || 'GPU')} · {g.address}</option>)}
+                  {adding.type === 'pci' && (hw?.pci || []).map(p => <option key={p.address} value={p.address}>{(p.product || p.vendor || 'PCI')} · {p.address}</option>)}
+                </select>
+                <input className="dd-in" placeholder="name (optional)" value={adding.name} onChange={e => setAdding(a => ({ ...a, name: e.target.value }))} />
+                <button className="btn-xs" disabled={busy === 'add' || (adding.type !== 'gpu' && !adding.sel)} onClick={addDevice}>{busy === 'add' ? 'Attaching…' : 'Attach'}</button>
+              </div>
+            )}
+            {passth.length === 0 ? <p className="muted sm">No USB / GPU / PCI devices passed through.</p> :
+              passth.map(([dn, d]) => (
+                <div className="dw-dev" key={dn}>
+                  <span className="dd-name mono">{dn}</span>
+                  <span className={`pill ${d.type === 'gpu' ? 'accent' : 'brand'}`}>{d.type}</span>
+                  <span className="dd-meta">{Object.entries(d).filter(([k]) => k !== 'type').map(([k, v]) => `${k}=${v}`).join(' · ')}</span>
+                  <button className="btn-xs danger dd-rm" disabled={busy} onClick={() => removeDevice(dn)}>Remove</button>
+                </div>
+              ))}
+          </section>
+
+          <section><h4>Snapshots <span className="cnt">{snaps?.length ?? '…'}</span></h4>
+            <div className="dw-snap-new">
+              <input className="dd-in" placeholder="snapshot name (optional)" value={snapName}
+                     onChange={e => setSnapName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') createSnap() }} />
+              <button className="btn-xs" disabled={busy === 'snap'} onClick={createSnap}>{busy === 'snap' ? '…' : 'Snapshot now'}</button>
+            </div>
+            {snaps == null ? <p className="muted sm">Loading…</p>
+              : snaps.length === 0 ? <p className="muted sm">No snapshots yet — take one before risky changes.</p>
+              : snaps.map(s => (
+                <div className="dw-dev" key={s.name}>
+                  <span className="dd-name mono">{s.name}</span>
+                  <span className="dd-meta">{[s.created_at && new Date(s.created_at).toLocaleString(), s.stateful && 'stateful', s.size && fmtBytes(s.size)].filter(Boolean).join(' · ')}</span>
+                  <button className="btn-xs" disabled={busy === 'snap'} onClick={() => restoreSnap(s.name)}>Restore</button>
+                  <button className="btn-xs danger dd-rm" disabled={busy === 'snap'} onClick={() => deleteSnap(s.name)}>Delete</button>
+                </div>
+              ))}
+          </section>
+
+          <section>
+            <h4>Console
+              <button className="h4-add" onClick={() => setTermOpen(o => !o)}>{termOpen ? 'Quick command' : 'Open terminal'}</button>
+            </h4>
+            {termOpen ? <TerminalPanel name={name} /> : (
+              <>
+                <div className="dw-cmd">
+                  <input className="dd-in cmd mono" placeholder="uptime · ls / · cat /etc/os-release" value={cmd}
+                         onChange={e => setCmd(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runCmd() }} />
+                  <button className="btn-xs" disabled={cmdBusy || !cmd.trim()} onClick={runCmd}>{cmdBusy ? 'Running…' : 'Run'}</button>
+                </div>
+                {cmdOut && <pre className="dw-raw mono">{(cmdOut.stdout || '') + (cmdOut.stderr ? '\n' + cmdOut.stderr : '')}{cmdOut.exit != null ? `\n[exit ${cmdOut.exit}]` : ''}</pre>}
+              </>
+            )}
+          </section>
+
+          <section>
+            <h4 className="dw-rawtoggle" onClick={() => setShowRaw(s => !s)}>Raw config <span className="cnt">{showRaw ? '−' : '+'}</span></h4>
+            {showRaw && <pre className="dw-raw mono">{cfg.raw || JSON.stringify(cfg, null, 2)}</pre>}
+          </section>
+        </div>}
+      </aside>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Interactive terminal — xterm.js bridged to the Incus exec websocket (SPEC §16.1, P6.2).
+// The WS is Bearer-less (browser can't set headers), so the JWT rides as ?token=.
+// ---------------------------------------------------------------------------
+function TerminalPanel({ name }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    let term, ws, ro, disposed = false
+    const enc = new TextEncoder()
+    ;(async () => {
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import('@xterm/xterm'), import('@xterm/addon-fit'),
+      ])
+      if (disposed || !ref.current) return
+      term = new Terminal({
+        fontSize: 12, cursorBlink: true, convertEol: false,
+        fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+        theme: { background: '#0b0e14', foreground: '#e6eaf2' },
+      })
+      const fit = new FitAddon(); term.loadAddon(fit)
+      term.open(ref.current); try { fit.fit() } catch { /* ignore */ }
+      const u = new URL(rel(`api/incus/instance/${encodeURIComponent(name)}/console`), document.baseURI)
+      u.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      u.search = `?token=${encodeURIComponent(getToken() || '')}&cols=${term.cols}&rows=${term.rows}`
+      ws = new WebSocket(u.toString()); ws.binaryType = 'arraybuffer'
+      ws.onopen = () => { term.focus(); try { fit.fit() } catch { /* ignore */ } }
+      ws.onmessage = (e) => term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data))
+      ws.onclose = () => { if (!disposed) term.write('\r\n\x1b[2m[session closed]\x1b[0m\r\n') }
+      ws.onerror = () => { if (!disposed) term.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n') }
+      // Keystrokes ride as BINARY (stdin); resizes ride as a TEXT control frame.
+      term.onData((d) => { if (ws && ws.readyState === 1) ws.send(enc.encode(d)) })
+      term.onResize(({ cols, rows }) => {
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows }))
+      })
+      // Re-fit (and thus re-send size) whenever the drawer/terminal box changes size.
+      ro = new ResizeObserver(() => { try { fit.fit() } catch { /* ignore */ } })
+      ro.observe(ref.current)
+    })()
+    return () => {
+      disposed = true
+      try { ro && ro.disconnect() } catch { /* */ }
+      try { ws && ws.close() } catch { /* */ }
+      try { term && term.dispose() } catch { /* */ }
+    }
+  }, [name])
+  return <div className="term" ref={ref} />
+}
+
+// ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
 function useTheme() {
@@ -1499,6 +1955,7 @@ const NAV = [
     { id: 'network', label: 'Internal network', ic: '⇄' },
   ]},
   { group: 'Fleet', items: [
+    { id: 'fleet',    label: 'Live',     ic: '◱' },
     { id: 'deploy',   label: 'Deploy',   ic: '＋' },
     { id: 'releases', label: 'Releases', ic: '⤓' },
     { id: 'platform', label: 'Platform', ic: '◉' },
@@ -1596,6 +2053,7 @@ export default function App() {
         <main>
           {tab === 'map'      && <MapTab data={dashboard} lan={lan} onAction={handleAction} onConfigure={setConfigGuest} goTo={setTab} />}
           {tab === 'network'  && <InternalNetworkTab lan={lan} data={dashboard} reloadLan={loadLan} />}
+          {tab === 'fleet'    && <FleetTab />}
           {tab === 'deploy'   && <DeployTab releases={releases} />}
           {tab === 'releases' && <ReleasesTab releases={releases} />}
           {tab === 'platform' && <PlatformTab />}
@@ -1603,7 +2061,9 @@ export default function App() {
       </div>
 
       {showChangePwd && <ChangePasswordModal onClose={() => setShowChangePwd(false)} />}
-      {configGuest   && <GuestConfigDrawer guest={configGuest} onClose={() => setConfigGuest(null)} onRefresh={loadDashboard} />}
+      {configGuest   && (dashboard?.provider === 'incus'
+        ? <InstanceDrawer name={configGuest.hostname} onClose={() => { setConfigGuest(null); loadDashboard() }} />
+        : <GuestConfigDrawer guest={configGuest} onClose={() => setConfigGuest(null)} onRefresh={loadDashboard} />)}
     </>
   )
 }

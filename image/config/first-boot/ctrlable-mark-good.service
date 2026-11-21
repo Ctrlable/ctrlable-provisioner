@@ -1,0 +1,16 @@
+[Unit]
+Description=Mark the current RAUC slot good after a healthy boot
+# Runs on EVERY boot: resets <slot>_TRY=0 / _OK=1 so GRUB stops the retry countdown. If the
+# system never reaches here (wedged boot), the flag stays set and the next boot falls back to
+# the other slot = automatic rollback on a no-IPMI box.
+After=multi-user.target incus.service
+Wants=incus.service
+
+[Service]
+Type=oneshot
+# TODO(health): gate this behind a real readiness probe (e.g. Ctrlable Pro reachable on :8123)
+# instead of merely reaching multi-user.target, so a half-broken update still rolls back.
+ExecStart=/usr/bin/rauc status mark-good booted
+
+[Install]
+WantedBy=multi-user.target

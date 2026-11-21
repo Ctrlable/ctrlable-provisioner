@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodic Ctrlable Pro host VPN self-heal check
+
+[Timer]
+# First check a few minutes after boot (the boot-time enrol has had time to come up), then every
+# 5 min. Randomised a little so a whole fleet doesn't re-enrol in lockstep after a portal migration.
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=60
+Persistent=false
+
+[Install]
+WantedBy=timers.target

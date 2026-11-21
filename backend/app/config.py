@@ -7,11 +7,18 @@ from .manifest import load_all_manifests
 
 
 class Settings(BaseSettings):
+    # Which virtualization backend to drive (see provider.py). "proxmox" today;
+    # "incus" once a box is migrated to plain Debian + Incus (SPEC-incus-migration.md).
+    provider: str = "proxmox"    # proxmox | incus | libvirt
+
     pve_host: str = ""
     pve_token_id: str = ""       # "user@realm!tokenname"
     pve_token_secret: str = ""
     pve_node: str = "pve"
     pve_verify_ssl: bool = False
+
+    # Incus backend: empty remote = the local daemon (the appliance's own Incus).
+    incus_remote: str = ""       # e.g. "prod:" to target a networked Incus remote
 
     # Build plane
     build_key_path: str = "/etc/ctrlable/build_key"   # SSH private key for host trigger
@@ -63,6 +70,11 @@ class Settings(BaseSettings):
         return Path(__file__).parent.parent / "ctrlable.db"
 
     def configured(self) -> bool:
+        # Incus/libvirt drive a local daemon (the host Incus socket / libvirt), so they need no
+        # PVE credentials — "configured" means the provider backend is usable, not that PVE is set.
+        # Any real backend failure surfaces via the dashboard's provider call (try/except there).
+        if (self.provider or "proxmox").lower() in ("incus", "libvirt"):
+            return True
         return bool(self.pve_host and self.pve_token_id and self.pve_token_secret)
 
     def build_configured(self) -> bool:

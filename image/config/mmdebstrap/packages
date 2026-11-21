@@ -1,0 +1,53 @@
+# Packages baked into the Ctrlable Pro HOST image (one per line; # = comment).
+# The host stays LEAN: Incus + btrfs + boot + rauc + ssh + net. Everything HA/Supervisor
+# (docker, network-manager, os-agent, ...) is installed INSIDE the ctrlable-pro container by
+# incus-bootstrap.sh partB — NOT on the host.
+
+# init / base
+systemd-sysv
+udev
+dbus
+ca-certificates
+locales
+
+# kernel + boot + A/B bootloader
+linux-image-amd64
+grub-efi-amd64
+grub-efi-amd64-bin
+efibootmgr
+
+# RAUC (A/B OTA + rollback); grub-editenv ships in grub-common.
+# `rauc` is CLI-only in Debian 13 — the D-Bus service (rauc.service + de.pengutronix.rauc
+# activation) that `rauc status mark-good` and bundle installs go through lives in `rauc-service`.
+# Without it the slot is never marked good (A/B could roll back) and OTA installs fail.
+rauc
+rauc-service
+
+# containers + the data pool
+incus
+btrfs-progs
+dnsmasq-base
+# grow the `data` partition to fill the target disk on first boot (the .img ships data small so the
+# file stays ~650M; on real hardware the rest of the SSD must become usable). growpart relocates the
+# GPT backup header + extends the last partition; gdisk/sgdisk is the backend it prefers + a field tool.
+cloud-guest-utils
+gdisk
+
+# networking
+systemd-resolved
+iproute2
+nftables
+# (networkd is part of systemd; configured in build-rootfs hooks)
+
+# remote access + handy field tools
+wireguard-tools
+nginx-light
+openssh-server
+curl
+jq
+less
+
+# orchestrator (HOST mode): the provisioner runs as a native host service. The venv (FastAPI /
+# uvicorn / deps) is copied in by install-orchestrator-host.sh; the runtime only needs the python3
+# interpreter the venv symlinks to. The container/LXC deployment (build-orchestrator.sh) is separate.
+python3
