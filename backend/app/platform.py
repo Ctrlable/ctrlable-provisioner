@@ -346,28 +346,48 @@ _shell_proc = None
 _shell_last_ws: str = ""
 
 
+_SHELL_LOG = "/tmp/ctrlable-shell-bridge.log"
+
+
 def _maybe_open_shell(ws_url: str) -> None:
     """Spawn the PTY<->websocket bridge for a portal-opened shell session.
-    De-dups on ws_url + a live child so repeated heartbeats are no-ops. The
-    bridge runs under the service venv (sys.executable) so it finds websockets."""
-    global _shell_proc, _shell_last_ws
+    De-dups on ws_url + a live child so repeated heartbeats are no-ops. Records
+    the outcome in _last_cmd_result (which the heartbeat surfaces to the portal)
+    and captures the bridge's own stderr, so a spawn/connect failure is visible
+    without shell access to the orchestrator."""
+    global _shell_proc, _shell_last_ws, _last_cmd_result
     try:
-        alive = _shell_proc is not None and _shell_proc.poll() is None
-        if alive and ws_url == _shell_last_ws:
-            return
-        if alive:
-            try:
-                _shell_proc.terminate()
-            except Exception:  # noqa: BLE001
-                pass
+        if _shell_proc is not None:
+            rc = _shell_proc.poll()
+            if rc is None and ws_url == _shell_last_ws:
+                return  # already bridging this session
+            if rc is not None and rc != 0:
+                tail = ""
+                try:
+                    with open(_SHELL_LOG, "r", errors="replace") as f:
+                        tail = f.read()[-180:].replace("\n", " ").strip()
+                except Exception:  # noqa: BLE001
+                    pass
+                _last_cmd_result = f"shell: bridge exited rc={rc} {tail}".strip()[:250]
         bridge = os.path.join(os.path.dirname(__file__), "shell_bridge.py")
+        if not os.path.exists(bridge):
+            _last_cmd_result = f"shell: bridge file missing at {bridge}"
+            log.warning(_last_cmd_result)
+            return
+        logf = open(_SHELL_LOG, "wb")  # truncate per attempt
         _shell_proc = subprocess.Popen(
             [sys.executable, bridge],
             env={**os.environ, "CTRL_SHELL_WS": ws_url},
+            stdout=logf, stderr=logf,
         )
+        logf.close()  # child keeps its own dup of the fd
         _shell_last_ws = ws_url
+        if not (_last_cmd_result or "").startswith("shell: bridge exited"):
+            _last_cmd_result = (f"shell: bridge spawned pid={_shell_proc.pid} "
+                                f"py={os.path.basename(sys.executable)}")
     except Exception as e:  # noqa: BLE001
-        log.warning("open_shell failed: %s", e)
+        _last_cmd_result = f"shell: spawn error {e}"[:250]
+        log.warning(_last_cmd_result)
 
 
 # Result of the last portal-requested command, reported back on the next
