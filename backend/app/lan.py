@@ -275,6 +275,25 @@ def netmap_active(proxy_subnet: str) -> bool:
     return proxy_subnet in r.stdout
 
 
+def collect_diag() -> str:
+    """Live NAT/tunnel diagnostics for the portal, so support can see the data
+    path without a shell: the ctrlnat table, kernel routes, and WireGuard peers.
+    Bounded in size."""
+    out = []
+    for title, cmd in (
+        ("# nft ip ctrlnat", ["nft", "list", "table", "ip", NFT_TABLE]),
+        ("# ip route",       ["ip", "route"]),
+        ("# wg",             ["wg", "show"]),
+    ):
+        out.append(title)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            out.append((r.stdout or "").strip() or "(none)")
+        except Exception:
+            out.append("(unavailable)")
+    return "\n".join(out)[:6000]
+
+
 # ---------------------------------------------------------------------------
 # LAN scanning
 # ---------------------------------------------------------------------------

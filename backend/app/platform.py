@@ -271,19 +271,26 @@ async def _heartbeat_loop(device_id: str, device_token: str, db: "StateDB") -> N
     from .lan import (
         get_lan_candidates, load_scan_ports, save_scan_ports,
         scan_lan, report_scan, should_scan, mark_scanned,
-        setup_netmap, netmap_active,
+        setup_netmap, netmap_active, collect_diag,
     )
     beat = 0
     while True:
         await asyncio.sleep(60)
         beat += 1
         try:
+            # Report NAT/tunnel diagnostics every ~5 min (keeps most beats small).
+            diag = collect_diag() if beat % 5 == 0 else None
             resp = await asyncio.to_thread(
-                _send_heartbeat, device_id, device_token, get_lan_candidates()
+                _send_heartbeat, device_id, device_token, get_lan_candidates(), diag
             )
             # Update scan port list if portal sent a new one
             if resp.get("scan_ports"):
                 save_scan_ports(resp["scan_ports"])
+
+            # Portal-driven self-update (support / rollout). Checked every ~5 min
+            # (it does a git fetch); only updates when actually behind, then restarts.
+            if resp.get("command") in ("update_agent", "self_update") and beat % 5 == 0:
+                await _maybe_self_update()
 
             # Set up / refresh NETMAP when portal provides proxy_subnet
             proxy_subnet = resp.get("proxy_subnet")
@@ -324,17 +331,61 @@ def _provisioner_version() -> str:
         return "unknown"
 
 
-def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str]) -> dict:
+# Result of the last portal-requested command, reported back on the next
+# heartbeat so support can see what happened (mirrors the ha-addon agent).
+_last_cmd_result: str = ""
+
+
+async def _maybe_self_update() -> None:
+    """Portal-driven self-update: when the portal flags this orchestrator out of
+    date, update to the installed ref and restart — but only if actually behind
+    and no build/deploy is in flight. Mirrors POST /api/system/self-update, and
+    is the orchestrator equivalent of the ha-addon self_update command."""
+    global _last_cmd_result
+    try:
+        from . import selfupdate, build as _build
+        from .config import get_settings
+        if getattr(_build, "_running", None):
+            _last_cmd_result = "self_update: skipped (build in progress)"
+            return
+        try:
+            from .main import _install_record
+            ref = _install_record().get("ref") or "main"
+        except Exception:                           # noqa: BLE001
+            ref = "main"
+        chk = await asyncio.to_thread(selfupdate.check_update, ref)
+        if not chk.get("update_available"):
+            _last_cmd_result = f"self_update: up-to-date (ref={ref})"
+            return
+        log.info("Portal requested self-update: %s behind on %s — updating",
+                 chk.get("behind"), ref)
+        result = await asyncio.to_thread(selfupdate.run_self_update, ref, get_settings())
+        _last_cmd_result = ("self_update: ok, restarting" if result.get("ok")
+                            else f"self_update: failed at {result.get('stage')}")
+    except Exception as e:                          # noqa: BLE001
+        _last_cmd_result = f"self_update: error {e}"[:200]
+        log.warning("self-update failed: %s", e)
+
+
+def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str],
+                    nat_diag: str | None = None) -> dict:
     rx, tx = _wg_stats()
+    ver = _provisioner_version()
+    payload = {
+        "rx_bytes": rx,
+        "tx_bytes": tx,
+        "agent_version": "prov/1.0",
+        "provisioner_version": ver,
+        "addon_version": ver,          # surface the version in the portal's version field
+        "lan_candidates": lan_candidates,
+    }
+    if nat_diag:
+        payload["nat_diag"] = nat_diag
+    if _last_cmd_result:
+        payload["command_result"] = _last_cmd_result
     return _portal_post(
         f"/api/v1/devices/{device_id}/heartbeat",
-        {
-            "rx_bytes": rx,
-            "tx_bytes": tx,
-            "agent_version": "prov/1.0",
-            "provisioner_version": _provisioner_version(),
-            "lan_candidates": lan_candidates,
-        },
+        payload,
         token=device_token,
     )
 
