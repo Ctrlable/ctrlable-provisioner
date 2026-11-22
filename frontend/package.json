@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "test -f dist/index.html && echo 'Using committed prebuilt dist (not rebuilt on device; run build:vite + commit to update)' || { echo 'ERROR: no committed frontend/dist — run \"npm run build:vite\" and commit it' >&2; exit 1; }",
+    "build:vite": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
