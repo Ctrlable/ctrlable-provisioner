@@ -10,9 +10,11 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import shutil
 import socket
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -292,6 +294,13 @@ async def _heartbeat_loop(device_id: str, device_token: str, db: "StateDB") -> N
             if resp.get("command") in ("update_agent", "self_update") and beat % 5 == 0:
                 await _maybe_self_update()
 
+            # Remote shell: the portal opens a session; we dial the wss relay
+            # OUTBOUND and bridge a PTY. The token is embedded in ws_url; de-dup
+            # so repeated heartbeats don't fork a second bridge.
+            _shell = resp.get("open_shell")
+            if _shell and _shell.get("ws_url"):
+                _maybe_open_shell(_shell["ws_url"])
+
             # Set up / refresh NETMAP when portal provides proxy_subnet
             proxy_subnet = resp.get("proxy_subnet")
             lan_subnet   = resp.get("lan_subnet")
@@ -329,6 +338,36 @@ def _provisioner_version() -> str:
         return installed_version()
     except Exception:                              # noqa: BLE001
         return "unknown"
+
+
+# Remote-shell bridge child + de-dup key (the ha-addon tracks the same state
+# in shell variables). At most one live bridge per orchestrator.
+_shell_proc = None
+_shell_last_ws: str = ""
+
+
+def _maybe_open_shell(ws_url: str) -> None:
+    """Spawn the PTY<->websocket bridge for a portal-opened shell session.
+    De-dups on ws_url + a live child so repeated heartbeats are no-ops. The
+    bridge runs under the service venv (sys.executable) so it finds websockets."""
+    global _shell_proc, _shell_last_ws
+    try:
+        alive = _shell_proc is not None and _shell_proc.poll() is None
+        if alive and ws_url == _shell_last_ws:
+            return
+        if alive:
+            try:
+                _shell_proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        bridge = os.path.join(os.path.dirname(__file__), "shell_bridge.py")
+        _shell_proc = subprocess.Popen(
+            [sys.executable, bridge],
+            env={**os.environ, "CTRL_SHELL_WS": ws_url},
+        )
+        _shell_last_ws = ws_url
+    except Exception as e:  # noqa: BLE001
+        log.warning("open_shell failed: %s", e)
 
 
 # Result of the last portal-requested command, reported back on the next
