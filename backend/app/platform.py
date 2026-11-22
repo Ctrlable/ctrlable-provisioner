@@ -334,9 +334,27 @@ def _send_heartbeat(device_id: str, device_token: str, lan_candidates: list[str]
             "agent_version": "prov/1.0",
             "provisioner_version": _provisioner_version(),
             "lan_candidates": lan_candidates,
+            "web_uis": _probe_web_uis(),
         },
         token=device_token,
     )
+
+
+def _probe_web_uis() -> list[dict]:
+    """Report which web UIs this orchestrator exposes, for the portal shortcut.
+
+    The manager (this app) is always on :8000. Proxmox VE serves its console on
+    :8006 (TLS); Cockpit, when installed, on :9090. We only list a probed port
+    if the socket accepts, so the list doubles as a reachability check.
+    """
+    uis = [{"port": 8000, "scheme": "http"}]
+    for port, scheme in ((8006, "https"), (9090, "https")):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1.5):
+                uis.append({"port": port, "scheme": scheme})
+        except OSError:
+            pass
+    return uis
 
 
 def _wg_stats() -> tuple[int, int]:
