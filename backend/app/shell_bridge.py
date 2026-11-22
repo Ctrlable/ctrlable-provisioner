@@ -7,6 +7,13 @@ binary frames are PTY data, text frames are control (resize). Hard 30-min cap.
 The session's auth token is carried in the ws_url query string, so this process
 takes only CTRL_SHELL_WS from the environment.
 """
+# Spawned as `python .../app/shell_bridge.py`, which puts this file's own
+# directory first on sys.path. That directory holds app/platform.py, which
+# would shadow the stdlib `platform` (websockets does `import platform` ->
+# platform.system()). Drop our own dir from sys.path so stdlib wins.
+import os as _os, sys as _sys
+_sys.path[:] = [_p for _p in _sys.path
+                if _os.path.abspath(_p or ".") != _os.path.dirname(_os.path.abspath(__file__))]
 import asyncio
 import fcntl
 import json
