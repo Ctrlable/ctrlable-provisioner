@@ -361,14 +361,16 @@ def _maybe_open_shell(ws_url: str) -> None:
             rc = _shell_proc.poll()
             if rc is None and ws_url == _shell_last_ws:
                 return  # already bridging this session
-            if rc is not None and rc != 0:
+            if rc is not None and ws_url != _shell_last_ws:
+                pass  # new session; fall through to spawn
+            if rc is not None:
                 tail = ""
                 try:
                     with open(_SHELL_LOG, "r", errors="replace") as f:
-                        tail = f.read()[-180:].replace("\n", " ").strip()
+                        tail = f.read()[-200:].replace("\n", " ").strip()
                 except Exception:  # noqa: BLE001
                     pass
-                _last_cmd_result = f"shell: bridge exited rc={rc} {tail}".strip()[:250]
+                _last_cmd_result = f"shell: bridge exited rc={rc} :: {tail}".strip()[:250]
         bridge = os.path.join(os.path.dirname(__file__), "shell_bridge.py")
         if not os.path.exists(bridge):
             _last_cmd_result = f"shell: bridge file missing at {bridge}"
