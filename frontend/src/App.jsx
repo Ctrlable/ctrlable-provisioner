@@ -597,7 +597,7 @@ function MapTab({ data, lan, onAction, onConfigure, goTo }) {
                   <span className="gi">⌂</span>
                   <div>
                     <div className="nm">{brain ? (brain.hostname || 'Ctrlable Pro') : 'Ctrlable Pro'}</div>
-                    <div className="tag2">Home Assistant brain{brain ? ` · ${brain.kind?.toUpperCase()} ${brain.vmid}` : ' · not deployed'}</div>
+                    <div className="tag2">Ctrlable Pro brain{brain ? ` · ${brain.kind?.toUpperCase()} ${brain.vmid}` : ' · not deployed'}</div>
                   </div>
                   {brain && <span style={{marginLeft:'auto'}}><Pill status={brain.status} /></span>}
                 </div>
