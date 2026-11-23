@@ -15,6 +15,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -32,6 +33,7 @@ ENROLL_TOKEN_FILE = AGENT_CONF_DIR / "enroll.token"
 
 _heartbeat_task: asyncio.Task | None = None
 _auto_enroll_task: asyncio.Task | None = None
+_last_self_update_mono: float = 0.0  # monotonic clock of the last immediate self-update attempt
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +293,13 @@ async def _heartbeat_loop(device_id: str, device_token: str, db: "StateDB") -> N
 
             # Portal-driven self-update (support / rollout). Checked every ~5 min
             # (it does a git fetch); only updates when actually behind, then restarts.
-            if resp.get("command") in ("update_agent", "self_update") and beat % 5 == 0:
+            # An operator-queued update carries update_ref: act immediately, to
+            # that ref. Otherwise auto-track the installed ref, throttled to ~5 min.
+            _cmd = resp.get("command")
+            _uref = resp.get("update_ref")
+            if _cmd == "self_update" and _uref:
+                await _maybe_self_update(ref=_uref, immediate=True)
+            elif _cmd in ("update_agent", "self_update") and beat % 5 == 0:
                 await _maybe_self_update()
 
             # Remote shell: the portal opens a session; we dial the wss relay
@@ -395,31 +403,40 @@ def _maybe_open_shell(ws_url: str) -> None:
 _last_cmd_result: str = ""
 
 
-async def _maybe_self_update() -> None:
-    """Portal-driven self-update: when the portal flags this orchestrator out of
-    date, update to the installed ref and restart — but only if actually behind
-    and no build/deploy is in flight. Mirrors POST /api/system/self-update, and
-    is the orchestrator equivalent of the ha-addon self_update command."""
-    global _last_cmd_result
+async def _maybe_self_update(ref: str | None = None, immediate: bool = False) -> None:
+    """Portal-driven self-update. Background mode (immediate=False) auto-tracks
+    the installed ref, ~5-min throttled, only when behind. Immediate mode is an
+    operator-queued update to a specific ref (the portal sends it every beat
+    while queued, so dedupe to avoid re-checking each beat). Either way, only
+    updates when actually behind and no build/deploy is in flight, then restarts.
+    Mirrors POST /api/system/self-update; the orchestrator equivalent of the
+    ha-addon self_update command."""
+    global _last_cmd_result, _last_self_update_mono
     try:
         from . import selfupdate, build as _build
         from .config import get_settings
+        if immediate and (time.monotonic() - _last_self_update_mono) < 90:
+            return                                  # deduped: the portal re-sends every beat while queued
+        if immediate:
+            _last_self_update_mono = time.monotonic()
         if getattr(_build, "_running", None):
             _last_cmd_result = "self_update: skipped (build in progress)"
             return
-        try:
-            from .main import _install_record
-            ref = _install_record().get("ref") or "main"
-        except Exception:                           # noqa: BLE001
-            ref = "main"
-        chk = await asyncio.to_thread(selfupdate.check_update, ref)
+        target = ref
+        if not target:
+            try:
+                from .main import _install_record
+                target = _install_record().get("ref") or "main"
+            except Exception:                       # noqa: BLE001
+                target = "main"
+        chk = await asyncio.to_thread(selfupdate.check_update, target)
         if not chk.get("update_available"):
-            _last_cmd_result = f"self_update: up-to-date (ref={ref})"
+            _last_cmd_result = f"self_update: up-to-date (ref={target})"
             return
-        log.info("Portal requested self-update: %s behind on %s — updating",
-                 chk.get("behind"), ref)
-        result = await asyncio.to_thread(selfupdate.run_self_update, ref, get_settings())
-        _last_cmd_result = ("self_update: ok, restarting" if result.get("ok")
+        log.info("Self-update (%s): %s behind on %s — updating",
+                 "operator" if immediate else "auto", chk.get("behind"), target)
+        result = await asyncio.to_thread(selfupdate.run_self_update, target, get_settings())
+        _last_cmd_result = (f"self_update: ok, restarting (ref={target})" if result.get("ok")
                             else f"self_update: failed at {result.get('stage')}")
     except Exception as e:                          # noqa: BLE001
         _last_cmd_result = f"self_update: error {e}"[:200]
